@@ -303,6 +303,9 @@ export function mergeRepeats(findings: Finding[]): Finding[] {
     if (g) g.push(f)
     else groups.set(key, [f])
   }
+  // A merged comment replaces its members' ids: findings folded into a member (`groupedInto`)
+  // follow it to the merged comment.
+  const renamed = new Map<string, string>()
   for (const [key, g] of groups) {
     if (g.length === 1) {
       out.push(g[0])
@@ -310,13 +313,24 @@ export function mergeRepeats(findings: Finding[]): Finding[] {
     }
     g.sort((a, b) => tieKey(a).localeCompare(tieKey(b)))
     const [first, ...rest] = g
+    const id = "f_" + createHash("sha256").update(`merged ${key}`).digest("hex").slice(0, 16)
+    for (const m of g) renamed.set(m.id, id)
+    // Folded only when every member is folded into the same lead: a distinct finding merged in
+    // must stay visible on its own.
+    const { groupedInto: _g, ...head } = first
+    const shared = g.every((m) => m.groupedInto && m.groupedInto === first.groupedInto) ? first.groupedInto : undefined
     out.push({
-      ...first,
+      ...head,
+      ...(shared ? { groupedInto: shared } : {}),
       // Keyed by the group, not by its first instance: fixing that instance must not re-post the comment.
-      id: "f_" + createHash("sha256").update(`merged ${key}`).digest("hex").slice(0, 16),
+      id,
       title: `${first.title} (+${rest.length} more)`,
       body: `${first.body}\n\nSame rule, also here:\n${rest.map((f) => `- ${repeatLabel(f, first)}`).join("\n")}`,
     })
   }
-  return out
+  if (!renamed.size) return out
+  return out.map((f) => {
+    const lead = f.groupedInto && renamed.get(f.groupedInto)
+    return lead && lead !== f.id ? { ...f, groupedInto: lead } : f
+  })
 }

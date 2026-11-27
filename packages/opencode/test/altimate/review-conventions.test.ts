@@ -932,3 +932,73 @@ describe("convention evidence for the verifier and the multi-project merge", () 
     expect(merged.ai?.conventions?.map((c) => c.path)).toEqual(["CLAUDE.md", "a/CLAUDE.md", "b/CLAUDE.md"])
   })
 })
+
+describe("convention grouping, round 2b", () => {
+  const conv: Convention[] = [{ path: "models/CLAUDE.md", source: "claude_md", scope: "models", text: "Every model has a description." }]
+  const mk = (file: string, line: number, body = "Per models/CLAUDE.md.", title = "Missing description") =>
+    makeFinding({
+      severity: "warning",
+      category: "sql_quality",
+      title,
+      body,
+      file,
+      model: file.split("/").pop()!.replace(/\.\w+$/, ""),
+      startLine: line,
+      endLine: line,
+      confidence: "high",
+      evidence: { tool: "ai-review", result: {} },
+      ruleKey: `ai:sql_quality:${title}:${line}`,
+      rule: "ai-review:sql-quality",
+    })
+  const envelopeOf = (findings: ReturnType<typeof mk>[]) =>
+    VerdictEnvelope.parse({
+      version: "1",
+      verdict: "COMMENT",
+      idealVerdict: "COMMENT",
+      mode: "comment",
+      tier: "full",
+      rubricVersion: "test",
+      engine: {},
+      generatedAt: "2026-11-27T00:00:00Z",
+      summary: { critical: 0, warning: findings.length, suggestion: 0, degraded: false },
+      findings: findings.map((x) => ({ ...x, tier: "inline" })),
+    })
+
+  test("a lead body over the clamp still lists the folded files in its comment", async () => {
+    const { inlineComments, BODY_MAX_CHARS } = await import("../../src/altimate/review/format")
+    const long = "Per models/CLAUDE.md. " + "x".repeat(BODY_MAX_CHARS + 100)
+    const grouped = groupConventionFindings([mk("models/a.sql", 1, long), mk("models/b.sql", 1)], conv)
+    const { comments } = inlineComments(envelopeOf(grouped))
+    expect(comments).toHaveLength(1)
+    expect(comments[0].body).toContain("The same applies to: `models/b.sql`.")
+  })
+
+  test("mergeRepeats keeps groupedInto only when every member shares it", async () => {
+    const { mergeRepeats } = await import("../../src/altimate/review/finding")
+    const lead = mk("models/a.sql", 1)
+    const folded = { ...mk("models/b.yml", 3, "Per models/CLAUDE.md.", "Column undocumented"), groupedInto: lead.id }
+    const distinct = mk("models/b.yml", 9, "Another column.", "Column undocumented")
+    const out = mergeRepeats([lead, folded, distinct])
+    const merged = out.find((f) => f.file === "models/b.yml")!
+    expect(merged.title).toContain("(+1 more)")
+    expect(merged.groupedInto).toBeUndefined()
+  })
+
+  test("a lead merged with a sibling: folded findings follow it to the merged comment", async () => {
+    const { mergeRepeats } = await import("../../src/altimate/review/finding")
+    const lead = mk("models/a.sql", 1)
+    const sibling = mk("models/a.sql", 5)
+    const folded = { ...mk("models/b.sql", 1), groupedInto: lead.id }
+    const out = mergeRepeats([lead, sibling, folded])
+    const merged = out.find((f) => f.file === "models/a.sql")!
+    expect(merged.id).not.toBe(lead.id)
+    expect(out.find((f) => f.file === "models/b.sql")!.groupedInto).toBe(merged.id)
+  })
+
+  test("replay strips the folded-files line even when text follows it", () => {
+    const { replayFindings } = require("../../src/altimate/review/ai-replay")
+    const f = { ...mk("models/a.sql", 1, "Per models/CLAUDE.md.\n\nThe same applies to: `models/b.sql`.\n\nSame rule, also here:\n- x (line 5)") }
+    const lane = replayFindings({ findings: [f], ai: { state: "ok", calls: 1 } })
+    expect(lane.findings[0].body).not.toContain("The same applies to")
+  })
+})

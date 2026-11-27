@@ -515,6 +515,14 @@ export function citedConvention(f: Pick<Finding, "title" | "body">, paths: strin
   return paths.filter((p) => text.includes(p)).sort((a, b) => b.length - a.length)[0]
 }
 
+/** The line a lead's body gains for the files folded into it. */
+export function sameAppliesLine(files: string[]): string {
+  return `The same applies to: ${files.map((p) => `\`${p}\``).join(", ")}.`
+}
+
+/** That line wherever it sits in a body (later text, such as a merged repeat's list, may follow it). */
+export const SAME_APPLIES_RE = /\n\nThe same applies to: [^\n]*\.(?=\n|$)/
+
 /** A finding's title without the names of its own file, so one issue on several files reads the same. */
 function issueKey(f: Pick<Finding, "title" | "file" | "model">): string {
   const base = f.file.split("/").pop() ?? f.file
@@ -567,7 +575,7 @@ export function groupConventionFindings(findings: Finding[], conventions: Conven
       if (findings[i].file !== findings[lead].file && !folded.has(findings[i].file)) folded.set(findings[i].file, i)
     replace.set(lead, {
       ...findings[lead],
-      body: `${findings[lead].body}\n\nThe same applies to: ${[...folded.keys()].map((p) => `\`${p}\``).join(", ")}.`,
+      body: `${findings[lead].body}\n\n${sameAppliesLine([...folded.keys()])}`,
     })
     for (const i of folded.values()) replace.set(i, { ...findings[i], groupedInto: findings[lead].id })
   }

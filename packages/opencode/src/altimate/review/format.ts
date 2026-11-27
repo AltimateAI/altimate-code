@@ -1,5 +1,6 @@
 import { type Finding, type Severity, type Confidence, SEVERITY_ORDER, blankNames, groupKeyTitle, verifierDemoted } from "./finding"
 import { type VerdictEnvelope, type PostingPolicy, DEFAULT_POSTING_POLICY, isOutsideProjectReason } from "./verdict"
+import { SAME_APPLIES_RE, sameAppliesLine } from "./conventions"
 
 /**
  * Render a verdict envelope for humans (PR summary markdown) and for the VCS
@@ -501,6 +502,7 @@ export function inlineComments(
 ): { comments: InlineComment[]; deferred: Finding[] } {
   const posting = postingPolicy(env)
   const collapsed = collapsedFindings(env, alreadyPosted, commentable)
+  const byId = new Map(env.findings.map((f) => [f.id, f]))
   const foldedInto = new Map<string, string[]>()
   for (const f of env.findings) if (collapsed.has(f.id)) foldedInto.set(f.groupedInto!, [...(foldedInto.get(f.groupedInto!) ?? []), f.id])
   const fresh = env.findings
@@ -515,7 +517,11 @@ export function inlineComments(
   const comments = fresh.slice(0, posting.inlineBudget).map((f): InlineComment => {
     const parts = [`${SEVERITY_EMOJI[f.severity]} **${f.title}**`]
     if (f.evidenceLine) parts.push(evidenceText(f))
-    parts.push(clampBody(f.body))
+    // A lead's list of folded files is its own part, after the clamp: a long body must not cut it
+    // while the folded findings' markers below count them as posted.
+    const folded = foldedInto.get(f.id) ?? []
+    parts.push(clampBody(folded.length ? f.body.replace(SAME_APPLIES_RE, "") : f.body))
+    if (folded.length) parts.push(sameAppliesLine(folded.map((id) => byId.get(id)!.file)))
     const s = f.suggestion
     if (s) parts.push(suggestionBlock(s.replacement))
     parts.push(findingMarker(f.id))

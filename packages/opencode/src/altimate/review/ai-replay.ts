@@ -8,6 +8,7 @@
 // again. Ids are the stored ones; benchmark labels are keyed by them.
 // Fidelity is approximate: discarded findings come back with bodies clamped to
 // 600 characters, and kept ones after the orchestrator's anchoring/cleaning.
+import { SAME_APPLIES_RE } from "./conventions"
 import { readFile } from "node:fs/promises"
 import z from "zod"
 import { Provider } from "@/provider/provider"
@@ -153,7 +154,7 @@ export function replayFindings(raw: unknown): ReplayedLane {
 function unverify(f: Finding): Finding {
   const { tier: _tier, origin: _origin, preExisting: _pre, evidenceLine: _line, groupedInto: _grouped, ...rest } = f
   // Convention grouping runs again on replay (after the verifier): drop the lead's list of the other files.
-  let body = f.body.replace(/\n\nThe same applies to: [^\n]*\.$/, "")
+  let body = f.body.replace(SAME_APPLIES_RE, "")
   const prior = f.evidence?.result
   if (!prior || typeof prior !== "object") return { ...rest, body }
   const { verification, ...result } = prior as Record<string, unknown> & {
