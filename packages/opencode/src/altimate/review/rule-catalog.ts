@@ -309,6 +309,10 @@ const EXPR_KEYWORDS = new Set(
     " ",
   ),
 )
+// A typed literal (`date '2024-01-01'`, `timestamp '…'`, `interval '1 day'`): its
+// type word is part of the constant, not a column.
+const TYPED_LITERAL =
+  /(?<![\w$."`])(?:date|time|timestamp(?:_[nlt]tz|tz)?|datetime|interval)\s*'(?:[^']|'')*'/gi
 const COLUMN_TOKEN = new RegExp(String.raw`(?<![\w$."\x60])${COLUMN_REF}(?![\w$"\x60])(\s*\()?`, "gi")
 
 /** The column references an expression reads, from masked SQL: function names,
@@ -317,7 +321,7 @@ const COLUMN_TOKEN = new RegExp(String.raw`(?<![\w$."\x60])${COLUMN_REF}(?![\w$"
  *  call's `)`) are skipped. A word that is only sometimes a keyword (`first`,
  *  `time`, `row`) counts as a column unless it is in its keyword phrase. */
 function columnReads(expr: string): Array<{ qualifier?: string; column: string }> {
-  let e = expr.replace(/'(?:[^']|'')*'/g, " ")
+  let e = expr.replace(TYPED_LITERAL, " ").replace(/'(?:[^']|'')*'/g, " ")
   // `f(…) over (…)` / `filter (…)` / `within group (…)`: cut each clause to its
   // `)`. `filter(arr, x -> …)` without a call before it is an array function.
   const clause = /\)\s*(?:over|filter|within\s+group)\s*\(/i
@@ -358,6 +362,7 @@ function itemAlias(item: string): string | undefined {
 /** Only literals, numbers, `null`/`true`/`false` and casts of them. */
 function isConstant(expr: string): boolean {
   const rest = expr
+    .replace(TYPED_LITERAL, " ")
     .replace(/'(?:[^']|'')*'/g, " ")
     .replace(/::\s*\w+(?:\s*\([\d\s,]*\))?/g, " ")
     .replace(/\bas\s+\w+(?:\s+\w+)*?(?:\s*\([\d\s,]*\))?\s*(?=\))/gi, " ")

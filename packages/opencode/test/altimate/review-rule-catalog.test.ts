@@ -291,6 +291,23 @@ describe("rawColumnExposures", () => {
     // `group by` is still a clause.
     expect([...finalOutputs("select c.email from customers c group  by c.email").names]).toEqual(["email"])
   })
+  test("typed literals are constants and read no column", () => {
+    const sql = [
+      "select date '2024-01-01' as dob,",
+      "  timestamp '2024-01-01 00:00:00' as signup_at,",
+      "  interval '1 day' as gap,",
+      "  date_trunc('day', c.signup_date) as d,",
+      "  concat(time, ' ', zone) as t",
+      "from customers c",
+    ].join("\n")
+    const out = finalOutputs(sql)
+    expect([...out.reads.get("dob")!]).toEqual([])
+    expect([...out.reads.get("signup_at")!]).toEqual([])
+    expect([...out.reads.get("gap")!]).toEqual([])
+    expect([...out.reads.get("d")!]).toEqual(["customers.signup_date"])
+    expect([...out.reads.get("t")!].sort()).toEqual(["customers.time", "customers.zone"])
+    expect(selectItems(sql).filter((i) => i.constant).map((i) => i.name)).toEqual(["dob", "signup_at", "gap"])
+  })
   test("ignores commas and keywords inside literals and comments", () => {
     const sql = "select ssn as a, -- , email as a\n  'x, from y' as b, email as c from t"
     expect(asObject(rawColumnExposures(sql))).toEqual({ a: ["t.ssn"], c: ["t.email"] })
