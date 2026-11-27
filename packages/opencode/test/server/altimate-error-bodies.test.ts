@@ -2,9 +2,9 @@
 //
 // What the server's catch-all error handlers send back: never an error's text, stack or file paths, only a fixed
 // message and a ref (the error is logged in full under that ref). A remote config that can't be fetched answers 502
-// with its name and status. Covers server.ts's handler through the full app, middleware.ts's handler directly, and
-// the shared helpers.
-import { afterEach, describe, expect, test } from "bun:test"
+// with its name and status. Covers server.ts's handler, the /api (HttpApi) error boundary and prompt_async's error
+// event through the full app, middleware.ts's handler directly, and the shared helpers.
+import { afterEach, describe, expect, spyOn, test } from "bun:test"
 import path from "path"
 import { unlink } from "fs/promises"
 import { Hono } from "hono"
@@ -198,15 +198,21 @@ describe("full server, remote config unavailable", () => {
     })
   })
 
-  test("an /api route sends no stack either (an empty 500: the instance fails to load before any handler runs)", async () => {
+  test("a forwarded HttpApi route answers 502 too, as the Hono routes do", async () => {
     const remote = Bun.serve({ port: 0, fetch: () => new Response("upstream exploded", { status: 500 }) })
     servers.push(remote)
     await withWellKnown(remote.url.origin)
     await using dir = await tmpdir({ git: true })
-    const response = await Server.Default().request("/api/config", { headers: { "x-opencode-directory": dir.path } })
+    const response = await Server.Default().request("/experimental/workspace", {
+      headers: { "x-opencode-directory": dir.path },
+    })
     const text = await response.text()
-    expect(response.status).toBe(500)
-    expect(text).toBe("")
+    expect(response.status).toBe(502)
+    expect(text).not.toMatch(STACKISH)
+    expect(JSON.parse(text)).toEqual({
+      name: "ConfigRemoteUnavailableError",
+      data: { remote: `${remote.url.origin}/.well-known/opencode`, status: 500, reason: "HTTP 500" },
+    })
   })
 
   test("a failing remote config URL is named by its template, never with the token filled in", async () => {
@@ -251,4 +257,103 @@ describe("full server, remote config unavailable", () => {
       data: { remote: `${origin}/.well-known/opencode`, reason: "TransportError" },
     })
   })
+})
+
+describe("full server, HttpApi error boundary", () => {
+  afterEach(async () => {
+    await disposeAllInstances()
+  })
+
+  // Everything the process prints to the console or its standard streams while `run` runs.
+  async function printedDuring<T>(run: () => T | Promise<T>) {
+    const printed: string[] = []
+    const record = (...args: unknown[]) => void printed.push(args.map(String).join(" "))
+    const spies = [
+      spyOn(console, "log").mockImplementation(record),
+      spyOn(console, "error").mockImplementation(record),
+      spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => (record(chunk), true)),
+      spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => (record(chunk), true)),
+    ]
+    try {
+      return { result: await run(), printed: printed.join("\n") }
+    } finally {
+      for (const spy of spies) spy.mockRestore()
+    }
+  }
+
+  test("an /api path no route serves answers the fixed message and a ref, recorded only in opencode.log", async () => {
+    // /api/config is not an /api route: it falls through to the web UI proxy, whose fetch fails.
+    await using dir = await tmpdir({ git: true })
+    const { result: response, printed } = await printedDuring(() =>
+      Server.Default().request("/api/config", { headers: { "x-opencode-directory": dir.path } }),
+    )
+    const text = await response.text()
+    expect(response.status).toBe(500)
+    expect(text).not.toMatch(STACKISH)
+    const body = JSON.parse(text)
+    expect(body).toMatchObject({ name: "UnknownError", data: { message: UNEXPECTED } })
+    expect(body.data.ref).toMatch(/^err_[0-9a-f-]{8}$/)
+    const logged = await Bun.file(path.join(Global.Path.log, "opencode.log")).text()
+    const line = logged.split("\n").find((entry) => entry.includes(`ref=${body.data.ref}`))
+    expect(line).toContain("level=ERROR")
+    expect(line).toContain("service=httpapi")
+    expect(printed).not.toContain(body.data.ref)
+  })
+
+  test("a declared HttpApi error keeps its own status and body", async () => {
+    await using dir = await tmpdir({ git: true })
+    const response = await Server.Default().request("/api/session/ses_nope", {
+      headers: { "x-opencode-directory": dir.path },
+    })
+    expect(response.status).toBe(404)
+    expect(await response.json()).toMatchObject({ _tag: "SessionNotFoundError", sessionID: "ses_nope" })
+  })
+})
+
+describe("full server, prompt_async", () => {
+  afterEach(async () => {
+    await disposeAllInstances()
+  })
+
+  // Reads the server's event stream until a session.error event for the session arrives.
+  async function sessionError(events: Response, sessionID: string, timeoutMs = 15_000) {
+    const reader = events.body!.getReader()
+    const decoder = new TextDecoder()
+    const timeout = setTimeout(() => reader.cancel(), timeoutMs)
+    let buffered = ""
+    try {
+      while (true) {
+        const { value, done } = await reader.read()
+        if (done) return undefined
+        buffered += decoder.decode(value, { stream: true })
+        for (const line of buffered.split("\n")) {
+          if (!line.startsWith("data: ")) continue
+          const event = JSON.parse(line.slice("data: ".length))
+          if (event.type === "session.error" && event.properties.sessionID === sessionID) return event.properties
+        }
+        buffered = buffered.slice(buffered.lastIndexOf("\n") + 1)
+      }
+    } finally {
+      clearTimeout(timeout)
+      await reader.cancel().catch(() => undefined)
+    }
+  }
+
+  test("a prompt that fails publishes its NamedError's text, not its name", async () => {
+    await using dir = await tmpdir({ git: true })
+    const app = Server.Default()
+    const headers = { "x-opencode-directory": dir.path, "content-type": "application/json" }
+    const session = await (await app.request("/session", { method: "POST", headers, body: "{}" })).json()
+    const events = await app.request("/event", { headers })
+    const response = await app.request(`/session/${session.id}/prompt_async`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ agent: "no-such-agent", parts: [{ type: "text", text: "hi" }] }),
+    })
+    expect(response.status).toBe(204)
+    const error = await sessionError(events, session.id)
+    expect(error?.error.name).toBe("UnknownError")
+    expect(error?.error.data.message).toStartWith('Agent not found: "no-such-agent".')
+    expect(error?.error.data.message).not.toMatch(STACKISH)
+  }, 30_000)
 })

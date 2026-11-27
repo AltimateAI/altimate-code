@@ -20,6 +20,9 @@ import { Log } from "../../util/log"
 // altimate_change start — client trace propagation
 import { TraceContext } from "@/altimate/observability/trace-context"
 // altimate_change end
+// altimate_change start — client-safe error messages
+import { clientMessage } from "@/altimate/server/error-response"
+// altimate_change end
 // altimate_change start — run-scoped request interruption and effort overrides
 import { withBudgetControl } from "@/altimate/session/run-budget-control"
 import { RunBudget } from "@/altimate/run-budget"
@@ -996,7 +999,10 @@ export const SessionRoutes = lazy(() =>
             log.error("prompt_async failed", { sessionID, error: err })
             Bus.publish(Session.Event.Error, {
               sessionID,
-              error: new NamedError.Unknown({ message: err instanceof Error ? err.message : String(err) }).toObject(),
+              // altimate_change start — as the HttpApi handler does: a NamedError's text from data.message (its own
+              // message is only its name), and no stack frames
+              error: new NamedError.Unknown({ message: clientMessage(err) }).toObject(),
+              // altimate_change end
             })
           })
         })
