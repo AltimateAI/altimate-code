@@ -275,7 +275,7 @@ export function mergeProjectEnvelopes(runs: ProjectRun[], coveredProjects?: stri
       ? classified.reduce((a, b) => (TIER_RANK[b!] > TIER_RANK[a!] ? b : a))
       : undefined,
     findings,
-    summary: summarize(findings, envs.some((e) => e.summary.degraded)),
+    summary: mergedSummary(findings, envs),
     engine: first.engine,
     manifestHash: shared(envs.map((e) => e.manifestHash)),
     staleManifest: envs.some((e) => e.staleManifest) ? true : undefined,
@@ -307,6 +307,18 @@ export function mergeProjectEnvelopes(runs: ProjectRun[], coveredProjects?: stri
     generatedAt: first.generatedAt,
   }
   return signEnvelope(VerdictEnvelope.parse(merged))
+}
+
+/** The merged tally: the merged (deduplicated) findings, plus what each project's tally counts
+ *  beyond its own posted findings (withheld rule findings, the instances of repeat-merged comments),
+ *  so the headline counts what the verdict counts. */
+function mergedSummary(findings: VerdictEnvelope["findings"], envs: VerdictEnvelope[]): VerdictEnvelope["summary"] {
+  const out = summarize(findings, envs.some((e) => e.summary.degraded))
+  for (const e of envs) {
+    const posted = summarize(e.findings, false)
+    for (const sev of ["critical", "warning", "suggestion"] as const) out[sev] += Math.max(0, e.summary[sev] - posted[sev])
+  }
+  return out
 }
 
 /** Rule-noise counts summed over the projects (each present only when some project has it), and

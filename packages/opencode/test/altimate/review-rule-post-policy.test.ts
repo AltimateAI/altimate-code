@@ -603,6 +603,14 @@ describe("round 4: withheld findings in the comment and the merge", () => {
     expect(merged.idealVerdict).toBe("REQUEST_CHANGES")
     expect(merged.withheld?.map((x) => x.id).sort()).toEqual(a.withheld!.map((x) => x.id).sort())
     expect(renderSummary(merged, { maxChars: Infinity })).toContain("### Withheld rule findings that count toward this verdict")
+    // The merged tally counts what each project's verdict counted, withheld instances included;
+    // a finding both envelopes carry (same id, here the scripted AI finding) counts once.
+    const bIds = new Set(b.findings.map((f) => f.id))
+    for (const sev of ["critical", "warning", "suggestion"] as const) {
+      const shared = a.findings.filter((f) => f.severity === sev && bIds.has(f.id)).length
+      expect(merged.summary[sev]).toBe(a.summary[sev] + b.summary[sev] - shared)
+    }
+    expect(merged.summary.warning).toBeGreaterThan(merged.findings.filter((f) => f.severity === "warning").length)
   })
 
   test("the per-step counts are instances, like the withheld list and the verdict", async () => {
