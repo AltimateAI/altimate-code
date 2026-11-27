@@ -211,6 +211,20 @@ describe("rawColumnExposures", () => {
     expect(refCovered("customers|orders.email", new Set(["customers.ssn"]))).toBe(false)
     expect(refCovered("a|b.email", new Set(["b|c.email"]))).toBe(false)
   })
+  test("`refCovered` compares database/schema only within one environment", () => {
+    const prod = new Set(["analytics.dbt_prod.customers.ssn"])
+    // Different environments: the prefixes appear on one side only.
+    const envs = { head: new Set(["analytics.dbt_ci_pr_42"]), base: new Set(["analytics.dbt_prod"]) }
+    expect(refCovered("analytics.dbt_ci_pr_42.customers.ssn", prod, envs)).toBe(true)
+    expect(refCovered("analytics.dbt_ci_pr_42.spouses.ssn", prod, envs)).toBe(false)
+    // An unqualified side matches a qualified one.
+    expect(refCovered("customers.ssn", prod, envs)).toBe(true)
+    // Both schemas read on both sides: the prefix is compared.
+    const both = { head: new Set(["restricted", "public"]), base: new Set(["restricted", "public"]) }
+    expect(refCovered("public.customers.ssn", new Set(["restricted.customers.ssn"]), both)).toBe(false)
+    // Without an environment, names must be equal.
+    expect(refCovered("analytics.dbt_ci_pr_42.customers.ssn", prod)).toBe(false)
+  })
   test("`distinct on (…)` is a select prefix, not part of the first item", () => {
     expect(asObject(rawColumnExposures("select distinct on (id) ssn, id from customers"))).toEqual({
       ssn: ["customers.ssn"],

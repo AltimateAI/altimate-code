@@ -2577,10 +2577,34 @@ describe("orchestrate", () => {
       expect({ reviewers, pii: env.findings.filter((f) => f.category === "pii_exposure") }).toEqual({ reviewers, pii: [] })
   })
 
-  test("the same table name in another schema is a different source", async () => {
-    const base = "select customer_id,\n  ssn\nfrom restricted.customers"
-    const head = "select customer_id,\n  ssn\nfrom public.customers"
-    expectReportedPii(await piiRuns(head, base, "-from restricted.customers\n+from public.customers\n", ["ssn"]), ["ssn"], "none")
+  test("the same table name in another schema is a different source when both sides read both schemas", async () => {
+    // Both schemas appear on both sides, so the prefixes are comparable.
+    const base = "select c.customer_id,\n  c.ssn\nfrom restricted.customers c\njoin public.customers p using (customer_id)"
+    const head = base.replace("  c.ssn\n", "  p.ssn\n")
+    expectReportedPii(await piiRuns(head, base, "-  c.ssn\n+  p.ssn\n", ["ssn"]), ["ssn"])
+  })
+
+  test("a base compiled into another schema is the same table, not new exposure", async () => {
+    const raw = "select customer_id,\n  ssn\nfrom {{ ref('customers') }}"
+    const touched = raw.replace("select customer_id,", "select customer_id, region,")
+    const compiled = (schema: string, sql: string) => sql.replace("{{ ref('customers') }}", `"analytics"."${schema}"."customers"`)
+    const runs = await piiRuns(touched, raw, "-select customer_id,\n+select customer_id, region,\n", ["ssn"], {
+      head: compiled("dbt_ci_pr_42", touched),
+      base: compiled("dbt_prod", raw),
+    })
+    for (const { reviewers, env } of runs) {
+      expect({ reviewers, pii: env.findings.filter((f) => f.category === "pii_exposure") }).toEqual({ reviewers, pii: [] })
+      expect(env.verdict).not.toBe("REQUEST_CHANGES")
+    }
+    // An unqualified base table and a qualified head table are the same table too.
+    const quiet = await piiRuns(
+      "select customer_id,\n  ssn\nfrom analytics.customers",
+      "select customer_id,\n  ssn\nfrom customers",
+      "-from customers\n+from analytics.customers\n",
+      ["ssn"],
+    )
+    for (const { reviewers, env } of quiet)
+      expect({ reviewers, pii: env.findings.filter((f) => f.category === "pii_exposure") }).toEqual({ reviewers, pii: [] })
   })
 
   test("a qualified reference resolves through its own source, not any CTE with that column", async () => {

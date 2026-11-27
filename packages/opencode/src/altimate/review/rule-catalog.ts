@@ -614,6 +614,9 @@ export interface FinalOutputs {
    *  for a column they pass through unnamed (`select * from customers` →
    *  `ssn: {customers.ssn}`; a CTE that masks it → none). */
   starRaw: (column: string) => Set<string>
+  /** The database/schema prefix of every table the SQL reads (`""` for an
+   *  unqualified one), for `refCovered`'s environment check. */
+  prefixes: Set<string>
   /** Per output name, a signature of how it is computed: the item text (string
    *  literals included) plus the full text of every CTE or subquery its select
    *  reads. Equal signatures on two sides mean the name is computed the same way. */
@@ -624,7 +627,7 @@ export interface FinalOutputs {
   reads: Map<string, Set<string>>
 }
 
-interface ScopeOutputs extends Omit<FinalOutputs, "passthrough" | "starRaw"> {
+interface ScopeOutputs extends Omit<FinalOutputs, "passthrough" | "starRaw" | "prefixes"> {
   /** `*` items, whose columns pass through unnamed (`select * from customers`). */
   stars: Array<{ branch: number; qualifier?: string }>
   /** Every item's text, and that of every scope it reads. */
@@ -660,6 +663,39 @@ const splitRef = (ref: string) => {
   return { tables: ref.slice(0, dot).split("|"), column: ref.slice(dot + 1) }
 }
 
+/** A table name split into its database/schema prefix and its own name. A Jinja
+ *  `{{ ref(…) }}` name has no prefix. */
+function splitTable(table: string): { prefix: string; name: string } {
+  const dot = table.startsWith("{{") ? -1 : table.lastIndexOf(".")
+  return dot < 0 ? { prefix: "", name: table } : { prefix: table.slice(0, dot), name: table.slice(dot + 1) }
+}
+
+/** The database/schema prefixes each side's SQL reads tables under. */
+export interface RelationPrefixes {
+  head: Set<string>
+  base: Set<string>
+}
+
+/**
+ * Head table `h` and base table `b` are the same table. Equal names are. With
+ * the same own name, an unqualified side matches a qualified one, and two
+ * different prefixes are compared only when each also appears among the other
+ * side's relations, i.e. both sides were compiled in one environment: a base
+ * compiled into `dbt_prod` and a head into `dbt_ci_pr_42` (or a `+schema`
+ * change) read the same tables, while `restricted.customers` vs
+ * `public.customers` in a model that reads both schemas on both sides do not.
+ * Without `env`, names must be equal.
+ */
+function sameTable(h: string, b: string, env?: RelationPrefixes): boolean {
+  if (h === b) return true
+  if (!env) return false
+  const x = splitTable(h)
+  const y = splitTable(b)
+  if (x.name !== y.name) return false
+  if (!x.prefix || !y.prefix) return true
+  return !(env.base.has(x.prefix) && env.head.has(y.prefix))
+}
+
 /**
  * `ref` is one of the `exposed` source columns. An unqualified column read over
  * several tables (`customers|orders.email`, see `rawColumnExposures`) comes from
@@ -667,15 +703,16 @@ const splitRef = (ref: string) => {
  * covered by a single-table ref to one of its members. The reverse is not: a
  * base combined ref does not say which table the column came from, so a head
  * read pinned to one of them (`s.ssn`) may be new. Two combined refs match only
- * when equal.
+ * when equal. Tables compare as in `sameTable` (database/schema only within
+ * one environment).
  */
-export function refCovered(ref: string, exposed: Set<string>): boolean {
+export function refCovered(ref: string, exposed: Set<string>, env?: RelationPrefixes): boolean {
   if (exposed.has(ref)) return true
   const r = splitRef(ref)
   for (const e of exposed) {
     const x = splitRef(e)
-    if (x.column !== r.column) continue
-    if (r.tables.length > 1 && x.tables.length === 1 && r.tables.includes(x.tables[0])) return true
+    if (x.column !== r.column || x.tables.length !== 1) continue
+    if (r.tables.some((t) => sameTable(t, x.tables[0], env))) return true
   }
   return false
 }
@@ -820,7 +857,9 @@ export function finalOutputs(sql: string): FinalOutputs {
   const { raw, names, signatures, reads, stars } = resolve(ROOT_SCOPE, new Set())
   const starRaw = (column: string) =>
     union(stars.map((st) => resolveRef(ROOT_SCOPE, st.branch, st.qualifier, column, new Set()).raw))
-  return { raw, names, signatures, reads, passthrough: stars.length > 0, starRaw }
+  const prefixes = new Set<string>()
+  for (const list of sources.values()) for (const src of list) if (!byScope.has(src.name)) prefixes.add(splitTable(src.name).prefix)
+  return { raw, names, signatures, reads, passthrough: stars.length > 0, starRaw, prefixes }
 }
 
 /** A diff line with comments and whitespace normalised (and a leading/trailing

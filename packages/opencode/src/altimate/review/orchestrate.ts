@@ -16,6 +16,7 @@ import { type ReviewMode, type ReviewScope, type VerdictEnvelope, buildEnvelope,
 import { detectModelPatterns, detectSchemaYmlPatterns, splitDiff } from "./dbt-patterns"
 import {
   type FinalOutputs,
+  type RelationPrefixes,
   type SelectItem,
   type SelectItemColumn,
   finalOutputs,
@@ -1239,6 +1240,13 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     }
     return parsed
   }
+  // The schema prefixes each side reads tables under: a base compiled into
+  // another environment (prod `target-base`, a `+schema` change) reads the same
+  // tables under different prefixes, which `refCovered` then ignores.
+  const envOf = (file: string): RelationPrefixes => ({
+    head: outputs(file, "new").prefixes,
+    base: outputs(file, "old").prefixes,
+  })
   // `source.column` refs the base exposed raw under a name its PII detection
   // reported: named in its final select, or passed through its plain `*`
   // (`select * from customers` exposes `customers.ssn` when `ssn` is base PII).
@@ -1275,7 +1283,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     const exposed = baseRawPii(file)
     return names.every((name) => {
       const refs = [...(head.get(name) ?? [])].filter((r) => r.endsWith(`.${column}`))
-      return refs.length > 0 && refs.every((r) => refCovered(r, exposed))
+      return refs.length > 0 && refs.every((r) => refCovered(r, exposed, envOf(file)))
     })
   }
   // A head PII output name the base already exposed. When the head selects a
@@ -1293,14 +1301,14 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     const rawColumns = head.raw.get(name)
     if (rawColumns?.size) {
       const exposed = baseRawPii(file)
-      return [...rawColumns].every((ref) => refCovered(ref, exposed))
+      return [...rawColumns].every((ref) => refCovered(ref, exposed, envOf(file)))
     }
     if (!basePii.has(name)) return false
     const base = outputs(file, "old")
     if (head.names.has(name)) {
       const exposed = baseRawPii(file)
       const reads = head.reads.get(name)
-      if (reads && [...reads].every((ref) => refCovered(ref, exposed))) return true
+      if (reads && [...reads].every((ref) => refCovered(ref, exposed, envOf(file)))) return true
       const baseSigs = base.signatures.get(name)
       return !!baseSigs && [...(head.signatures.get(name) ?? [])].every((sig) => baseSigs.has(sig))
     }
