@@ -3,6 +3,7 @@ import path from "node:path"
 import os from "node:os"
 import { promises as fs } from "node:fs"
 import { execFileSync } from "node:child_process"
+import { createHash } from "node:crypto"
 import {
   CONVENTIONS_HEADING,
   appliesTo,
@@ -130,12 +131,11 @@ describe("loadConventions (fixture as the base commit)", () => {
 
   test("per-file cap of 4,000 characters; absent files are skipped", async () => {
     const all = await loadConventions({
-      // Words, not one 9,000-character run: secret redaction treats a long opaque run as a key.
-      readBase: async (rel) => (rel === "AGENTS.md" ? "ab ".repeat(3_000) : undefined),
+      readBase: async (rel) => (rel === "AGENTS.md" ? "x".repeat(9_000) : undefined),
       changedPaths: ["models/a.sql"],
     })
     expect(all.map((c) => c.path)).toEqual(["AGENTS.md"])
-    expect(all[0].text.startsWith("ab ".repeat(3_000).slice(0, 4_000) + "\n… (truncated)")).toBe(true)
+    expect(all[0].text.startsWith("x".repeat(4_000) + "\n… (truncated)")).toBe(true)
   })
 
   test("a git failure reading or listing the base commit throws instead of passing for no conventions", async () => {
@@ -1013,5 +1013,33 @@ describe("convention text redaction", () => {
     expect(all).toHaveLength(1)
     expect(all[0].text).toContain("Snake case.")
     for (const secret of [password, ghToken.slice(4), FAKE_AWS_KEY_ID]) expect(all[0].text).not.toContain(secret)
+  })
+})
+
+describe("convention redaction keeps ordinary guidance (round 2c)", () => {
+  test("prose, env_var examples, md5 and long paths are left as written", async () => {
+    const { redactConvention } = await import("../../src/altimate/review/conventions")
+    const prose = [
+      "Every model has basic tests (unique, not_null).",
+      "Keep the token count, not the token list, in the summary.",
+      "secret: never select * from raw tables.",
+      "password: \"{{ env_var('DBT_PASSWORD') }}\"",
+      `Surrogate keys use select md5(concat(a, b)) as id, e.g. ${createHash("md5").update("hello").digest("hex")}.`,
+      "See models/staging/finance/revenuerecognitionmonthlysnapshotsfinalversion/model.sql",
+      "Use profiles with token: changeme_placeholder_value in examples.",
+    ].join("\n")
+    expect(redactConvention(prose)).toBe(prose)
+  })
+
+  test("real credentials are redacted", async () => {
+    const { redactConvention } = await import("../../src/altimate/review/conventions")
+    const secrets = ["ghp_" + fakeChars(36), FAKE_AWS_KEY_ID, "xo" + "xb-" + fakeChars(10, 3) + "-" + fakeChars(10, 5), "sk" + "-proj-" + fakeChars(24, 11)]
+    const password = fakeChars(16, 2)
+    const urlPassword = fakeChars(14, 9)
+    const text = `Tokens: ${secrets.join(", ")}.\npassword: ${password}\nclone https://deploy:${urlPassword}@git.example.com/repo.git`
+    const out = redactConvention(text)
+    for (const v of [...secrets, password, urlPassword]) expect(out).not.toContain(v)
+    expect(out).toContain("password: [REDACTED]")
+    expect(out).toContain("https://[REDACTED]@git.example.com/repo.git")
   })
 })

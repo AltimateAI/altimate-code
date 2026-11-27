@@ -3,7 +3,6 @@ import YAML from "yaml"
 import { globToRegExp } from "./diff-filter"
 import { type Finding, SEVERITY_ORDER } from "./finding"
 import { holdsCredentials } from "./credentials"
-import { redactSecrets } from "@/installation"
 
 /**
  * Team conventions from the repository's guideline files, read from the BASE
@@ -17,7 +16,7 @@ import { redactSecrets } from "@/installation"
  * `.cursorrules`; `.github/copilot-instructions.md`; `CONTRIBUTING.md` cut to its
  * dbt/SQL/test/naming sections. A file that is a symlink at the base commit is skipped (git
  * would return the link target's name), and so is any document that carries key material;
- * tokens and passwords in the others are redacted (`redactConvention`).
+ * credentials in the others are redacted with high-precision patterns (`redactConvention`).
  *
  * With the `conventions` switch (`ALTIMATE_REVIEW_CONVENTIONS`, on by default) each
  * finder call carries the conventions that apply to its files, most specific first,
@@ -280,10 +279,36 @@ export interface LoadConventionsInput {
   changedPaths: string[]
 }
 
-/** Convention text with secrets redacted: the shared `redactSecrets` (tokens, passwords, keys in
- *  URLs, long opaque blobs) plus AWS access key ids. */
+/** Provider-prefixed tokens and cloud key ids: shapes ordinary prose never has. */
+const TOKEN_RE =
+  /\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|sk-(?:proj-|ant-)?[A-Za-z0-9_-]{20,}|AIza[0-9A-Za-z_-]{35}|npm_[A-Za-z0-9]{36}|(?:AKIA|ASIA)[A-Z0-9]{16})\b/g
+/** `scheme://user:password@`: the userinfo of a URL that carries a password. */
+const URL_USERINFO_RE = /\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@:]+:[^\s/@]+@/gi
+/** `key: value` / `key=value` where the key names a secret. */
+const SECRET_KV_RE =
+  /\b([A-Za-z0-9_.-]*(?:password|passwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key)[A-Za-z0-9_.-]*)(["']?[ \t]*[:=][ \t]*["']?)([^\s"',;)]+)/gi
+
+/** A value that looks like a credential: long, no placeholder or template, mixed character classes, high entropy. */
+function looksSecret(v: string): boolean {
+  if (v.length < 12) return false
+  if (/[{}$<>]|env_var|\*{3}|^x+$|changeme|your[_-]|example|placeholder|redacted/i.test(v)) return false
+  const classes = [/[a-z]/, /[A-Z]/, /[0-9]/, /[^A-Za-z0-9]/].filter((r) => r.test(v)).length
+  if (classes < 2) return false
+  const freq = new Map<string, number>()
+  for (const ch of v) freq.set(ch, (freq.get(ch) ?? 0) + 1)
+  const entropy = [...freq.values()].reduce((h, n) => h - (n / v.length) * Math.log2(n / v.length), 0)
+  return entropy >= 3
+}
+
+/** Convention text with credentials redacted, using only high-precision patterns so ordinary
+ *  guidance ("basic tests", "the token count", `env_var('DBT_PASSWORD')`, md5 examples) is left alone:
+ *  provider-prefixed tokens and AWS key ids, URL userinfo with a password, and a secret-named key
+ *  whose value looks like a credential. Documents with key material are skipped before this. */
 export function redactConvention(text: string): string {
-  return redactSecrets(text).replace(/\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g, "[REDACTED]")
+  return text
+    .replace(TOKEN_RE, "[REDACTED]")
+    .replace(URL_USERINFO_RE, "$1[REDACTED]@")
+    .replace(SECRET_KV_RE, (m, key: string, sep: string, value: string) => (looksSecret(value) ? `${key}${sep}[REDACTED]` : m))
 }
 
 /** Concurrent base-commit reads at most. */
