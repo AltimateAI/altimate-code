@@ -625,18 +625,27 @@ across 12 dialects all plan; anything still unrecognized stays *undecidable*, ne
    snapshots, schema/source yml, seeds (diff only) and project config, plus other
    changed project files (analyses, CI and config yml, scripts) and changed Python
    files anywhere in the repository, each labeled with its role, under per-kind
-   quotas (models 12, macros 8, tests 4, yml 6, other 8, Python 6). Related files
+   quotas (models 12, macros 8, tests 4, yml 6, other 8, Python 6; with `coverage`
+   off, one 20-file cap applies instead). Related files
    are reviewed together, with manifest context where a manifest has facts for the
    file, and a dbt-grounded verifier then checks every AI comment against the code:
    refuted ones are dropped; unverifiable cross-file and speculative ones go to the
    summary, as do ones the verifier did not reach before its budget or timeout;
    unverifiable local comments with a valid evidence line stay inline (the rest are
    dropped). Findings are clamped to ≤ warning
-   and never block. Skipped (clean degrade) if no model is available. Each part can
-   be turned off under `ai:` in `.altimate/review.yml` or with its env variable set
-   to `0` (`ALTIMATE_REVIEW_AI_COVERAGE`, `_CONTEXT_CARD`, `_FOCUSED`,
-   `_OTHER_FILES`, `_PYTHON_FILES`, `_VERIFY`); `1` turns one on.
-   `ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE=<file>` replaces the finder's system prompt.
+   and never block. Skipped (clean degrade) if no model is available. Every part is
+   on by default, so with a model configured the default review makes more model
+   calls than the finder alone (the verifier, and more files per PR): more tokens and
+   wall time per review. Each part can be turned off under `ai:` in
+   `.altimate/review.yml` (for example `ai: { verify: false }`) or with its env
+   variable set to `0` (`ALTIMATE_REVIEW_AI_COVERAGE`, `_CONTEXT_CARD`, `_FOCUSED`,
+   `_OTHER_FILES`, `_PYTHON_FILES`, `_VERIFY`); `1` turns one on. `true`/`false`,
+   `on`/`off` and `yes`/`no` are accepted too; any other value is ignored with a
+   warning. `ai: false` turns the whole lane off.
+   `ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE=<file>` replaces the finder's system
+   prompt. The path must be absolute and outside the repository checkout (for
+   example under `$RUNNER_TEMP`); a file inside the git work tree, or a symlink to
+   one, is refused, since a PR could change it.
 4. **Rubric → verdict.** Findings map to a verdict by a versioned rubric (data,
    not prompt): any blocking-category `critical` → `REQUEST_CHANGES`; ≥3 warnings
    → risk pattern → `REQUEST_CHANGES`; only suggestions → `COMMENT`; nothing →

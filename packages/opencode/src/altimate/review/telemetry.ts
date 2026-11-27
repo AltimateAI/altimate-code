@@ -130,6 +130,7 @@ export function emitReviewRun(input: {
       ai_verify_discarded: env.ai?.verifier?.discarded,
       base_source: env.scope?.baseSource,
       out_of_scope_files: env.scope?.outOfScopeFiles ?? 0,
+      ai_reviewed_outside_files: env.scope?.aiReviewedOutside?.length ?? 0,
       engine_errors: env.engineErrors?.reduce((n, e) => n + e.count, 0) ?? 0,
       stale_manifest: env.staleManifest === true,
       critical: env.summary.critical,

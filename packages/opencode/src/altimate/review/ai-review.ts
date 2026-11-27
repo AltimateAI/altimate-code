@@ -32,7 +32,7 @@ const MAX_FILES = 20
 const CONTEXT_FILE_CHARS = 8_000
 const CONTEXT_TOTAL_CHARS = 40_000
 const BATCH_CONCURRENCY = 2
-/** Per-kind file quotas under `ALTIMATE_REVIEW_AI_COVERAGE=1`. */
+/** Per-kind file quotas under the `coverage` switch (on by default). */
 const COVERAGE_QUOTAS = { model: 12, macro: 8, test: 4, yml: 6 }
 /** Head-side lines of context kept around each changed line in a file excerpt. */
 const EXCERPT_CONTEXT_LINES = 20
@@ -43,7 +43,7 @@ const COVERAGE_FULL_DIFF_FILE_CHARS = 2_000
 /** Default per-call size under coverage (~30k tokens): 30 quota files at up to ~22k chars each would
  *  otherwise make one ~660k-char call that overruns common context windows. */
 const COVERAGE_BATCH_CHARS = 120_000
-/** Focused batching defaults under `ALTIMATE_REVIEW_AI_FOCUSED=1`. */
+/** Focused batching defaults under the `focused` switch (on by default). */
 const FOCUS_DEFAULTS: AiFocusBudget = { minFiles: 7, batchFiles: 5, maxBatches: 4 }
 /** Paths listed per call under "OTHER FILES CHANGED IN THIS PR". */
 const FOCUS_OTHER_FILES = 40
@@ -59,13 +59,13 @@ export interface AiInputBudget {
   maxFileChars: number
   /** Characters of file sections per call; Infinity keeps a single call (the default without coverage). */
   batchChars: number
-  /** `ALTIMATE_REVIEW_AI_COVERAGE=1`: per-kind file quotas (replacing `maxFiles`) and
+  /** The `coverage` switch: per-kind file quotas (replacing `maxFiles`) and
    *  hunk-centred excerpts instead of head truncation. Undefined keeps today's input.
    *  `otherQuota` (`otherFiles` switch): quota for other/analysis files, kept outside
    *  `quotas` so the existing buckets and their spare are unchanged. `pythonQuota`
    *  (`pythonFiles` switch): the same for the added Python files. */
   coverage?: AiCoverageRender & { quotas: Record<AiFileBucket, number>; otherQuota?: number; pythonQuota?: number }
-  /** `ALTIMATE_REVIEW_AI_FOCUSED=1`: on PRs with at least `minFiles` selected files, review
+  /** The `focused` switch: on PRs with at least `minFiles` selected files, review
    *  related files together in calls of about `batchFiles` files, at most `maxBatches` calls
    *  unless `batchChars` needs more. */
   focused?: AiFocusBudget
@@ -177,7 +177,7 @@ export interface AiReviewFile {
   diff?: string
   /** Current content: dbt-compiled (preferred) or raw SQL for a model, the file itself otherwise. */
   sql?: string
-  /** Rendered dbt manifest context card (`ALTIMATE_REVIEW_AI_CONTEXT_CARD=1`). */
+  /** Rendered dbt manifest context card (the `contextCard` switch). */
   card?: string
 }
 
@@ -213,7 +213,7 @@ function fenceOf(f: AiReviewFile): string {
   if (known) return known
   if (!AI_OTHER_KINDS.has(f.kind ?? "")) return "sql"
   const p = f.path.toLowerCase()
-  return p.endsWith(".py") ? "python" : p.endsWith(".yml") || p.endsWith(".yaml") ? "yaml" : "sql"
+  return p.endsWith(".yml") || p.endsWith(".yaml") ? "yaml" : "sql"
 }
 
 function kindRank(kind: string | undefined): number {
@@ -740,7 +740,7 @@ export interface AiReviewInput {
   prBody?: string
   /** Explicit `provider/model`; omit to use the configured default model. */
   model?: string
-  /** What the verifier may read; it runs only when this is set and `ALTIMATE_REVIEW_AI_VERIFY=1`. */
+  /** What the verifier may read; it runs only when this is set and the `verify` switch is on. */
   evidence?: AiVerifyEvidence
   /** Every file the PR changes (repo-relative), including files outside the dbt project. */
   prFiles?: string[]
@@ -766,7 +766,7 @@ export interface AiLaneStatus {
   cost?: number
   /** Model calls made (one per batch). */
   calls?: number
-  /** The dbt-grounded verifier's outcome, when it ran (opt-in). */
+  /** The dbt-grounded verifier's outcome, when it ran (the `verify` switch). */
   verifier?: VerifierStatus
   /** The generator's findings came from an earlier envelope (`ALTIMATE_REVIEW_AI_REPLAY`);
    *  tokens, cost and calls are that run's, so only `verifier` was spent now. */
@@ -964,7 +964,7 @@ export interface AiInputPlan {
   batches: AiReviewFile[][]
   messages: string[]
   input: AiInputRecord[]
-  /** Focused batching applied (`ALTIMATE_REVIEW_AI_FOCUSED=1` and enough files). */
+  /** Focused batching applied (the `focused` switch and enough files). */
   focused: boolean
 }
 

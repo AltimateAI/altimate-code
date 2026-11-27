@@ -288,9 +288,9 @@ export interface OrchestrateInput {
   aiModel?: string
   /** Send the changed files' unchanged dbt parents to the AI lane as context. */
   aiGraphContext?: boolean
-  /** Attach a dbt manifest context card to each AI file (`ALTIMATE_REVIEW_AI_CONTEXT_CARD=1`; needs a manifest). */
+  /** Attach a dbt manifest context card to each AI file (the `contextCard` switch; needs a manifest). */
   aiContextCard?: boolean
-  /** Give the AI lane what the dbt-grounded verifier reads (`ALTIMATE_REVIEW_AI_VERIFY=1`). */
+  /** Give the AI lane what the dbt-grounded verifier reads (the `verify` switch). */
   aiVerify?: boolean
   /** The review's resolved AI switches (ai-switches.ts); without them each switch reads its env variable. */
   aiSwitches?: Partial<AiSwitches>
@@ -2680,7 +2680,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     const supporting = reviewable.filter(
       (f) => AI_SUPPORTING_KINDS.has(f.kind) && f.status !== "deleted" && !mayHoldCredentials(f.path),
     )
-    // `otherFiles`: other/analysis files inside the project root (.sql/.yml/.yaml/.py), after the supporting files.
+    // `otherFiles`: other/analysis files inside the project root (.sql/.yml/.yaml), after the supporting files.
     if (switchOn("otherFiles", input.aiSwitches)) {
       const root = input.layout?.root
       supporting.push(
