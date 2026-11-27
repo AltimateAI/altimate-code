@@ -2141,7 +2141,8 @@ describe("orchestrate", () => {
         ]
       },
       async classifyPii(columns) {
-        return columns.map((column) => ({ column, classification: "Email", confidence: 0.95 }))
+        // Column-specific, like the real classifier: only `email` is PII.
+        return columns.filter((c) => c === "email").map((column) => ({ column, classification: "Email", confidence: 0.95 }))
       },
     }
     const env = await runReview({
@@ -2158,6 +2159,9 @@ describe("orchestrate", () => {
     })
     const pii = env.findings.filter((f) => f.category === "pii_exposure")
     expect(pii.length).toBeGreaterThan(0)
+    // The finding names `email`, and nothing flags `customer_id`.
+    expect(pii.some((f) => f.column === "email" || /\bemail\b/.test(f.title))).toBe(true)
+    expect(pii.some((f) => f.column === "customer_id" || /customer_id/.test(f.title))).toBe(false)
     expect(pii.every((f) => f.severity !== "critical")).toBe(true)
     expect(env.verdict).not.toBe("REQUEST_CHANGES")
   })

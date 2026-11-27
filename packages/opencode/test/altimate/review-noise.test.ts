@@ -23,6 +23,7 @@ import { evaluateCatalog } from "../../src/altimate/review/rule-catalog"
 import { classifyPostOutcome } from "../../src/altimate/review/telemetry"
 import { postGitHubReview } from "../../src/altimate/review/post-github"
 import { shouldSuppressPortability } from "../../src/altimate/review/run"
+import { scopeToProject } from "../../src/altimate/review/diff-filter"
 
 /**
  * The PR comment must stay readable: inline comments land on real lines of the
@@ -547,6 +548,43 @@ describe("moved files", () => {
     })
     expect(renderSummary(env)).toContain("3 file(s) moved without edits")
     expect(renderSummary(env)).toContain("`+schema`")
+  })
+
+  test("a run of only unchanged moves, through runReview without a manifest, is not lint-only", async () => {
+    const scoped = scopeToProject(
+      [
+        {
+          path: "models/staging/b/schema.yml",
+          oldPath: "models/staging/a/schema.yml",
+          status: "renamed",
+          similarity: 100,
+          diff: "",
+        },
+      ],
+      undefined,
+    )
+    expect(scoped).toMatchObject({ inScope: [], movedUnchanged: 1 })
+    const runner = {
+      async impact() {
+        return { hasManifest: false, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 }
+      },
+      async detectPii() {
+        return { columns: [] }
+      },
+    } as unknown as ReviewRunner
+    const env = await runReview({
+      changedFiles: scoped.inScope,
+      config: { ...DEFAULT_REVIEW_CONFIG },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner,
+      getContent: async () => undefined,
+      scope: { movedUnchangedFiles: scoped.movedUnchanged },
+    })
+    expect(env.summary.degraded).toBe(false)
+    const md = renderSummary(env)
+    expect(md).toContain("1 file(s) moved without edits")
+    expect(md).not.toContain("Lint-only")
   })
 })
 
