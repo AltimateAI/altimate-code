@@ -674,48 +674,71 @@ export function finalOutputs(sql: string): FinalOutputs {
     return out
   }
   const memo = new Map<string, ScopeOutputs>()
+  const refMemo = new Map<string, { raw: Set<string>; reads: Set<string> }>()
+  // `seen` plus `scope`, built once per pair: the same chain is walked for every
+  // column, so copying `seen` on each step would make a deep chain quadratic.
+  const innerSets = new WeakMap<Set<string>, Map<string, Set<string>>>()
+  const innerOf = (seen: Set<string>, scope: string) => {
+    let perScope = innerSets.get(seen)
+    if (!perScope) innerSets.set(seen, (perScope = new Map()))
+    let inner = perScope.get(scope)
+    if (!inner) perScope.set(scope, (inner = new Set([...seen, scope])))
+    return inner
+  }
   const isDerived = (src: Source, scope: string, seen: Set<string>) =>
     src.name !== scope && byScope.has(src.name) && !seen.has(src.name)
   // The `source.column` refs a column read in `scope#branch` resolves to: those
-  // it exposes raw (`key: "raw"`; a column a CTE computes is none), or every one
-  // its value is computed from (`key: "reads"`).
-  const resolveRef = (
+  // it exposes raw (`raw`; a column a CTE computes is none), and every one its
+  // value is computed from (`reads`).
+  type Refs = { raw: Set<string>; reads: Set<string> }
+  const same = (set: Set<string>): Refs => ({ raw: set, reads: set })
+  const unionRefs = (list: Refs[]): Refs => ({ raw: union(list.map((r) => r.raw)), reads: union(list.map((r) => r.reads)) })
+  const resolveRef = (scope: string, branch: number, qualifier: string | undefined, col: string, seen: Set<string>): Refs => {
+    // Memoised like `resolve`: a wide select over a deep `*` chain would
+    // otherwise walk the chain once per column reference.
+    const memoKey = `${scope}#${branch}\u0000${qualifier ?? ""}\u0000${col}`
+    const hit = refMemo.get(memoKey)
+    if (hit) return hit
+    const out = resolveRefUncached(scope, branch, qualifier, col, seen)
+    refMemo.set(memoKey, out)
+    return out
+  }
+  const resolveRefUncached = (
     scope: string,
     branch: number,
     qualifier: string | undefined,
     col: string,
     seen: Set<string>,
-    key: "raw" | "reads" = "raw",
-  ): Set<string> => {
+  ): Refs => {
     const srcs = sources.get(`${scope}#${branch}`) ?? []
-    const inner = new Set([...seen, scope])
-    const fromSource = (src: Source): Set<string> => {
-      if (!isDerived(src, scope, seen)) return byScope.has(src.name) ? unresolved(col) : new Set([`${src.name}.${col}`])
+    const inner = innerOf(seen, scope)
+    const fromSource = (src: Source): Refs => {
+      if (!isDerived(src, scope, seen)) return same(byScope.has(src.name) ? unresolved(col) : new Set([`${src.name}.${col}`]))
       const out = resolve(src.name, inner)
-      if (out.names.has(col)) return out[key].get(col) ?? new Set()
-      if (out.stars.length) return union(out.stars.map((st) => resolveRef(src.name, st.branch, st.qualifier, col, inner, key)))
-      return unresolved(col)
+      if (out.names.has(col)) return { raw: out.raw.get(col) ?? new Set(), reads: out.reads.get(col) ?? new Set() }
+      if (out.stars.length) return unionRefs(out.stars.map((st) => resolveRef(src.name, st.branch, st.qualifier, col, inner)))
+      return same(unresolved(col))
     }
     if (qualifier) {
       // A qualifier names its source by alias, else by the table's last segment.
       const named = (x: Source) => x.name === qualifier || x.short === qualifier
       const src =
         srcs.find((x) => x.alias === qualifier) ?? srcs.find((x) => !x.alias && named(x)) ?? srcs.find(named)
-      return src ? fromSource(src) : unresolved(col)
+      return src ? fromSource(src) : same(unresolved(col))
     }
     const named = srcs.filter((x) => isDerived(x, scope, seen) && resolve(x.name, inner).names.has(col))
-    if (named.length) return union(named.map(fromSource))
+    if (named.length) return unionRefs(named.map(fromSource))
     const open = srcs.filter((x) =>
       isDerived(x, scope, seen) ? resolve(x.name, inner).stars.length > 0 : !byScope.has(x.name),
     )
     if (open.length === 1) return fromSource(open[0])
-    if (open.length > 1) return new Set([`${[...new Set(open.map((x) => x.name))].sort().join("|")}.${col}`])
-    return unresolved(col)
+    if (open.length > 1) return same(new Set([`${[...new Set(open.map((x) => x.name))].sort().join("|")}.${col}`]))
+    return same(unresolved(col))
   }
   const resolve = (scope: string, seen: Set<string>): ScopeOutputs => {
     const cached = memo.get(scope)
     if (cached) return cached
-    const inner = new Set([...seen, scope])
+    const inner = innerOf(seen, scope)
     const raw = new Map<string, Set<string>>()
     const names = new Set<string>()
     const signatures = new Map<string, Set<string>>()
@@ -752,11 +775,12 @@ export function finalOutputs(sql: string): FinalOutputs {
       names.add(name)
       addTo(signatures, name, [`${item.exact.toLowerCase()}\u0001${bodies.join("\u0002")}`])
       if (item.rawColumn) {
-        addTo(raw, name, resolveRef(scope, item.branch, item.rawQualifier, item.rawColumn, seen))
-        addTo(reads, name, resolveRef(scope, item.branch, item.rawQualifier, item.rawColumn, seen, "reads"))
+        const refs = resolveRef(scope, item.branch, item.rawQualifier, item.rawColumn, seen)
+        addTo(raw, name, refs.raw)
+        addTo(reads, name, refs.reads)
       } else {
         reads.set(name, reads.get(name) ?? new Set())
-        for (const r of item.reads ?? []) addTo(reads, name, resolveRef(scope, item.branch, r.qualifier, r.column, seen, "reads"))
+        for (const r of item.reads ?? []) addTo(reads, name, resolveRef(scope, item.branch, r.qualifier, r.column, seen).reads)
       }
     }
     for (const [n, cols] of raw) if (!cols.size) raw.delete(n)
@@ -767,7 +791,7 @@ export function finalOutputs(sql: string): FinalOutputs {
   }
   const { raw, names, signatures, reads, stars } = resolve(ROOT_SCOPE, new Set())
   const starRaw = (column: string) =>
-    union(stars.map((st) => resolveRef(ROOT_SCOPE, st.branch, st.qualifier, column, new Set())))
+    union(stars.map((st) => resolveRef(ROOT_SCOPE, st.branch, st.qualifier, column, new Set()).raw))
   return { raw, names, signatures, reads, passthrough: stars.length > 0, starRaw }
 }
 
