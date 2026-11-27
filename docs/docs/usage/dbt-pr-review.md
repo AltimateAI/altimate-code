@@ -719,12 +719,14 @@ across 12 dialects all plan; anything still unrecognized stays *undecidable*, ne
    engine warning that is refuted, turned off or dropped by the policy is not
    posted but still counts toward the ≥3 warnings (the summary counts it too), so
    neither the verifier nor text it reads, such as the PR description, can unblock
-   a gate. When withheld findings change the verdict (with `--all-projects`, the
-   merged verdict), the summary lists them (file
+   a gate. When withheld findings change a project's verdict, the summary lists them (file
    and line, title, and why each was not posted; the first 10, the rest are in the
    envelope) and the envelope records them under
    `withheld`: the engine warnings that count toward a `REQUEST_CHANGES`, or every
-   withheld finding when they alone keep the verdict from `APPROVE`. In `comment` mode, `REQUEST_CHANGES` is posted as comments rather than
+   withheld finding when they alone keep the verdict from `APPROVE`. With
+   `--all-projects`, the merged summary shows the lists of the projects whose verdict
+   equals the merged one; a project below it has its withheld findings neither
+   listed nor counted. In `comment` mode, `REQUEST_CHANGES` is posted as comments rather than
    blocking.
 5. **Signed envelope.** The verdict is HMAC-signed (`ALTIMATE_REVIEW_SIGNING_KEY`)
    and includes the manifest hash, so it is replayable and tamper-evident.

@@ -69,9 +69,8 @@ function project(root: string, spec: Spec) {
     },
   })
   // The verdict on the posted findings alone, with and without the incomplete-review raise.
-  const postedOnly = applyMode(idealPosted, spec.mode)
   const withoutWithheld = applyMode(idealPosted === "APPROVE" && spec.incomplete ? "COMMENT" : idealPosted, spec.mode)
-  return { root, file, spec, env, postedOnly, withoutWithheld }
+  return { root, file, spec, env, withoutWithheld }
 }
 
 const specs: Spec[] = (["gate", "comment"] as const).flatMap((mode) =>
@@ -101,21 +100,26 @@ function violations(a: Spec, b: Spec): string[] {
   const tally = merged.summary.critical + merged.summary.warning + merged.summary.suggestion
   if (tally > 0 && renderSummary(merged, { maxChars: Infinity }).includes("No issues found"))
     out.push(`(ii) tally ${tally} with "No issues found"`)
-  // (iii) A list is shown only under a verdict it drives: its project is at the merged verdict,
-  // its withheld findings raised it there, and no project's posted findings reach it on their own.
-  const postedReach = ps.some((p) => p.postedOnly === vm)
+  // (iii) Lists are those of the projects at the merged verdict, each as its own comment shows it;
+  // a list of a project below the merged verdict is not shown under it.
   for (const p of ps) {
-    const shown = (p.env.withheld ?? []).filter((w) => listedIds.has(w.id))
-    if (!shown.length) continue
-    if (p.env.verdict !== vm) out.push(`(iii) ${p.root}'s list (at ${p.env.verdict}) shown under ${vm}`)
-    else if (RANK[p.postedOnly] >= RANK[p.env.verdict]) out.push(`(iii) ${p.root}'s list does not raise its verdict`)
-    else if (postedReach) out.push(`(iii) ${p.root}'s list shown though posted findings reach ${vm}`)
+    const own = p.env.withheld ?? []
+    const shown = own.filter((w) => listedIds.has(w.id))
+    if (p.env.verdict !== vm && shown.length) out.push(`(iii) ${p.root}'s list (at ${p.env.verdict}) shown under ${vm}`)
+    if (p.env.verdict === vm && shown.length !== own.length) out.push(`(iii) ${p.root}'s own list not shown under ${vm}`)
   }
+  // (iv) Every finding the merged tally counts is posted or listed, apart from the withheld findings
+  // a project's own comment counts without listing: merging hides no counted finding.
+  const count = (t: VerdictEnvelope["summary"]) => t.critical + t.warning + t.suggestion
+  const hidden = (e: VerdictEnvelope, listed: number) => count(e.summary) - e.findings.length - listed
+  const ownHidden = ps.reduce((n, p) => n + hidden(p.env, p.env.withheld?.length ?? 0), 0)
+  if (hidden(merged, listedIds.size) !== ownHidden)
+    out.push(`(iv) ${hidden(merged, listedIds.size)} counted findings neither posted nor listed (the projects' own comments: ${ownHidden})`)
   return out
 }
 
 describe("--all-projects: withheld lists over every two-project combination", () => {
-  test("the listed withheld findings explain the merged verdict and the tally, and only lists that drive it are shown", () => {
+  test("the listed withheld findings explain the merged verdict and the tally; lists below the merged verdict are not shown", () => {
     const failures: string[] = []
     for (const a of specs)
       for (const b of specs) for (const v of violations(a, b)) failures.push(`a=${label(a)} b=${label(b)}: ${v}`)
@@ -128,6 +132,15 @@ describe("--all-projects: withheld lists over every two-project combination", ()
     const b = project("b", { mode: "comment", posted: "rc", withheld: "none", incomplete: false })
     const merged = mergeProjectEnvelopes([a, b].map((p) => ({ root: p.root, paths: [p.file], env: p.env })))
     expect(merged.verdict).toBe("REQUEST_CHANGES")
+    expect(merged.withheld?.map((w) => w.id).sort()).toEqual(a.env.withheld!.map((w) => w.id).sort())
+  })
+
+  test("comment mode: posted suggestions and withheld warnings next to a clean project keep the list", () => {
+    const a = project("a", { mode: "comment", posted: "comment", withheld: "rc", incomplete: false })
+    const b = project("b", { mode: "comment", posted: "none", withheld: "none", incomplete: false })
+    const merged = mergeProjectEnvelopes([a, b].map((p) => ({ root: p.root, paths: [p.file], env: p.env })))
+    expect(merged.verdict).toBe("COMMENT")
+    expect(merged.summary.warning).toBe(3)
     expect(merged.withheld?.map((w) => w.id).sort()).toEqual(a.env.withheld!.map((w) => w.id).sort())
   })
 

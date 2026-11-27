@@ -613,7 +613,7 @@ describe("round 4: withheld findings in the comment and the merge", () => {
     expect(merged.summary.warning).toBeGreaterThan(merged.findings.filter((f) => f.severity === "warning").length)
   })
 
-  test("--all-projects: withheld lists that do not drive the merged verdict are not kept", async () => {
+  test("--all-projects: withheld lists of projects below the merged verdict are not kept, nor counted", async () => {
     const { mergeProjectEnvelopes } = await import("../../src/altimate/review/multi-project")
     const { renderSummary } = await import("../../src/altimate/review/format")
     const withheldOnly = await run({ mode: "gate", runner: threeWarnRunner, verdictAt: () => "refuted" })
@@ -621,18 +621,23 @@ describe("round 4: withheld findings in the comment and the merge", () => {
     expect(withheldOnly.withheld?.length).toBeGreaterThan(0)
     expect(postedCritical.idealVerdict).toBe("REQUEST_CHANGES")
     expect(postedCritical.withheld).toBeUndefined()
-    // A project whose withheld findings moved it only to COMMENT, next to one blocking on posted findings.
-    const toComment = { ...withheldOnly, verdict: "COMMENT" as const, idealVerdict: "COMMENT" as const }
-    // A project at the merged verdict that blocks on its posted findings alone: no list is kept.
-    for (const other of [toComment, withheldOnly]) {
-      const merged = mergeProjectEnvelopes([
+    const pair = (other: typeof postedCritical) =>
+      mergeProjectEnvelopes([
         { root: "a", paths: ["a/models/marts/m.sql"], env: other },
         { root: "b", paths: ["b/models/marts/m.sql"], env: postedCritical },
       ])
-      expect(merged.idealVerdict).toBe("REQUEST_CHANGES")
-      expect(merged.withheld).toBeUndefined()
-      expect(renderSummary(merged, { maxChars: Infinity })).not.toContain("### Withheld rule findings")
-    }
+    // A project whose withheld findings moved it only to COMMENT, next to one blocking on posted
+    // findings: its list is left out, and its withheld findings are not counted.
+    const toComment = { ...withheldOnly, verdict: "COMMENT" as const, idealVerdict: "COMMENT" as const }
+    const below = pair(toComment)
+    expect(below.verdict).toBe("REQUEST_CHANGES")
+    expect(below.withheld).toBeUndefined()
+    expect(renderSummary(below, { maxChars: Infinity })).not.toContain("### Withheld rule findings")
+    // The same posted findings at the merged verdict: only the withheld ones are counted on top.
+    expect(pair(withheldOnly).summary.warning).toBe(below.summary.warning + withheldOnly.withheld!.length)
+    // A project at the merged verdict keeps its list, as its own comment shows it.
+    const at = pair(withheldOnly)
+    expect(at.withheld?.map((x) => x.id).sort()).toEqual(withheldOnly.withheld!.map((x) => x.id).sort())
     // A withheld-only project below the merged verdict is left out; the one at it is kept.
     const merged = mergeProjectEnvelopes([
       { root: "a", paths: ["a/models/marts/m.sql"], env: withheldOnly },

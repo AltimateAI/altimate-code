@@ -275,7 +275,7 @@ export function mergeProjectEnvelopes(runs: ProjectRun[], coveredProjects?: stri
       ? classified.reduce((a, b) => (TIER_RANK[b!] > TIER_RANK[a!] ? b : a))
       : undefined,
     findings,
-    summary: mergedSummary(findings, envs),
+    summary: mergedSummary(findings, envs, verdict),
     engine: first.engine,
     manifestHash: shared(envs.map((e) => e.manifestHash)),
     staleManifest: envs.some((e) => e.staleManifest) ? true : undefined,
@@ -311,25 +311,27 @@ export function mergeProjectEnvelopes(runs: ProjectRun[], coveredProjects?: stri
 
 /** The merged tally: the merged (deduplicated) findings, plus what each project's tally counts
  *  beyond its own posted findings (withheld rule findings, the instances of repeat-merged comments),
- *  so the headline counts what the verdict counts. */
-function mergedSummary(findings: VerdictEnvelope["findings"], envs: VerdictEnvelope[]): VerdictEnvelope["summary"] {
+ *  so the headline counts what the verdict counts. The withheld list of a project below the merged
+ *  `verdict` is left out (mergeRuleNoise), and so are its findings from the tally: the merged
+ *  comment never counts a finding it hides that the project's own comment would list. */
+function mergedSummary(findings: VerdictEnvelope["findings"], envs: VerdictEnvelope[], verdict: Verdict): VerdictEnvelope["summary"] {
   const out = summarize(findings, envs.some((e) => e.summary.degraded))
   // Not deduplicated across projects like `withheld` is: each in-scope path belongs to exactly one
   // project (`assignToProjects`), and files outside every project, though passed to each project,
   // are scoped out there and taken by one AI lane only, so no instance is counted by two projects.
   for (const e of envs) {
     const posted = summarize(e.findings, false)
-    for (const sev of ["critical", "warning", "suggestion"] as const) out[sev] += Math.max(0, e.summary[sev] - posted[sev])
+    const unlisted = e.verdict === verdict ? [] : (e.withheld ?? [])
+    for (const sev of ["critical", "warning", "suggestion"] as const)
+      out[sev] += Math.max(0, e.summary[sev] - posted[sev] - unlisted.filter((w) => w.severity === sev).length)
   }
   return out
 }
 
 /** Rule-noise counts summed over the projects (each present only when some project has it), and
- *  the withheld findings behind the merged verdict (`verdict`, the applied one the comment shows).
- *  When a project's posted findings alone reach that verdict, no list is kept. Otherwise the lists
- *  of the projects at that verdict are: their withheld findings raised them to it. A project that
- *  reaches it only because a check did not run (`reviewIncomplete`) does not drop them, so the
- *  withheld findings the tally counts are listed whenever nothing is posted. */
+ *  the withheld lists of the projects at the merged `verdict` (the applied one the comment shows),
+ *  each as that project's own comment shows it. A list of a project below the merged verdict did
+ *  not raise it there: it is left out, and so are its findings from the tally (mergedSummary). */
 function mergeRuleNoise(
   envs: VerdictEnvelope[],
   verdict: Verdict,
@@ -350,15 +352,11 @@ function mergeRuleNoise(
         noisy_type_not_confirmed: policies.reduce((n, p) => n + p.dropped.noisy_type_not_confirmed, 0),
       },
     }
-  // A project's verdict on its posted findings alone: none give APPROVE; with a list (its withheld
-  // findings changed its verdict, so its posted ones stop below REQUEST_CHANGES) COMMENT; else its verdict.
-  const postedVerdict = (e: VerdictEnvelope): Verdict => (!e.findings.length ? "APPROVE" : e.withheld?.length ? "COMMENT" : e.verdict)
-  const atMerged = envs.filter((e) => e.verdict === verdict)
-  const postedReach = atMerged.some((e) => postedVerdict(e) === verdict)
   const seen = new Set<string>()
-  const withheld = postedReach
-    ? []
-    : atMerged.flatMap((e) => e.withheld ?? []).filter((w) => !seen.has(w.id) && !!seen.add(w.id))
+  const withheld = envs
+    .filter((e) => e.verdict === verdict)
+    .flatMap((e) => e.withheld ?? [])
+    .filter((w) => !seen.has(w.id) && !!seen.add(w.id))
   if (withheld.length) out.withheld = withheld
   return out
 }
