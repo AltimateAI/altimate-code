@@ -2602,7 +2602,7 @@ const MISC: Rule[] = [
     "suggestion",
     "FETCH FIRST portability",
     "`FETCH FIRST n ROWS` isn't supported everywhere; `LIMIT` (with ORDER BY) is more portable.",
-    { added: /fetch\s+first\s+\d+/i, portability: { worksOn: ["postgres", "snowflake", "oracle", "trino"] } },
+    { added: /fetch\s+first\s+\d+/i, portability: { worksOn: ["postgres", "snowflake", "oracle", "trino", "duckdb"] } },
     { add: "fetch first 10 rows only" },
     { add: "limit 10" },
   ),

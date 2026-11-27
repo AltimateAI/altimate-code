@@ -535,6 +535,10 @@ describe("portability noise", () => {
     for (const ansi of ["select d - interval '30' day as d30 from t", "select d + interval '12' month as d12 from t"])
       for (const dialect of ["trino", "athena", "bigquery", "oracle", "mysql"])
         expect(await rules(ansi, dialect)).not.toContain("interval-string-literal")
+    // DuckDB accepts `FETCH FIRST n ROWS ONLY`; BigQuery does not.
+    const fetchFirst = "select id from t order by id fetch first 10 rows only"
+    expect(await rules(fetchFirst, "duckdb")).not.toContain("fetch-first")
+    expect(await rules(fetchFirst, "bigquery")).toContain("fetch-first")
   })
 })
 
