@@ -488,6 +488,13 @@ describe("rawReach", () => {
     expect(star("sha2(\n    ssn\n  ) as h")).toBe(false)
     expect(star("coalesce(\n    ssn,\n    '') as tax_ref", "\nselect tax_ref from src")).toBe(true)
     expect(star("coalesce(\n    ssn,\n    '') as tax_ref", "\nselect customer_id from src")).toBe(false)
+    // Each modifier list applies to the star's own columns, not to the list before it.
+    const through = (modifiers: string, final: string) => reaches(src(`, mid as (\n  select * ${modifiers} from src\n)\nselect ${final} from mid`))
+    expect(through("rename (tax_ref as x, x as y)", "x")).toBe(true)
+    expect(through("rename (tax_ref as x, x as y)", "y")).toBe(false)
+    expect(through("replace (md5(tax_ref) as tax_ref, tax_ref as customer_id)", "customer_id")).toBe(true)
+    expect(through("replace (md5(tax_ref) as tax_ref, tax_ref as customer_id)", "tax_ref")).toBe(false)
+    expect(through("exclude (tax_ref) replace (tax_ref as customer_id)", "customer_id")).toBe(true)
   })
 
   test("mayExpose: a column no select item names is exposed only through a table's `*`", () => {
@@ -614,6 +621,34 @@ describe("rawReach", () => {
       ["an `unpivot` statement", "unpivot customers\non\n  ssn\ninto name k value v"],
       ["a FROM-first CTE body", "with a as (\n  select\n    ssn as x\n  from customers\n),\nb as (from a select x as tax_ref)\nselect tax_ref from b"],
       ["a union whose first branch is a table's `select *`", "with b as (\n  select\n    ssn,\n    id\n  from customers\n),\nu as (\n  select * from {{ ref('stg_other') }}\n  union all\n  select * from b\n)\nselect id from u"],
+      ["jinja comment in sql comment", "select\n  id,\n  -- {#\n  md5(\n  -- #}\n  ssn\n  -- {#\n  )\n  -- #}\n  as tax_ref\nfrom customers"],
+      ["backslash escape hides paren", "select\n  id,\n  md5(concat(trim(name, '\\''), '\\'')) as name_key,\n  ssn,\n  email\nfrom customers"],
+      ["snowflake slash comment", "select\n  id, // TODO hash( later\n  ssn,\n  email\nfrom customers"],
+      ["nested block comment", "select\n  id,\n  /* note /* nested */ md5( -- */\n  ssn,\n  email\nfrom customers"],
+      ["predicate alias collision", "select\n  id in (select customer_id from churned) as v,\n  v.*\nfrom (\n  select\n    id,\n    ssn\n  from customers\n) v"],
+      ["rename swap", "with b as (\n  select\n    ssn as a,\n    id as x\n  from customers\n),\nc as (select * rename (a as x, x as y) from b)\nselect x from c"],
+      ["dollar string dashes", "select\n  id,\n  md5(name || $$--$$) as name_key,\n  ssn,\n  email\nfrom customers"],
+      ["multi item", "with h as (\n  select\n    id,\n    email\n  from customers\n)\nselect\n  id,\n  ssn,\n  md5(email) as e\nfrom h"],
+      ["dollar in name", "select\n  id,\n  ssn$raw\nfrom customers"],
+      ["struct star cte", "with a as (\n  select\n    ssn.*\n  from customers\n)\nselect number from a"],
+      ["nested comment balanced", "select\n  id,\n  /* a /* b */ md5( -- */\n  ssn\n  /* a /* b */ ) -- */\n  as tax_ref\nfrom customers"],
+      ["backslash balanced", "select\n  id,\n  md5(name || '\\'') || '\\'' ||\n  ssn\n  || '\\'' || upper('\\'') as tax_ref\nfrom customers"],
+      ["jinja comment scalar subquery", "select\n  -- {#\n  id in\n  -- #}\n  (\n    select\n      ssn\n    from customers\n    limit 1\n  ) as tax_ref\nfrom customers"],
+      ["jinja comment in literal", "select\n  id,\n  '{#' || md5('#}' ||\n  ssn\n  || '{#') || '#}' as tax_ref\nfrom customers"],
+      ["replace parallel", "with a as (\n  select\n    id,\n    name,\n    ssn\n  from customers\n)\nselect * replace (md5(ssn) as ssn, ssn as name) from a"],
+      ["exclude then replace", "with a as (\n  select\n    id,\n    name,\n    ssn\n  from customers\n)\nselect * exclude (ssn) replace (ssn as name) from a"],
+      ["quoted jinja alias", "{% set tax_col = 'tax_ref' %}\nwith a as (\n  select\n    ssn as \"{{ tax_col }}\"\n  from customers\n)\nselect tax_ref from a"],
+      ["nested from", "with a as (\n  select\n    ssn as x\n  from customers\n)\nselect x from (select x from (select x from a) s1) s2"],
+      ["correlated3", "with a as (\n  select\n    id,\n    ssn as x\n  from customers\n)\nselect (select (select max(a.x) from orders o2) from orders o1 limit 1) as y from a"],
+      ["if union", "with a as (\n  select\n    ssn as x\n  from customers\n),\nu as (\n  select md5(name) as x from customers\n  {% if var('full', true) %}\n  union all\n  select x from a\n  {% endif %}\n)\nselect x from u"],
+      ["union3", "with a as (\n  select id, md5(name) as x from customers\n),\nb as (\n  select\n    id,\n    ssn as x\n  from customers\n),\nu as (\n  select id, x from a\n  union all\n  select id, x from a\n  union all\n  select * from b\n)\nselect x from u"],
+      ["union in from", "with b as (\n  select\n    id,\n    ssn as x\n  from customers\n)\nselect t.x from (select id, md5(name) as x from customers union all select * from b) t"],
+      ["intersect mix", "with b as (\n  select\n    ssn as x\n  from customers\n)\nselect x from b\nexcept\nselect md5(name) from customers"],
+      ["lateral alias eq src", "with a as (\n  select\n    ssn as tax,\n    id\n  from customers\n)\nselect md5(tax) as tax, tax as t2 from a"],
+      ["array agg order", "with a as (\n  select\n    id,\n    ssn\n  from customers\n)\nselect array_agg(id order by ssn) as f from a"],
+      ["named arg", "with a as (\n  select\n    ssn\n  from customers\n)\nselect struct_pack(k := ssn) as rec from a"],
+      ["lambda", "with a as (\n  select\n    id,\n    ssn\n  from customers\n)\nselect list_transform([1], x -> ssn) as l from a"],
+      ["json path", "with a as (\n  select\n    ssn\n  from customers\n)\nselect ssn['a'] as l, ssn->>'b' as m from a"],
     ]
     for (const [name, sql] of cases) {
       const lines = lineReaches(sql)

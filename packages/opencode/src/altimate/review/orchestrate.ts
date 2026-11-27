@@ -1573,7 +1573,8 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     if (!r) {
       r = {
         removed: new Set(splitDiff(ctx.file.diff).removed.map(normalizeSelectLine).filter(Boolean)),
-        head: selectItems(ctx.newSql),
+        // One parse of the head serves the reindent check and the reach analysis.
+        head: headReach(file)?.items ?? selectItems(ctx.newSql),
         headLines: ctx.newSql.split("\n").map(normalizeSelectLine),
         base: new Set(ctx.oldSql ? selectItems(ctx.oldSql).map(itemKey) : []),
       }
