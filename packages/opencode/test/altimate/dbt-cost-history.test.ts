@@ -96,7 +96,7 @@ describe("history SQL builders", () => {
     expect(bigqueryCapacitySql({ project: "p", view: "JOBS_BY_USER", asOfMs: ASOF })).toContain("JOBS_BY_USER")
   })
 
-  test("BigQuery: the children of matched scripts are read by parent id, escaped, in the same window and region", () => {
+  test("BigQuery: the children of matched scripts are read by parent id, escaped, from the earliest parent's creation, in the same region", () => {
     const sql = bigqueryChildrenSql({ project: "p", location: "EU", parents: ["job_1", "j'2"], sinceMs: 1_700_000_000_123 })
     expect(sql).toContain("parent_job_id in ('job_1','j\\'2')")
     expect(sql).toContain("`region-eu`")
@@ -540,7 +540,7 @@ describe("run boundary", () => {
       { ...bq("m", 0, TIB), creation_time: at(3), end_time: at(4) },
     ]
     const price = (end: number) => priceBigquery(rows, undefined, "model.s.m", {}, boundary({ user: "a@x.com", start: C - 30 * MIN, end: C + end * MIN, tmp: true })).cost
-    // Ending 8 minutes before the merge's start is outside its ten minutes of the merge (-7): the run is whole.
+    // Ending at -8 minutes is eleven minutes before the merge's start (+3), outside its ten minutes of it: the run is whole.
     expect(price(-8).runs).toBe(1)
     // Ending 6 minutes before the cutoff is inside them.
     expect(price(-6).basis).toBe("none")
@@ -635,7 +635,7 @@ describe("boundary SQL", () => {
 
 describe("script children at their limit", () => {
   test("a script that began before the oldest child returned is unknown, a later one is priced", () => {
-    const old = bq("old", 0, null, null, 0, "SCRIPT")
+    const old = bq("old", 700, null, null, 0, "SCRIPT")
     const recent = bq("recent", 1000, null, null, 0, "SCRIPT")
     const kid = (id: string, parent: string, startMin: number): Row => ({
       job_id: id,
@@ -647,9 +647,10 @@ describe("script children at their limit", () => {
       reservation_id: null,
       cache_hit: "False",
     })
-    // The oldest child returned (minute 500) is another script's: the cut happened there, so a script from minute 1000 is whole.
-    // The old script has a child past the cut, but may have had more before it.
-    const children = [kid("edge", "elsewhere", 500), kid("oc", "old", 700), ...Array.from({ length: BQ_CHILD_LIMIT - 2 }, (_, i) => kid(`x${i}`, "recent", 1001 + i))]
+    // Every child belongs to a matched script and starts during it. The oldest child returned is the old script's, a
+    // moment after it began: the cut happened there, so the old script may have had more children before it, while the
+    // recent one (minute 1000) began after the cut and is whole.
+    const children = [kid("oc", "old", 700.1), ...Array.from({ length: BQ_CHILD_LIMIT - 1 }, (_, i) => kid(`x${i}`, "recent", 1000 + i * 1e-5))]
     const { cost } = priceBigquery([old, recent, bq("filler", 5000, TIB)], children, "model.s.m", {})
     expect(cost.runs).toBe(2)
     expect(cost.notes.join(" ")).toContain("1 run left out")
@@ -679,23 +680,23 @@ describe("review follow-ups: BigQuery temporary relation pairing", () => {
     expect(priceBigquery([ds(tmp("t", 0, TIB), "prod"), ds(bq("m", 6, TIB), "prod")], undefined, "model.s.m", {}).cost.runs).toBe(1)
   })
 
-  test("interleaved prod and dev invocations by one user do not swap a CTAS between the other's MERGE", () => {
-    // prod CTAS (100 TiB) ends first, dev CTAS (1 TiB) second; the dev MERGE starts before the prod MERGE.
-    // Without the dataset, prod's CTAS would pair with dev's MERGE, and the pairs' spans would differ.
-    const rows = [
-      ds(tmp("tp", 0, 100 * TIB), "prod"),
-      ds(tmp("td", 1, TIB), "dev"),
-      ds(bq("md", 3, TIB), "dev"),
-      ds(bq("mp", 6, 100 * TIB), "prod"),
-    ]
+  test("a prod CTAS that ended first does not take the dev MERGE: the dev pair stays six minutes from it, a run of its own", () => {
+    // The prod CTAS (100 TiB) ends at minute 1 and the dev CTAS (1 TiB) at minute 8; the dev MERGE starts at minute 8,
+    // seven minutes after the prod CTAS ended, so by time alone the prod CTAS could take it. With the dataset it cannot:
+    // the dev pair is minutes 7-9 and the prod CTAS, with no prod MERGE, is a separate run.
+    const rows = [ds(tmp("tp", 0, 100 * TIB), "prod"), ds(tmp("td", 7, TIB), "dev"), ds(bq("md", 8, TIB), "dev")]
+    const { cost } = priceBigquery(rows, undefined, "model.s.m", {})
+    expect(cost.runs).toBe(2)
+    expect(cost.highest).toBeCloseTo(100 * 6.25, 10)
+    expect(cost.lastRun).toBeCloseTo(2 * 6.25, 10)
+  })
+
+  test("interleaved prod and dev invocations by one user overlap in time, so they are reported as one run of both costs", () => {
+    // Grouping is by user and time, not by dataset: the report says so rather than splitting overlapping work.
+    const rows = [ds(tmp("tp", 0, 100 * TIB), "prod"), ds(tmp("td", 1, TIB), "dev"), ds(bq("md", 3, TIB), "dev"), ds(bq("mp", 6, 100 * TIB), "prod")]
     const { cost } = priceBigquery(rows, undefined, "model.s.m", {})
     expect(cost.runs).toBe(1)
     expect(cost.lastRun).toBeCloseTo(202 * 6.25, 10)
-    // Pairing by dataset keeps a pair apart from an unrelated, later invocation of the same user.
-    const later = [...rows, ds(tmp("t2", 30, TIB), "dev"), ds(bq("m2", 33, TIB), "dev")]
-    const apart = priceBigquery(later, undefined, "model.s.m", {}).cost
-    expect(apart.runs).toBe(2)
-    expect(apart.highest).toBeCloseTo(202 * 6.25, 10)
   })
 
   test("each temporary CTAS takes its own final build, so two invocations whose merges are minutes apart stay one run", () => {
@@ -910,8 +911,9 @@ describe("review follow-ups: text and causes", () => {
     const script = bq("s", 0, null, null, 0, "SCRIPT")
     const kid = (i: number): Row => ({
       job_id: `k${i}`,
-      parent_job_id: "other",
-      creation_time: new Date(10 * MIN).toISOString(),
+      // Every child belongs to the matched script and starts during it: a response the children query can return.
+      parent_job_id: "s",
+      creation_time: new Date(MIN / 2).toISOString(),
       statement_type: "MERGE",
       total_bytes_billed: "1",
       total_slot_ms: "0",

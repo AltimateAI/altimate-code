@@ -158,7 +158,7 @@ function bqJobs(project: string, location: unknown, view: JobsView): string {
   return `\`${project}\`.\`region-${sanitizeBqRegion(location)}\`.INFORMATION_SCHEMA.${view}`
 }
 
-/** Every query reads the same instant, `asOfMs`, as a literal: a window that slid between queries would not describe one period. */
+/** The history and capacity queries (and the boundary, from its cutoff) read the same instant, `asOfMs`, as a literal: a window that slid between queries would not describe one period. */
 export function bigqueryHistorySql(input: { project: string; location?: unknown; needle: string; view?: JobsView; asOfMs: number }): string {
   return `select /* ${OWN_MARK} */ job_id, user_email, creation_time, end_time, state, statement_type, destination_table.table_id as destination_table_id, destination_table.dataset_id as destination_dataset_id, total_bytes_billed, total_slot_ms, reservation_id, cache_hit
 from ${bqJobs(input.project, input.location, input.view ?? "JOBS")}
@@ -461,7 +461,7 @@ const sumUnits = (start: number, units: BqUnit[], over: { user: string; final: b
 const sameDataset = (a: BqUnit, b: BqUnit) => !a.dataset || !b.dataset || a.dataset === b.dataset
 
 /**
- * BigQuery runs: one invocation of the model is one run. The model's matched top-level jobs by one user form a run
+ * BigQuery runs, grouped by user and time (the invocation id is not available): the model's matched top-level jobs by one user form a run
  * while each job starts within a minute after the previous job of the run ended (a pre- or post-hook, a delete or
  * update, each batch of a microbatch model); a script counts as one job, priced from its children. dbt builds an
  * incremental model's temporary relation with a CREATE TABLE AS SELECT into `<model>__dbt_tmp` in the same dataset and
@@ -734,7 +734,7 @@ export function costText(c: CostInfo, shown = "the bytes it reports"): string {
 export const costHistoryInternals = {
   /** How long the history queries together wait for the warehouse; a slower one is no history, and the scan figure stands. */
   historyTimeoutMs: 60_000,
-  /** The instant a call reads the history as of: taken once, and written into every query as a literal. */
+  /** The instant a call reads the history as of: taken once, and written as a literal into the history and capacity queries and the boundary's cutoff. */
   now: () => Date.now(),
   /** The `cost` block of the config. */
   readCostConfig: async (): Promise<unknown> => {
@@ -764,7 +764,7 @@ export async function loadHistory(input: {
   cfg: CostConfig
 }): Promise<History> {
   const { adapter, signal, cfg } = input
-  // One instant for the whole call: the main read, its boundary, the children and the capacity check all use it.
+  // One instant for the whole call: the main read, its boundary and the capacity check use it (the children start at their earliest parent).
   const asOfMs = costHistoryInternals.now()
   const windowStart = windowStartMs(asOfMs)
   // A call cancelled while the scan ran stops here, whether or not any history query would have been sent.

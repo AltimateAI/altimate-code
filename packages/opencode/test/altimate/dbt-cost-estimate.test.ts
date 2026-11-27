@@ -403,7 +403,7 @@ describe("dbt_cost_estimate", () => {
   })
 })
 
-const JOB_COLUMNS = ["job_id", "user_email", "creation_time", "end_time", "statement_type", "destination_table_id", "total_bytes_billed", "total_slot_ms", "reservation_id", "cache_hit"]
+const JOB_COLUMNS = ["job_id", "user_email", "creation_time", "end_time", "statement_type", "destination_table_id", "destination_dataset_id", "total_bytes_billed", "total_slot_ms", "reservation_id", "cache_hit"]
 const CHILD_COLUMNS = ["job_id", "parent_job_id", "creation_time", "statement_type", "total_bytes_billed", "total_slot_ms", "reservation_id", "cache_hit"]
 const TIB = 1024 ** 4
 const job = (
@@ -416,6 +416,7 @@ const job = (
   type = "MERGE",
   user = "a@x.com",
   destination: string | null = null,
+  dataset: string | null = null,
 ) => [
   id,
   user,
@@ -423,6 +424,7 @@ const job = (
   end,
   type,
   destination,
+  dataset,
   billed === null ? null : String(billed),
   String(slotMs),
   reservation,
@@ -534,6 +536,16 @@ describe("dbt_cost_estimate cost", () => {
       rate: { value: 0.06, unit: "USD/slot-hour", source: "default" },
     })
     expect(cost.notes.join(" ")).toContain("not each job")
+  })
+
+  test("BigQuery: a temporary CTAS into one dataset and a MERGE into another five minutes later are two runs through the tool", async () => {
+    const tmpJob = (dataset: string) => job("t", "2026-05-02 10:00:00+00:00", "2026-05-02 10:01:00+00:00", TIB, null, 0, "CREATE_TABLE_AS_SELECT", "a@x.com", "orders__dbt_tmp", dataset)
+    const merge = (dataset: string) => job("m", "2026-05-02 10:06:00+00:00", "2026-05-02 10:07:00+00:00", TIB, null, 0, "MERGE", "a@x.com", null, dataset)
+    useAdapter(calls, { history: bigqueryHistory([merge("dev"), tmpJob("prod")]) })
+    expect((await (await initTool(DbtCostEstimateTool)).execute({ model: "orders", history: true }, ctx)).metadata.cost.runs).toBe(2)
+    resetDbtAdapter()
+    useAdapter(calls, { history: bigqueryHistory([merge("prod"), tmpJob("prod")]) })
+    expect((await (await initTool(DbtCostEstimateTool)).execute({ model: "orders", history: true }, ctx)).metadata.cost.runs).toBe(1)
   })
 
   test("BigQuery: the CTAS into dbt's temporary relation and the MERGE after it are one run through the tool", async () => {
@@ -817,7 +829,7 @@ describe("dbt_cost_estimate cost", () => {
     // window before the oldest run still belongs to it (a gap of exactly the limit joins); one a millisecond earlier does
     // not. An adapter consistent with the SQL returns a statement iff it is created before the start literal and ended at or
     // after the chain literal.
-    // The oldest statement is five days before the as-of instant; the fillers follow it, 14.4 minutes apart, all before it.
+    // The oldest statement is five days before the as-of instant; the fillers follow it, 14.4 minutes apart, all after it.
     const asOf = Date.UTC(2026, 4, 15)
     const T0 = asOf - 5 * 86_400_000
     const step = 864_000
@@ -960,9 +972,9 @@ describe("dbt_cost_estimate cost", () => {
   describe("unfinished runs and boundary identity through the tool", () => {
     const asOf = Date.UTC(2026, 5, 1, 20, 0, 0)
     const iso = (ms: number) => new Date(ms).toISOString()
-    const COLS = [...JOB_COLUMNS, "state", "destination_dataset_id"]
+    const COLS = [...JOB_COLUMNS, "state"]
     const row = (id: string, start: number, end: number, type: string, billed: number, state = "DONE", dataset: string | null = null, dest: string | null = null) => [
-      id, "a@x.com", iso(start), iso(end), type, dest, String(billed), "0", null, "False", state, dataset,
+      id, "a@x.com", iso(start), iso(end), type, dest, dataset, String(billed), "0", null, "False", state,
     ]
     const withNow = async (run: () => Promise<void>) => {
       costHistoryInternals.now = () => asOf
