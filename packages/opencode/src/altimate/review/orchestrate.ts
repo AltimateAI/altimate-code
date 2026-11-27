@@ -1289,10 +1289,12 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // output that is not a raw column is base-exposed when every source column its
   // value is computed from is one a base PII output exposed raw, or when the base
   // computes the name the same way (same item text with its literals, same
-  // CTEs/subqueries read): `md5(x) as x` → `lower(x) as x` unmasks, and base raw
-  // `email` → `lower(ssn) as email` reads `ssn`. A name the head's final select doesn't resolve
-  // counts as base-exposed only when the head passes it through a plain `*` (from
-  // a table) and the base exposed it raw, or passed it through a `*` as well.
+  // CTEs/subqueries read, over source columns the base's name also read):
+  // `md5(x) as x` → `lower(x) as x` unmasks, and base raw `email` →
+  // `lower(ssn) as email` reads `ssn`. A name the head's final select doesn't
+  // resolve counts as base-exposed only when the head passes it through a plain
+  // `*` and every source column that `*` resolves it to was exposed raw by a
+  // base PII output (named, or through the base's own `*`).
   const isBaseExposedOutput = (file: string, name: string, basePii: Set<string>) => {
     const head = outputs(file, "new")
     const rawColumns = head.raw.get(name)
@@ -1306,13 +1308,25 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
       const exposed = baseRawPii(file)
       const reads = head.reads.get(name)
       if (reads && [...reads].every((ref) => refCovered(ref, exposed, envOf(file)))) return true
+      // The same computation counts only over the same source columns: the
+      // signature holds the item text and derived-query bodies, not the tables
+      // (`lower(email)` from `customers` → from `spouses` is new). Refs no
+      // source explains are left to the signature.
+      const baseReads = base.reads.get(name) ?? new Set<string>()
+      const sameReads = [...(reads ?? [])]
+        .filter((ref) => !ref.startsWith("?"))
+        .every((ref) => refCovered(ref, baseReads, envOf(file)))
       const baseSigs = base.signatures.get(name)
-      return !!baseSigs && [...(head.signatures.get(name) ?? [])].every((sig) => baseSigs.has(sig))
+      return sameReads && !!baseSigs && [...(head.signatures.get(name) ?? [])].every((sig) => baseSigs.has(sig))
     }
     // Unresolved only through a plain `*`: a shape the parser does not model (a
-    // parenthesised top-level union, `* except (…)`) is reported.
+    // parenthesised top-level union, `* except (…)`) is reported. A `*` the
+    // parser resolves is base-exposed only when every source column it passes
+    // the name through was one a base PII output exposed raw.
     if (!head.passthrough) return false
-    return base.raw.has(name) || (!base.names.has(name) && base.passthrough)
+    const starRefs = head.starRaw(name)
+    const exposed = baseRawPii(file)
+    return starRefs.size > 0 && [...starRefs].every((ref) => refCovered(ref, exposed, envOf(file)))
   }
   for (const ctx of ctxByPath.values()) {
     const tasks: Promise<Finding[]>[] = []

@@ -2592,6 +2592,46 @@ describe("orchestrate", () => {
     )
   })
 
+  test("a computed PII output read from another table is new even when its text matches the base", async () => {
+    const base = "select customer_id,\n  lower(email) as email\nfrom customers"
+    const head = base.replace("from customers", "from spouses")
+    expectReportedPii(await piiRuns(head, base, "-from customers\n+from spouses\n", ["email"]), ["email"], "none")
+    // Control: the same computation over the same table is not new.
+    const same = base.replace("lower(email)", "lower( email )")
+    for (const { reviewers, env } of await piiRuns(same, base, "-  lower(email) as email\n+  lower( email ) as email\n", ["email"]))
+      expect({ reviewers, pii: env.findings.filter((f) => f.category === "pii_exposure") }).toEqual({ reviewers, pii: [] })
+  })
+
+  test("a head `*` over another table does not inherit the base's named PII column", async () => {
+    const runs = async (head: string, base: string, diff: string) => {
+      const out: Array<{ reviewers: string[]; env: Awaited<ReturnType<typeof runReview>> }> = []
+      for (const reviewers of [["pii_exposure"], [], ["dbt_patterns"]]) {
+        const env = await runReview({
+          changedFiles: [{ path: "models/marts/m.sql", status: "modified", diff }],
+          config: { ...DEFAULT_REVIEW_CONFIG, reviewers },
+          rubric: DEFAULT_RUBRIC,
+          mode: "gate",
+          // detectPii sees the table's columns through `*`, as the real engine does with a schema.
+          runner: {
+            ...piiRunner(["email"]),
+            async detectPii(sql: string) {
+              return { columns: /\bemail\b|select\s+\*/i.test(sql) ? ["email"] : [] }
+            },
+          },
+          getContent: content(head, base),
+        })
+        out.push({ reviewers, env })
+      }
+      return out
+    }
+    const base = "select customer_id,\n  email\nfrom customers"
+    const diff = "-select customer_id,\n-  email\n-from customers\n+select *\n+from spouses\n"
+    expectReportedPii(await runs("select *\nfrom spouses", base, diff), ["email"], "none")
+    // Control: `*` over the same table is not new.
+    for (const { reviewers, env } of await runs("select *\nfrom customers", base, diff.replace("from spouses", "from customers")))
+      expect({ reviewers, pii: env.findings.filter((f) => f.category === "pii_exposure") }).toEqual({ reviewers, pii: [] })
+  })
+
   test("a head column pinned to one table is new when the base read it unqualified over a join", async () => {
     // Base `ssn` over customers ⋈ spouses does not say which table it came from.
     const base = "select customer_id,\n  ssn\nfrom customers c\njoin spouses s using (customer_id)"
