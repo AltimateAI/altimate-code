@@ -2632,6 +2632,16 @@ describe("orchestrate", () => {
       expect({ reviewers, pii: env.findings.filter((f) => f.category === "pii_exposure") }).toEqual({ reviewers, pii: [] })
   })
 
+  test("a masking literal whose case changed is a different computation", async () => {
+    const base = "select customer_id,\n  regexp_replace(email, '[a-z]', '*') as email\nfrom customers"
+    const head = base.replace("'[a-z]'", "'[A-Z]'")
+    expectReportedPii(
+      await piiRuns(head, base, "-  regexp_replace(email, '[a-z]', '*') as email\n+  regexp_replace(email, '[A-Z]', '*') as email\n", ["email"]),
+      ["email"],
+      "none",
+    )
+  })
+
   test("a head column pinned to one table is new when the base read it unqualified over a join", async () => {
     // Base `ssn` over customers ⋈ spouses does not say which table it came from.
     const base = "select customer_id,\n  ssn\nfrom customers c\njoin spouses s using (customer_id)"

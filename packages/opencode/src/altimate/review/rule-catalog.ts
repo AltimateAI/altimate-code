@@ -746,6 +746,11 @@ export function refCovered(ref: string, exposed: Set<string>, env?: RelationPref
   return false
 }
 
+/** `sql` lowercased except inside string literals, whose case can change what
+ *  an expression does (`regexp_replace(email, '[a-z]', '*')`). */
+const lowerOutsideLiterals = (sql: string) =>
+  sql.replace(/'(?:[^']|'')*'|[^']+/g, (m) => (m.startsWith("'") ? m : m.toLowerCase()))
+
 /** The model's final output: every name it resolves, the source columns each
  *  exposes raw (as `rawColumnExposures`), and how each is computed. */
 export function finalOutputs(sql: string): FinalOutputs {
@@ -863,7 +868,7 @@ export function finalOutputs(sql: string): FinalOutputs {
       const name = item.branch === 0 ? item.name : firstNames.get(item.position)
       if (!name) continue
       names.add(name)
-      addTo(signatures, name, [`${item.exact.toLowerCase()}\u0001${bodies.join("\u0002")}`])
+      addTo(signatures, name, [`${lowerOutsideLiterals(item.exact)}\u0001${bodies.join("\u0002")}`])
       if (item.rawColumn) {
         const refs = resolveRef(scope, item.branch, item.rawQualifier, item.rawColumn, seen)
         addTo(raw, name, refs.raw)
@@ -878,7 +883,7 @@ export function finalOutputs(sql: string): FinalOutputs {
       }
     }
     for (const [n, cols] of raw) if (!cols.size) raw.delete(n)
-    const body = [scopeItems.map((i) => i.exact.toLowerCase()).join(","), ...[...readBodies].sort()].join("\u0003")
+    const body = [scopeItems.map((i) => lowerOutsideLiterals(i.exact)).join(","), ...[...readBodies].sort()].join("\u0003")
     const result = { raw, names, signatures, reads, stars, body }
     memo.set(scope, result)
     return result
