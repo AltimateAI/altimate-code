@@ -30,8 +30,8 @@ import {
   loadHistory,
   manifestPathFor,
   modelFromManifest,
+  BOUNDARY_LOOKBACK_DAYS,
   bigqueryBoundarySql,
-  bigqueryLiveSql,
   boundaryWindow,
   sqlString,
   summarize,
@@ -121,7 +121,6 @@ describe("history SQL builders", () => {
       bigqueryChildrenSql({ project: "p", parents: ["a"], sinceMs: 1 }),
       bigqueryCapacitySql({ project: "p", asOfMs: ASOF }),
       bigqueryBoundarySql({ project: "p", needle, window: w }),
-      bigqueryLiveSql({ project: "p", needle, asOfMs: ASOF }),
     ]
     const columns = ["statement_type", "job_type", "state"]
     const bare = new RegExp(`(?<!upper\\()(?:\\b\\w+\\.)?\\b(${columns.join("|")})\\b\\s*(=|in\\s*\\()`, "g")
@@ -598,7 +597,8 @@ describe("boundary SQL", () => {
   test("the window is derived from the cutoff itself: the start bound reaches it, every lookback is measured from it", () => {
     expect(w).toEqual({
       startBeforeMs: CUT + 1,
-      startAfterMs: CUT - 86_400_000,
+      startAfterMs: CUT - 2 * 86_400_000,
+      liveStartAfterMs: CUT - 30 * 86_400_000,
       joinEndAtLeastMs: CUT - 60_000,
       tmpEndAtLeastMs: CUT - 600_000,
     })
@@ -624,20 +624,15 @@ describe("boundary SQL", () => {
     expect(sql).toContain(`strpos(query, '"node_id": "model.shop.orders"') > 0`)
   })
 
-  test("the live read takes the model's jobs still queued or running across the window, apart from the boundary", () => {
-    const sql = bigqueryLiveSql({ project: "p", location: "EU", needle, view: "JOBS_BY_USER", asOfMs: ASOF })
-    expect(sql).toContain("`p`.`region-eu`.INFORMATION_SCHEMA.JOBS_BY_USER")
-    expect(sql).toContain(`creation_time > timestamp_millis(${WINDOW}) and creation_time <= timestamp_millis(${ASOF})`)
-    // A job with no end time yet is still going whatever its state says.
-    expect(sql).toContain("(upper(state) in ('PENDING','RUNNING') or end_time is null)")
-    expect(sql).toContain("strpos(query, 'altimate_cost_read') = 0")
-    expect(sql).toContain(`strpos(query, '"node_id": "model.shop.orders"') > 0`)
-    expect(sql).toContain("parent_job_id is null")
-    expect(sql).toContain("limit 500")
-    // The boundary stays a read of finished jobs, so live ones cannot crowd it.
-    const boundary = bigqueryBoundarySql({ project: "p", needle, window: w })
-    expect(boundary).toContain("upper(state) = 'DONE' and error_result is null")
-    expect(boundary).not.toContain("PENDING")
+  test("one boundary read: finished jobs from the two-day lookback, or jobs still going from anywhere in the window, going first", () => {
+    const sql = bigqueryBoundarySql({ project: "p", needle, window: boundaryWindow(CUT, CUT - 5 * 86_400_000) })
+    const going = "(upper(state) in ('PENDING','RUNNING') or end_time is null)"
+    expect(sql).toContain(`(${going} and creation_time > timestamp_millis(${CUT - 5 * 86_400_000}))`)
+    expect(sql).toContain(`creation_time > timestamp_millis(${CUT - 2 * 86_400_000}) and upper(state) = 'DONE' and error_result is null`)
+    expect(sql).toContain(`order by ${going} desc, creation_time desc limit 500`)
+    expect(sql).toContain("end_time, state, statement_type")
+    expect(sql).not.toContain("liveStart")
+    expect(BOUNDARY_LOOKBACK_DAYS).toBe(2)
   })
 
   test("the boundary query returns the id of each statement, so the ones already read can be excluded", () => {
@@ -913,20 +908,14 @@ describe("review follow-ups: read-only hooks, boundary identity and unfinished r
     expect(price([job("m", 5, 1, TIB, "MERGE")], { cutoff: C3, stmts: [{ user: A, start: C3 - 30 * MIN, end: C3 + 4.5 * MIN }] }).notes.join(" ")).toContain("may have started before")
   })
 
-  test("when the live read is full, every run by the users it saw is left out", () => {
+  test("when the boundary read is full, every run by the users with a job still going is left out", () => {
     const rows = [job("a1", 25 * 60, 1, TIB, "MERGE"), job("b1", 25 * 60, 1, TIB, "MERGE", { user_email: "b@x.com" })]
     const cost = priceBigquery(rows, undefined, "model.s.m", {}, { cutoff: C3, live: [{ user: "a@x.com", start: C3 + 3000 * MIN }], liveFullUsers: ["a@x.com"] }).cost
     // The live jobs began long after a1 ended, so only the full read's rule leaves it out; b's run stays.
     expect(cost.runs).toBe(1)
     expect(cost.lastRun).toBe(6.25)
-    expect(cost.notes.join(" ")).toContain("More jobs still running were found than the read can hold")
+    expect(cost.notes.join(" ")).toContain("The read of jobs before the period was full")
     expect(cost.notes).toContain("A run still in progress was left out.")
-  })
-
-  test("a failed live read says a run may belong to a job still going", () => {
-    const cost = priceBigquery([job("m", 25 * 60, 1, TIB, "MERGE")], undefined, "model.s.m", {}, { cutoff: C3, liveUnread: true }).cost
-    expect(cost.runs).toBe(1)
-    expect(cost.notes.join(" ")).toContain("Jobs still running before the period could not be read")
   })
 
   test("a finished-looking job with no end time is still running", () => {

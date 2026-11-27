@@ -51,8 +51,6 @@ function fakeAdapter(
     history?: (jinja: string) => Promise<string>
     /** What the boundary query (the matching statements just before the period read) renders; none by default. */
     boundary?: (jinja: string) => Promise<string>
-    /** What the read of jobs still queued or running renders (their user, creation and state); none by default. */
-    live?: (jinja: string) => Promise<string>
     /** What the dbt target renders. */
     target?: string
     /** The manifest path the adapter reports (`getManifestPath`), as the project's own adapter does. */
@@ -73,8 +71,6 @@ function fakeAdapter(
     unsafeCompileQuery: async (query: string, name?: string) => {
       if (query.startsWith("{%- if execute -%}{%- set altimate_rows")) {
         historyLog.push(query)
-        if (query.includes("/* altimate_cost_read */ job_id, user_email, creation_time, end_time, state\n"))
-          return opts.live ? opts.live(query) : table(["job_id", "user_email", "creation_time", "end_time", "state"], [])
         if (query.includes("/* run boundary */"))
           return opts.boundary ? opts.boundary(query) : table(["session_id", "creation_time", "start_time", "end_time"], [])
         if (opts.history) return opts.history(query)
@@ -1034,29 +1030,33 @@ describe("dbt_cost_estimate cost", () => {
         return r
       }),
     ]
-    const fullBoundary = async () => table(["job_id"], Array.from({ length: 500 }, (_, i) => [`b${i}`]))
-    const liveTable = (users: string[], created = T0 - 60_000) => table(["job_id", "user_email", "creation_time", "end_time", "state"], users.map((u, i) => [`q${i}`, u, iso(created), null, "PENDING"]))
+    const BOUNDARY_COLS = ["job_id", "user_email", "creation_time", "end_time", "state", "statement_type", "destination_table_id", "destination_dataset_id"]
+    /** A full boundary read (500 rows), the jobs still going first, as the query orders them. */
+    const fullBoundaryWith = (going: (string | null)[][]) => async () =>
+      table(BOUNDARY_COLS, [...going, ...Array.from({ length: 500 - going.length }, (_, i) => [`b${i}`, `x${i}@x.com`, iso(T0 - 3_600_000), iso(T0 - 3_000_000), "DONE", "MERGE", null, null])])
+    const goingRow = (end: string | null, state: string, created = T0 - 60_000, user = "a@x.com") => ["q", user, iso(created), end, state, "MERGE", null, null]
+    const boundaryQueries = () => historyLog.filter((q) => q.includes("run boundary"))
 
     test("a pending job a minute before the cutoff leaves out user a's build 2 days later, though the boundary read was full", async () => {
       await withNow(async () => {
-        useAdapter(calls, { ...answer(fullRows()), boundary: fullBoundary, live: async () => liveTable(["a@x.com"]) })
+        useAdapter(calls, { ...answer(fullRows()), boundary: fullBoundaryWith([goingRow(null, "PENDING")]) })
         const cost = await ask()
         expect(cost.notes).toContain("2 runs still in progress were left out.")
         // The 100 TiB build is not priced.
         expect(cost.highest).toBeLessThan(100 * 6.25)
+        // One boundary read, and no other query for jobs still going.
+        expect(boundaryQueries()).toHaveLength(1)
+        // Jobs still going are read from the start of the history window, whatever the cutoff.
+        expect(boundaryQueries()[0]).toContain(`creation_time > timestamp_millis(${asOf - 30 * day}))`)
+        expect(historyLog.some((q) => q.includes("end_time, state\n"))).toBe(false)
       })
     })
 
-    test("a DONE job with no end time before the cutoff is read as live and leaves out the same user's build two days later", async () => {
+    test("a DONE job with no end time before the cutoff is read as going and leaves out the same user's build two days later", async () => {
       await withNow(async () => {
         useAdapter(calls, {
           ...answer(fullRows()),
-          boundary: fullBoundary,
-          // An adapter consistent with the SQL: the job is returned only if the query's predicate takes a null end time.
-          live: async (jinja) =>
-            /or end_time is null\)/.test(jinja)
-              ? table(["job_id", "user_email", "creation_time", "end_time", "state"], [["q", "a@x.com", iso(T0 - 60_000), null, "DONE"]])
-              : table(["job_id", "user_email", "creation_time", "end_time", "state"], []),
+          boundary: async () => table(BOUNDARY_COLS, [goingRow(null, "DONE")]),
         })
         const cost = await ask()
         expect(cost.notes).toContain("2 runs still in progress were left out.")
@@ -1064,29 +1064,38 @@ describe("dbt_cost_estimate cost", () => {
       })
     })
 
-    test("without a live job the same build is priced", async () => {
+    test("a full boundary read leaves out every run by a user with a job still going, even one that ended long before", async () => {
       await withNow(async () => {
-        useAdapter(calls, { ...answer(fullRows()), boundary: fullBoundary })
-        expect((await ask()).highest).toBeCloseTo(100 * 6.25, 8)
-      })
-    })
-
-    test("a full live read leaves out every run by the users it saw", async () => {
-      await withNow(async () => {
-        useAdapter(calls, { ...answer(fullRows()), boundary: fullBoundary, live: async () => liveTable(Array.from({ length: 500 }, () => "a@x.com"), asOf - 3_600_000) })
+        useAdapter(calls, { ...answer(fullRows()), boundary: fullBoundaryWith([goingRow(null, "RUNNING", asOf - 3_600_000)]) })
         const cost = await ask()
-        expect(cost.notes.join(" ")).toContain("More jobs still running were found than the read can hold")
+        expect(cost.notes.join(" ")).toContain("The read of jobs before the period was full")
         expect(cost.highest).toBeLessThan(100 * 6.25)
       })
     })
 
-    test("a job with no end time in the history read is still running, so its run is not priced", async () => {
+    test("without a job still going the same build is priced", async () => {
       await withNow(async () => {
-        const at = asOf - 3 * day
-        const noEnd = row("m", at, at, "MERGE", TIB)
-        noEnd[3] = null
-        useAdapter(calls, answer([noEnd]))
-        expect((await ask()).notes).toContain("A run still in progress was left out.")
+        useAdapter(calls, { ...answer(fullRows()), boundary: fullBoundaryWith([]) })
+        expect((await ask()).highest).toBeCloseTo(100 * 6.25, 8)
+      })
+    })
+
+    test("a CTAS created 25 hours before the cutoff that finished 30 s before it, and the MERGE 10 s after it, are one run that began unread", async () => {
+      await withNow(async () => {
+        const edge = asOf - 30 * day
+        const lit = (jinja: string, pattern: RegExp) => Number(pattern.exec(jinja)![1])
+        const created = edge - 25 * 3_600_000
+        useAdapter(calls, {
+          ...answer([row("m", edge + 10_000, edge + 70_000, "MERGE", TIB, "DONE", "d")]),
+          // An adapter consistent with the SQL: the finished CTAS is returned iff it was created after the lookback's start.
+          boundary: async (jinja) => {
+            const after = lit(jinja, /creation_time > timestamp_millis\((\d+)\) and upper\(state\) = \\?'DONE/)
+            return table(BOUNDARY_COLS, created > after ? [["t", "a@x.com", iso(created), iso(edge - 30_000), "DONE", "CREATE_TABLE_AS_SELECT", "orders__dbt_tmp", "d"]] : [])
+          },
+        })
+        const cost = await ask()
+        expect(cost.runs).toBeUndefined()
+        expect(cost.notes.join(" ")).toContain("1 run that may have started before the period read was left out.")
       })
     })
 
