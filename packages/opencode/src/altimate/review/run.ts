@@ -373,7 +373,7 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
   if (opts.noAi) aiDisabledReason = "disabled by --no-ai"
   else if (!aiLaneEnabled(config)) aiDisabledReason = "disabled in .altimate/review.yml"
   const aiOn = !aiDisabledReason
-  const aiSwitches = resolveAiSwitches(config)
+  const aiSwitches = resolveAiSwitches(config, process.env, { warn: aiOn })
   // `pythonFiles`: .py files outside the dbt project skip every lane but the AI lane. A file
   // renamed out of this project belongs to it (`--all-projects` assigns it here), so it is offered
   // at its new path whatever other projects took.

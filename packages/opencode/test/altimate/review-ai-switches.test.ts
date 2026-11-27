@@ -95,4 +95,17 @@ describe("ignored env values (round 2)", () => {
     }
     expect(err.split("ALTIMATE_REVIEW_AI_FOCUSED=sometimes").length - 1).toBe(1)
   })
+
+  test("no warning when the AI lane is off (`--no-ai`, `ai: false`)", () => {
+    const write0 = process.stderr.write
+    let err = ""
+    ;(process.stderr as any).write = (s: string) => ((err += s), true)
+    try {
+      const off = resolveAiSwitches({ ai: false }, { ALTIMATE_REVIEW_AI_VERIFY: "lane-off-value" }, { warn: false })
+      expect(off.verify).toBe(true)
+    } finally {
+      ;(process.stderr as any).write = write0
+    }
+    expect(err).toBe("")
+  })
 })

@@ -58,7 +58,11 @@ export function envBool(raw: string | undefined): boolean | undefined {
 const WARNED = new Set<string>()
 
 /** Every switch for one review: env, then the `ai:` config object, then the default. */
-export function resolveAiSwitches(cfg: Pick<ReviewConfig, "ai">, env: Env = process.env): AiSwitches {
+export function resolveAiSwitches(
+  cfg: Pick<ReviewConfig, "ai">,
+  env: Env = process.env,
+  opts: { warn?: boolean } = {},
+): AiSwitches {
   const configured = typeof cfg.ai === "object" ? cfg.ai : {}
   const out = { ...AI_SWITCH_DEFAULTS }
   for (const name of Object.keys(AI_SWITCH_ENV) as AiSwitchName[]) {
@@ -66,7 +70,8 @@ export function resolveAiSwitches(cfg: Pick<ReviewConfig, "ai">, env: Env = proc
     const raw = env[AI_SWITCH_ENV[name]]
     // Once per value per process: `--all-projects` resolves the switches for every project.
     const warning = `${AI_SWITCH_ENV[name]}=${raw}`
-    if (fromEnv === undefined && raw?.trim() && !WARNED.has(warning)) {
+    // No warning for a lane that will not run (`warn: false`).
+    if (opts.warn !== false && fromEnv === undefined && raw?.trim() && !WARNED.has(warning)) {
       WARNED.add(warning)
       process.stderr.write(`⚠️  ignoring ${AI_SWITCH_ENV[name]}=${raw}: use 1/0 (or true/false, on/off, yes/no)\n`)
     }
