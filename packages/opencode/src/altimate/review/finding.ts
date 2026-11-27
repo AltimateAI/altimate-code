@@ -100,6 +100,10 @@ export const Finding = z.object({
   deletionSite: z.boolean().optional(),
   /** Where the finding is posted: inline on the diff, or in the summary only. */
   tier: z.enum(["inline", "summary"]).optional(),
+  /** Id of the finding whose comment covers this one (the same team convention broken the
+   *  same way on another file; see `groupConventionFindings`). Kept in the envelope with its
+   *  own line; the renderer shows it through that comment while it is posted in this run. */
+  groupedInto: z.string().optional(),
   /** The source line the finding points at, quoted as evidence. */
   evidenceLine: z.string().max(200).optional(),
   /** A replacement for a line range, rendered as a suggestion block. */

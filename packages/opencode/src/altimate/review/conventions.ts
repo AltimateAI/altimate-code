@@ -458,36 +458,46 @@ function issueKey(f: Pick<Finding, "title" | "file" | "model">): string {
 
 /**
  * One comment per repeated convention finding (pure): AI findings in one review that name the
- * same convention for the same issue (title without the file's own names) on different files
- * become the first, most severe one, whose body lists the other files. Only one finding per
- * other file is folded in; further findings on the lead's file or on an already-folded file
- * may be distinct issues and stay. Other findings are returned unchanged, in order.
+ * same convention for the same issue (same category, title without the file's own names) on
+ * different files are covered by one lead: the most severe, then the first by path and line,
+ * whose body lists the other files. Only the first finding on each other file is folded in;
+ * further findings on the lead's file or on an already-folded file may be distinct issues and
+ * stay. Folded findings are kept, in place and unchanged but for `groupedInto` (the lead's id),
+ * so the envelope keeps their lines; the renderer collapses them into the lead's comment.
  */
 export function groupConventionFindings(findings: Finding[], conventions: Convention[]): Finding[] {
   const paths = [...new Set(conventions.map((c) => c.path))]
   if (!paths.length || findings.length < 2) return findings
   const groups = new Map<string, number[]>()
   findings.forEach((f, i) => {
+    if (f.groupedInto) return
     const cited = citedConvention(f, paths)
     if (!cited) return
-    const key = `${cited}\u0000${issueKey(f)}`
+    const key = `${cited}\u0000${f.category}\u0000${issueKey(f)}`
     groups.set(key, [...(groups.get(key) ?? []), i])
   })
   const replace = new Map<number, Finding>()
-  const drop = new Set<number>()
   for (const idx of groups.values()) {
     const files = new Set(idx.map((i) => findings[i].file))
     if (files.size < 2) continue
-    const lead = idx.reduce((a, b) => (SEVERITY_ORDER[findings[b].severity] > SEVERITY_ORDER[findings[a].severity] ? b : a))
-    // The first finding on each file other than the lead's.
+    const order = [...idx].sort(
+      (a, b) =>
+        SEVERITY_ORDER[findings[b].severity] - SEVERITY_ORDER[findings[a].severity] ||
+        findings[a].file.localeCompare(findings[b].file) ||
+        (findings[a].startLine ?? 0) - (findings[b].startLine ?? 0) ||
+        a - b,
+    )
+    const lead = order[0]
+    // The first finding (by path and line) on each file other than the lead's.
     const folded = new Map<string, number>()
-    for (const i of idx) if (findings[i].file !== findings[lead].file && !folded.has(findings[i].file)) folded.set(findings[i].file, i)
+    for (const i of [...idx].sort((a, b) => findings[a].file.localeCompare(findings[b].file) || (findings[a].startLine ?? 0) - (findings[b].startLine ?? 0) || a - b))
+      if (findings[i].file !== findings[lead].file && !folded.has(findings[i].file)) folded.set(findings[i].file, i)
     replace.set(lead, {
       ...findings[lead],
       body: `${findings[lead].body}\n\nThe same applies to: ${[...folded.keys()].map((p) => `\`${p}\``).join(", ")}.`,
     })
-    for (const i of folded.values()) drop.add(i)
+    for (const i of folded.values()) replace.set(i, { ...findings[i], groupedInto: findings[lead].id })
   }
-  if (!drop.size) return findings
-  return findings.flatMap((f, i) => (drop.has(i) ? [] : [replace.get(i) ?? f]))
+  if (!replace.size) return findings
+  return findings.map((f, i) => replace.get(i) ?? f)
 }

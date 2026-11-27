@@ -522,10 +522,14 @@ describe("repeated convention findings become one comment", () => {
       ],
       conv,
     )
-    expect(out.map((x) => x.file)).toEqual(["models/b.sql", "models/a.sql"])
-    expect(out[0].severity).toBe("warning")
-    expect(out[0].body).toEndWith("The same applies to: `models/a.sql`, `models/c.sql`.")
-    expect(out[1].title).toBe("fct_a: Wrong join")
+    // The folded findings stay, in place, pointing at the lead; the unrelated one is untouched.
+    expect(out.map((x) => x.file)).toEqual(["models/a.sql", "models/b.sql", "models/c.sql", "models/a.sql"])
+    expect(out[1].severity).toBe("warning")
+    expect(out[1].body).toEndWith("The same applies to: `models/a.sql`, `models/c.sql`.")
+    expect(out[0].groupedInto).toBe(out[1].id)
+    expect(out[2].groupedInto).toBe(out[1].id)
+    expect(out[3].title).toBe("fct_a: Wrong join")
+    expect(out[3].groupedInto).toBeUndefined()
   })
 
   test("different conventions, different issues, one file or no convention named: unchanged", () => {
@@ -566,8 +570,9 @@ describe("repeated convention findings become one comment", () => {
     }) as any)
     const files = [aiFile("models/a.sql"), aiFile("models/b.sql")]
     const grouped = await runAiReview({ files, grounding: [], conventions: conv })
-    expect(grouped.findings).toHaveLength(1)
+    expect(grouped.findings).toHaveLength(2)
     expect(grouped.findings[0].body).toContain("The same applies to: `models/b.sql`.")
+    expect(grouped.findings[1].groupedInto).toBe(grouped.findings[0].id)
     const plain = await runAiReview({ files, grounding: [] })
     expect(plain.findings).toHaveLength(2)
   })
@@ -579,9 +584,10 @@ describe("repeated convention findings become one comment", () => {
       f("models/b.sql", "fct_b", "Missing model description", "Per models/CLAUDE.md."),
     ]
     const out = groupConventionFindings(list, conv)
-    expect(out.map((x) => x.file)).toEqual(["models/a.sql", "models/a.sql"])
+    expect(out.map((x) => x.file)).toEqual(["models/a.sql", "models/a.sql", "models/b.sql"])
     expect(out[0].body).toEndWith("The same applies to: `models/b.sql`.")
     expect(out[1]).toEqual(list[1])
+    expect(out[2].groupedInto).toBe(out[0].id)
   })
 
   test("replay mode records the conventions and groups the replayed findings", async () => {
@@ -598,8 +604,9 @@ describe("repeated convention findings become one comment", () => {
       const res = await runAiReview({ files: [aiFile("models/a.sql"), aiFile("models/b.sql")], grounding: [], conventions: conv })
       expect(res.status.replayed).toBe(true)
       expect(res.status.conventions?.map((c) => c.path)).toEqual(["models/CLAUDE.md", "CLAUDE.md"])
-      expect(res.findings).toHaveLength(1)
+      expect(res.findings).toHaveLength(2)
       expect(res.findings[0].body).toContain("The same applies to: `models/b.sql`.")
+      expect(res.findings[1].groupedInto).toBe(res.findings[0].id)
     } finally {
       if (saved === undefined) delete process.env.ALTIMATE_REVIEW_AI_REPLAY
       else process.env.ALTIMATE_REVIEW_AI_REPLAY = saved
@@ -607,3 +614,105 @@ describe("repeated convention findings become one comment", () => {
     }
   })
 })
+
+describe("convention grouping keeps every finding (round 2)", () => {
+  const conv: Convention[] = [{ path: "models/CLAUDE.md", source: "claude_md", scope: "models", text: "Every model has a description." }]
+  const f = (file: string, title: string, body: string, opts: { category?: "sql_quality" | "sql_correctness"; line?: number } = {}) =>
+    makeFinding({
+      severity: "suggestion",
+      category: opts.category ?? "sql_quality",
+      title,
+      body,
+      file,
+      model: file.split("/").pop()!.replace(/\.sql$/, ""),
+      startLine: opts.line ?? 3,
+      endLine: opts.line ?? 3,
+      confidence: "medium",
+      evidence: { tool: "ai-review", result: {} },
+      ruleKey: `ai:${opts.category ?? "sql_quality"}:${title}`,
+      rule: "ai-review:sql-quality",
+    })
+
+  test("folded findings stay with their own line and point at the lead", () => {
+    const list = [f("models/b.sql", "Missing description", "Per models/CLAUDE.md.", { line: 7 }), f("models/a.sql", "Missing description", "Per models/CLAUDE.md.", { line: 2 })]
+    const out = groupConventionFindings(list, conv)
+    expect(out).toHaveLength(2)
+    const folded = out.find((x) => x.groupedInto)!
+    expect(folded.file).toBe("models/b.sql")
+    expect(folded.startLine).toBe(7)
+    expect(folded.body).toBe("Per models/CLAUDE.md.")
+  })
+
+  test("the lead is picked by severity, then path: the same whatever order the model returned", () => {
+    const a = f("models/a.sql", "Missing description", "Per models/CLAUDE.md.")
+    const b = f("models/b.sql", "Missing description", "Per models/CLAUDE.md.")
+    const lead = (list: typeof a[]) => groupConventionFindings(list, conv).find((x) => x.body.includes("The same applies to"))!.file
+    expect(lead([a, b])).toBe("models/a.sql")
+    expect(lead([b, a])).toBe("models/a.sql")
+  })
+
+  test("the same generic title in different categories is not folded", () => {
+    const list = [
+      f("models/a.sql", "Wrong aggregation", "Per models/CLAUDE.md, sum the cents.", { category: "sql_correctness" }),
+      f("models/b.sql", "Wrong aggregation", "Per models/CLAUDE.md, name the column.", { category: "sql_quality" }),
+    ]
+    expect(groupConventionFindings(list, conv)).toEqual(list)
+  })
+})
+
+describe("folded findings in the PR comment", () => {
+  const conv: Convention[] = [{ path: "models/CLAUDE.md", source: "claude_md", scope: "models", text: "Every model has a description." }]
+  const mk = (file: string, line: number) =>
+    makeFinding({
+      severity: "warning",
+      category: "sql_quality",
+      title: "Missing description",
+      body: "Per models/CLAUDE.md.",
+      file,
+      model: file.split("/").pop()!.replace(/\.sql$/, ""),
+      startLine: line,
+      endLine: line,
+      confidence: "high",
+      evidence: { tool: "ai-review", result: {} },
+      ruleKey: "ai:sql_quality:missing description",
+      rule: "ai-review:sql-quality",
+    })
+  const envelopeOf = (findings: ReturnType<typeof mk>[]) =>
+    VerdictEnvelope.parse({
+      version: "1",
+      verdict: "COMMENT",
+      idealVerdict: "COMMENT",
+      mode: "comment",
+      tier: "full",
+      rubricVersion: "test",
+      engine: {},
+      generatedAt: "2026-11-27T00:00:00Z",
+      summary: { critical: 0, warning: findings.length, suggestion: 0, degraded: false },
+      findings: findings.map((x) => ({ ...x, tier: "inline" })),
+    })
+
+  test("first run: one comment on the lead, carrying the folded findings' markers; the summary lists the lead only", async () => {
+    const { inlineComments, renderSummary, postedFindingIds } = await import("../../src/altimate/review/format")
+    const grouped = groupConventionFindings([mk("models/a.sql", 1), mk("models/b.sql", 1)], conv)
+    const env = envelopeOf(grouped)
+    const { comments } = inlineComments(env)
+    expect(comments.map((c) => c.path)).toEqual(["models/a.sql"])
+    const lead = grouped.find((x) => !x.groupedInto)!
+    const folded = grouped.find((x) => x.groupedInto)!
+    expect(postedFindingIds([comments[0].body])).toEqual(new Set([lead.id, folded.id]))
+    const summary = renderSummary(env, { maxChars: Infinity })
+    expect(summary).toContain("`models/a.sql:1`")
+    expect(summary).not.toContain("models/b.sql:1")
+    // Next run, same findings: nothing is posted again.
+    expect(inlineComments(env, postedFindingIds([comments[0].body])).comments).toEqual([])
+  })
+
+  test("re-review: a file newly folded into an already-posted lead is posted on its own", async () => {
+    const { inlineComments, postedFindingIds } = await import("../../src/altimate/review/format")
+    const first = envelopeOf(groupConventionFindings([mk("models/a.sql", 1)], conv))
+    const posted = postedFindingIds(inlineComments(first).comments.map((c) => c.body))
+    const second = envelopeOf(groupConventionFindings([mk("models/a.sql", 1), mk("models/c.sql", 4)], conv))
+    expect(inlineComments(second, posted).comments.map((c) => `${c.path}:${c.line}`)).toEqual(["models/c.sql:4"])
+  })
+})
+
