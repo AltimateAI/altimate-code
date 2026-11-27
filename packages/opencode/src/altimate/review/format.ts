@@ -87,6 +87,23 @@ export function renderSummary(env: VerdictEnvelope, opts: RenderOptions = {}): s
     )
   }
   lines.push(...notes)
+  // A blocking verdict must be explainable from the comment: rule findings that were not posted
+  // but still count toward it are listed with why they were withheld.
+  if (env.withheld?.length) {
+    lines.push(
+      `### Withheld rule findings that count toward this verdict (${env.withheld.length})`,
+      "",
+      "Not posted as comments, but the verdict counts them:",
+      "",
+      ...env.withheld
+        .slice(0, WITHHELD_RENDER_CAP)
+        .map((w) => `- \`${w.file}${w.startLine ? `:${w.startLine}` : ""}\` — ${w.title} (${WITHHELD_REASON[w.reason]})`),
+      ...(env.withheld.length > WITHHELD_RENDER_CAP
+        ? [`- … and ${env.withheld.length - WITHHELD_RENDER_CAP} more in the verdict envelope`]
+        : []),
+      "",
+    )
+  }
 
   const tail: string[] = []
   // G1 (Round 18) — surface classifier reasons when --explain-tier populated
@@ -127,7 +144,12 @@ export function renderSummary(env: VerdictEnvelope, opts: RenderOptions = {}): s
   )
 
   if (!env.findings.length) {
-    lines.push("No issues found in the changed dbt models. 🎉", "")
+    lines.push(
+      env.withheld?.length
+        ? "No findings posted; the verdict rests on the withheld rule findings above."
+        : "No issues found in the changed dbt models. 🎉",
+      "",
+    )
     return [...lines, ...tail].join("\n")
   }
 
@@ -255,12 +277,23 @@ function bulletsFor(items: Finding[], group: boolean): Array<{ text: string; cou
   return out
 }
 
+const WITHHELD_REASON: Record<NonNullable<VerdictEnvelope["withheld"]>[number]["reason"], string> = {
+  rule_type_off: "rule type not posted while the AI review runs",
+  refuted: "refuted by the verifier",
+  unverifiable_high_sev: "the verifier could not check it",
+  noisy_type_not_confirmed: "noisy rule type the verifier did not confirm",
+}
+
+/** Withheld findings listed in the summary at most; the envelope keeps every one. */
+const WITHHELD_RENDER_CAP = 10
+
 /**
  * What the review could not fully check, each on its own line: undecidable
  * findings, models without compiled SQL, files outside the dbt project, and
  * the advisory AI lane when it did not run. Kept separate from the lint-only
  * banner so one undecidable finding never mislabels a manifest-backed run.
  */
+
 export function coverageNotes(env: VerdictEnvelope): string[] {
   const notes: string[] = []
   const undecided = env.findings.filter((f) => f.degraded).length
@@ -318,6 +351,14 @@ export function coverageNotes(env: VerdictEnvelope): string[] {
       `${aiUnsent.length} file(s) were not sent to the advisory AI review (file quota); the deterministic checks still ran on them: ${head}${more}.`,
     )
   }
+  // Rule findings the rule-noise steps withheld (rule types off, refuted, the rule-post policy).
+  const offCount = Object.values(env.rulesOff ?? {}).reduce((a, b) => a + b, 0)
+  const refutedCount = env.rulesRefuted ?? 0
+  const policyCount = env.rulePolicy ? env.rulePolicy.dropped.unverifiable_high_sev + env.rulePolicy.dropped.noisy_type_not_confirmed : 0
+  if (offCount + refutedCount + policyCount)
+    notes.push(
+      `${offCount + refutedCount + policyCount} rule finding(s) not posted (rule types off: ${offCount}, refuted by the verifier: ${refutedCount}, rule-post policy: ${policyCount}); the envelope lists the counts.`,
+    )
   const out = notes.length ? [...notes.map((n) => `> ℹ️ ${n}`), ""] : []
   return [...out, ...ledgerBlock(ledger)]
 }

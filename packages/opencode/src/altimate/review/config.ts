@@ -53,6 +53,14 @@ export const ReviewConfig = z.object({
         verify: z.boolean().optional(),
         /** Repo review instructions (AGENTS.md, CLAUDE.md, REVIEW.md, Cursor/CodeRabbit/Copilot rules, CONTRIBUTING.md) from the base branch. */
         conventions: z.boolean().optional(),
+        /** Drop the rule types in `NOISY_RULES_OFF` (rules-off.ts) once the AI lane runs. */
+        rulesOff: z.boolean().optional(),
+        /** Rule ids taken back out of that list (posted as before). */
+        rulesOn: z.array(z.string()).optional(),
+        /** Verify the rule findings after the finder and drop the refuted ones (needs `verify`). */
+        verifyRules: z.boolean().optional(),
+        /** The rule-post policy over verified rule findings (rule-post-policy.ts); an object changes its noisy list. */
+        rulePolicy: z.union([z.boolean(), z.strictObject({ noisyRules: z.array(z.string()).optional() })]).optional(),
       }),
     ])
     .default(true),

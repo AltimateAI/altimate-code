@@ -275,7 +275,7 @@ export function mergeProjectEnvelopes(runs: ProjectRun[], coveredProjects?: stri
       ? classified.reduce((a, b) => (TIER_RANK[b!] > TIER_RANK[a!] ? b : a))
       : undefined,
     findings,
-    summary: summarize(findings, envs.some((e) => e.summary.degraded)),
+    summary: mergedSummary(findings, envs, verdict),
     engine: first.engine,
     manifestHash: shared(envs.map((e) => e.manifestHash)),
     staleManifest: envs.some((e) => e.staleManifest) ? true : undefined,
@@ -303,9 +303,62 @@ export function mergeProjectEnvelopes(runs: ProjectRun[], coveredProjects?: stri
       })),
     },
     ai: mergeAi(runs),
+    ...mergeRuleNoise(envs, verdict),
     generatedAt: first.generatedAt,
   }
   return signEnvelope(VerdictEnvelope.parse(merged))
+}
+
+/** The merged tally: the merged (deduplicated) findings, plus what each project's tally counts
+ *  beyond its own posted findings (withheld rule findings, the instances of repeat-merged comments),
+ *  so the headline counts what the verdict counts. The withheld list of a project below the merged
+ *  `verdict` is left out (mergeRuleNoise), and so are its findings from the tally: the merged
+ *  comment never counts a finding it hides that the project's own comment would list. */
+function mergedSummary(findings: VerdictEnvelope["findings"], envs: VerdictEnvelope[], verdict: Verdict): VerdictEnvelope["summary"] {
+  const out = summarize(findings, envs.some((e) => e.summary.degraded))
+  // Not deduplicated across projects like `withheld` is: each in-scope path belongs to exactly one
+  // project (`assignToProjects`), and files outside every project, though passed to each project,
+  // are scoped out there and taken by one AI lane only, so no instance is counted by two projects.
+  for (const e of envs) {
+    const posted = summarize(e.findings, false)
+    const unlisted = e.verdict === verdict ? [] : (e.withheld ?? [])
+    for (const sev of ["critical", "warning", "suggestion"] as const)
+      out[sev] += Math.max(0, e.summary[sev] - posted[sev] - unlisted.filter((w) => w.severity === sev).length)
+  }
+  return out
+}
+
+/** Rule-noise counts summed over the projects (each present only when some project has it), and
+ *  the withheld lists of the projects at the merged `verdict` (the applied one the comment shows),
+ *  each as that project's own comment shows it. A list of a project below the merged verdict did
+ *  not raise it there: it is left out, and so are its findings from the tally (mergedSummary). */
+function mergeRuleNoise(
+  envs: VerdictEnvelope[],
+  verdict: Verdict,
+): Pick<VerdictEnvelope, "rulesOff" | "rulesRefuted" | "rulePolicy" | "withheld"> {
+  const out: Pick<VerdictEnvelope, "rulesOff" | "rulesRefuted" | "rulePolicy" | "withheld"> = {}
+  if (envs.some((e) => e.rulesOff)) {
+    const off: Record<string, number> = {}
+    for (const e of envs) for (const [rule, n] of Object.entries(e.rulesOff ?? {})) off[rule] = (off[rule] ?? 0) + n
+    out.rulesOff = off
+  }
+  if (envs.some((e) => e.rulesRefuted !== undefined)) out.rulesRefuted = envs.reduce((n, e) => n + (e.rulesRefuted ?? 0), 0)
+  const policies = envs.flatMap((e) => (e.rulePolicy ? [e.rulePolicy] : []))
+  if (policies.length)
+    out.rulePolicy = {
+      applied: policies.some((p) => p.applied),
+      dropped: {
+        unverifiable_high_sev: policies.reduce((n, p) => n + p.dropped.unverifiable_high_sev, 0),
+        noisy_type_not_confirmed: policies.reduce((n, p) => n + p.dropped.noisy_type_not_confirmed, 0),
+      },
+    }
+  const seen = new Set<string>()
+  const withheld = envs
+    .filter((e) => e.verdict === verdict)
+    .flatMap((e) => e.withheld ?? [])
+    .filter((w) => !seen.has(w.id) && !!seen.add(w.id))
+  if (withheld.length) out.withheld = withheld
+  return out
 }
 
 /** Least-trusted source first: a policy the PR controls outranks the defaults, which outrank the base branch's. */
@@ -365,8 +418,20 @@ function mergeAi(runs: Array<{ root: string; env: VerdictEnvelope }>): VerdictEn
     failedFiles: failedFiles.length ? failedFiles : undefined,
     conventions: conventions.length ? conventions : undefined,
     verifier: mergeVerifier(lanes.map((r) => ({ root: r.root, v: r.env.ai!.verifier }))),
+    // Set when any project verified its rule findings, not only the project `base` came from.
+    verifyRules: ais.some((a) => a.verifyRules) ? "drop_refuted" : undefined,
+    ruleVerifier: mergeRuleVerifier(lanes.map((r) => ({ root: r.root, v: r.env.ai!.ruleVerifier }))),
     projects: lanes.map((r) => ({ root: r.root, state: r.env.ai!.state, reason: r.env.ai!.reason, calls: r.env.ai!.calls })),
   }
+}
+
+function offsetRuleVerdicts(vs: VerifierStatus[]): NonNullable<VerifierStatus["ruleVerdicts"]> {
+  let offset = 0
+  return vs.flatMap((v) => {
+    const out = (v.ruleVerdicts ?? []).map((r) => (r.batch >= 0 ? { ...r, batch: r.batch + offset } : r))
+    offset += v.batches?.length ?? 0
+    return out
+  })
 }
 
 function sumOf(vals: Array<number | undefined>): number | undefined {
@@ -385,6 +450,14 @@ function sumTokens(vals: Array<AiStatus["tokens"]>): AiStatus["tokens"] {
         cacheRead: a.cacheRead + b.cacheRead,
       }))
     : undefined
+}
+
+/** Every project's rule-verifier summary, merged like the verifier, keeping a model (the first project's that has one). */
+function mergeRuleVerifier(runs: Array<{ root: string; v: AiStatus["ruleVerifier"] }>): AiStatus["ruleVerifier"] {
+  const merged = mergeVerifier(runs.map((r) => ({ root: r.root, v: r.v as VerifierStatus | undefined })))
+  if (!merged) return undefined
+  const model = runs.map((r) => r.v?.model).find((m) => m !== undefined)
+  return { ...merged, ...(model ? { model } : {}) }
 }
 
 /** Every project's verifier: the worst state (with its project's reason), summed usage and counters, all decisions. */
@@ -411,5 +484,8 @@ function mergeVerifier(runs: Array<{ root: string; v: AiStatus["verifier"] }>): 
     unreviewed: sumOf(vs.map((v) => v.unreviewed)),
     dropped: dropped.length ? dropped.slice(0, VERIFIER_DROPPED_MAX) : undefined,
     decisions: decisions.length ? decisions : undefined,
+    // A verdict's `batch` indexes its project's `batches`: offset by the batches merged before it.
+    ruleVerdicts: vs.some((v) => v.ruleVerdicts) ? offsetRuleVerdicts(vs) : undefined,
+    batches: vs.some((v) => v.batches) ? vs.flatMap((v) => v.batches ?? []) : undefined,
   }
 }

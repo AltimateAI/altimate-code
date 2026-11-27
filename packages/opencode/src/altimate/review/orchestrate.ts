@@ -7,7 +7,9 @@ import {
   ReviewCategory as ReviewCategoryEnum,
   makeFinding,
   dedupe,
+  findingOrigin,
   mergeRepeats,
+  repeatGroupId,
   SEVERITY_ORDER,
 } from "./finding"
 import {
@@ -37,6 +39,8 @@ import {
   errorReason,
   isOutsideProjectReason,
   signEnvelope,
+  computeIdealVerdict,
+  verdictEligible,
 } from "./verdict"
 import { detectMacroPatterns, detectModelPatterns, detectSchemaYmlPatterns, splitDiff } from "./dbt-patterns"
 import { type SelectItemColumn, normalizeSelectLine } from "./rule-catalog"
@@ -69,6 +73,15 @@ import { type AiSwitches, switchOn } from "./ai-switches"
 import { isAiOtherFile } from "./ai-other-files"
 import { AI_PYTHON_KIND, isAiPythonFile } from "./ai-python-files"
 import { type Convention, conventionTexts } from "./conventions"
+import { dropRulesOff } from "./rules-off"
+import {
+  type RulePolicyDrops,
+  type RulePostPolicy,
+  type RuleVerdictValue,
+  dropByRulePolicy,
+  rulePolicyApplies,
+  rulePolicyDrop,
+} from "./rule-post-policy"
 import { type AiVerifyEvidence, numberedSlice } from "./ai-verify"
 import { holdsCredentials, isCredentialPath } from "./credentials"
 import type { ColumnReach } from "../native/dbt/column-reach"
@@ -302,6 +315,10 @@ export interface OrchestrateInput {
   reviewDir?: string
   /** Team conventions from the base branch (`conventions` switch), for the AI finder. */
   conventions?: Convention[]
+  /** Rule ids not posted when the AI lane runs (rules-off.ts); undefined keeps every type. */
+  rulesOff?: Set<string>
+  /** The rule-post policy over verified rule findings (rule-post-policy.ts); undefined turns it off. */
+  rulePolicy?: RulePostPolicy
   /** Fixed-string search over the dbt project at head, for the verifier. */
   grepProject?: AiVerifyEvidence["grepProject"]
   /** Every file the PR changes (repo-relative), including files outside the dbt project; the verifier may read them. */
@@ -2649,6 +2666,13 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   let aiSentPaths: string[] = []
   const aiReviewed = new Set<string>()
   let aiReviewedOutside: string[] = []
+  // The rule verifier's verdict per posted rule finding (`verifyRules`), and whether it ran.
+  const ruleVerdicts = new Map<string, RuleVerdictValue | null>()
+  let ruleVerifierRan = false
+  // The rule verifier was asked to run (it may still have skipped or failed).
+  let ruleVerifyAttempted = false
+  // The deterministic findings validated before the AI lane ran (the first `count` of `merged`), reused after it.
+  let preAiValidated: { count: number; list: Finding[] } | undefined
   if (!lanes.has("ai_review")) {
     aiStatus = { state: "skipped", reason: `not part of the ${tier} tier` }
   } else if (!input.aiReview) {
@@ -2793,6 +2817,31 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
           },
         }
       : undefined
+    // The rule findings as the envelope would post them (rule types off already dropped), for the rule verifier.
+    if (evidence && switchOn("verifyRules", input.aiSwitches))
+      preAiValidated = {
+        count: merged.length,
+        list: await validateSuggestions(merged, getContent, addedLinesByFile([...input.changedFiles, ...(input.aiOutsideFiles ?? [])])),
+      }
+    // Rule types off on files the AI lane sends are dropped where the lane answers, so they are
+    // verified only when their file's call failed (then they are posted); on any other file they
+    // are posted, so they are verified like the rest.
+    const sentSet = new Set(aiSentPaths)
+    const ruleCandidates = preAiValidated
+      ? (() => {
+          const posted = cleanFindings(preAiValidated.list).filter(
+            (f) =>
+              SEVERITY_ORDER[f.severity] >= SEVERITY_ORDER[input.config.severityThreshold] &&
+              findingOrigin(f) !== "ai" &&
+              f.severity !== "critical" &&
+              !mayHoldCredentials(f.file),
+          )
+          const offKept = new Set(dropRulesOff(posted.filter((f) => sentSet.has(f.file)), input.rulesOff).kept)
+          const offOnSent = (f: Finding) => sentSet.has(f.file) && !offKept.has(f)
+          return { after: posted.filter((f) => !offOnSent(f)), ifUnreviewed: posted.filter(offOnSent) }
+        })()
+      : undefined
+    const verifyRulesAfter = ruleCandidates?.after
     try {
       const res = await input.aiReview({
         files: aiFiles,
@@ -2807,10 +2856,24 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
         ...(otherChecked.size ? { checkedPaths: [...otherChecked] } : {}),
         ...(input.reviewDir ? { reviewDir: input.reviewDir } : {}),
         ...(input.conventions?.length ? { conventions: input.conventions } : {}),
+        ...(verifyRulesAfter?.length ? { verifyRulesAfter } : {}),
+        ...(ruleCandidates?.ifUnreviewed.length ? { verifyRulesIfUnreviewed: ruleCandidates.ifUnreviewed } : {}),
+        ...(input.rulePolicy ? { noisyRules: input.rulePolicy.noisyRules } : {}),
       })
       const aiFindings = Array.isArray(res) ? res : res.findings
       if (Array.isArray(res)) aiStatus = { state: "ok" }
       else aiStatus = res.status
+      if (aiStatus.verifyRules === "drop_refuted") {
+        ruleVerifyAttempted = true
+        // A batch forced to answer on its budget is the rule run's usual mode (the default budget
+        // split over batches of 8 rarely leaves a tool round), and the rule-post policy was tuned on
+        // those answers: they count. A verdict from a batch that timed out counts as no verdict.
+        // Either way these steps filter posting only, so no verdict can unblock a gate.
+        const batches = aiStatus.verifier?.batches ?? []
+        for (const v of aiStatus.verifier?.ruleVerdicts ?? [])
+          ruleVerdicts.set(v.id, batches[v.batch]?.state === "timeout" ? null : v.verdict)
+        ruleVerifierRan = rulePolicyApplies(aiStatus.ruleVerifier)
+      }
       // A sent file counts as reviewed only when the lane answered for its call.
       if (aiStatus.state === "ok") {
         const failed = new Set(aiStatus.failedFiles ?? [])
@@ -2826,16 +2889,107 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     }
   }
 
-  // Flatten, drop excluded, dedupe, threshold-filter.
-  const validated = await validateSuggestions(
-    merged,
-    getContent,
-    addedLinesByFile([...input.changedFiles, ...(input.aiOutsideFiles ?? [])]),
-  )
+  // Flatten, drop excluded, dedupe, threshold-filter. Findings validated before the AI lane are not validated again.
+  const addedForSuggestions = addedLinesByFile([...input.changedFiles, ...(input.aiOutsideFiles ?? [])])
+  const validated = preAiValidated
+    ? [...preAiValidated.list, ...(await validateSuggestions(merged.slice(preAiValidated.count), getContent, addedForSuggestions))]
+    : await validateSuggestions(merged, getContent, addedForSuggestions)
   const minSev = SEVERITY_ORDER[input.config.severityThreshold]
-  const findings = cleanFindings(validated).filter((f) => SEVERITY_ORDER[f.severity] >= minSev)
+  let findings = cleanFindings(validated).filter((f) => SEVERITY_ORDER[f.severity] >= minSev)
   // The verdict counts every instance; merging repeats is presentation only.
-  const verdictFindings = cleanFindings(validated, false).filter((f) => SEVERITY_ORDER[f.severity] >= minSev)
+  let verdictFindings = cleanFindings(validated, false).filter((f) => SEVERITY_ORDER[f.severity] >= minSev)
+
+  // Rule noise, only when the AI lane ran and answered (fail-open otherwise, like the
+  // verifier): rule types off, then rule findings the verifier refuted, then the rule-post
+  // policy. These steps filter posting only: the verdict counts every rule finding, so neither a
+  // model verdict nor author text the verifier reads (the PR description) can unblock a gate. An
+  // unmerged instance takes the verdict of its merged group. AI findings and critical rule findings are never
+  // dropped by these steps. A merged repeat group with an AI member is left alone too, so a
+  // rule finding it was merged with cannot take the AI finding down with it.
+  const aiLaneRan = lanes.has("ai_review") && !!input.aiReview && aiStatus?.state === "ok"
+  const mixedGroups = new Set(verdictFindings.filter((f) => findingOrigin(f) === "ai").map(repeatGroupId))
+  // A merged finding of such a group (by id), or an unmerged instance of one (by its group id).
+  const inMixed = (f: Finding) => mixedGroups.has(f.id) || mixedGroups.has(repeatGroupId(f))
+  const ruleStep = (list: Finding[], step: (rules: Finding[]) => Finding[]) => {
+    const kept = new Set(step(list.filter((f) => !inMixed(f))))
+    return list.filter((f) => inMixed(f) || kept.has(f))
+  }
+  const rulesOff = aiLaneRan ? input.rulesOff : undefined
+  // Rule types off stand on the AI lane having reviewed the same file: a finding on a file the
+  // lane did not review (not sent, or its call failed) is posted.
+  const offStep = (list: Finding[]) => {
+    const r = dropRulesOff(list.filter((f) => aiReviewed.has(f.file)), rulesOff)
+    const kept = new Set(r.kept)
+    return { kept: list.filter((f) => !aiReviewed.has(f.file) || kept.has(f)), dropped: r.dropped }
+  }
+  findings = ruleStep(findings, (list) => offStep(list).kept)
+  const verdictOf = (f: Finding) => ruleVerdicts.get(f.id) ?? ruleVerdicts.get(repeatGroupId(f))
+  const refuted = (f: Finding) =>
+    findingOrigin(f) !== "ai" && !inMixed(f) && f.severity !== "critical" && verdictOf(f) === "refuted"
+  if (aiLaneRan && ruleVerdicts.size) {
+    findings = findings.filter((f) => !refuted(f))
+  }
+  let rulePolicy: { applied: boolean; dropped: RulePolicyDrops } | undefined
+  if (aiLaneRan && input.rulePolicy && ruleVerifyAttempted) {
+    if (ruleVerifierRan) {
+      const byId = (list: Finding[]) => new Map(list.map((f) => [f.id, verdictOf(f) ?? null] as const))
+      findings = ruleStep(findings, (list) => dropByRulePolicy(list, byId(list), input.rulePolicy).kept)
+      // The counts are taken over the instances below.
+      rulePolicy = { applied: true, dropped: { unverifiable_high_sev: 0, noisy_type_not_confirmed: 0 } }
+    } else rulePolicy = { applied: false, dropped: { unverifiable_high_sev: 0, noisy_type_not_confirmed: 0 } }
+  }
+  // The verdict counts the rule findings these steps did not post. When they change it — toward
+  // REQUEST_CHANGES (a confident engine warning toward the ≥3-warning pattern), or away from APPROVE
+  // with nothing else to show — they are listed with why they were withheld, so every verdict is
+  // explainable from the comment. The per-step counts (`rulesOff`, `rulesRefuted`, `rulePolicy`) are
+  // taken here over the instances, the unit the verdict, the summary and this list use; a merged
+  // comment of three instances counts three.
+  type Withheld = NonNullable<VerdictEnvelope["withheld"]>[number]
+  const withheldAll: Array<{ f: Finding; reason: Withheld["reason"] }> = []
+  let offDropped: Record<string, number> = {}
+  {
+    let rest = verdictFindings
+    const offKept = new Set(
+      ruleStep(rest, (list) => {
+        const r = offStep(list)
+        offDropped = r.dropped
+        return r.kept
+      }),
+    )
+    for (const f of rest) if (!offKept.has(f)) withheldAll.push({ f, reason: "rule_type_off" })
+    rest = rest.filter((f) => offKept.has(f))
+    if (aiLaneRan && ruleVerdicts.size) {
+      for (const f of rest) if (refuted(f)) withheldAll.push({ f, reason: "refuted" })
+      rest = rest.filter((f) => !refuted(f))
+    }
+    if (rulePolicy?.applied && input.rulePolicy)
+      for (const f of rest) {
+        const why = inMixed(f) ? undefined : rulePolicyDrop(f, verdictOf(f) ?? null, input.rulePolicy)
+        if (why) {
+          withheldAll.push({ f, reason: why })
+          rulePolicy.dropped[why]++
+        }
+      }
+  }
+  const rulesRefuted = aiLaneRan && ruleVerifyAttempted ? withheldAll.filter((w) => w.reason === "refuted").length : undefined
+  const withheldIds = new Set(withheldAll.map((w) => w.f))
+  const idealAll = computeIdealVerdict(verdictFindings, input.rubric)
+  const idealPosted = computeIdealVerdict(verdictFindings.filter((f) => !withheldIds.has(f)), input.rubric)
+  const blocking = (f: Finding) => f.severity === "warning" && f.confidence !== "unknown" && verdictEligible(f, input.rubric)
+  const listed =
+    idealAll === "REQUEST_CHANGES" && idealPosted !== "REQUEST_CHANGES"
+      ? withheldAll.filter((w) => blocking(w.f))
+      : idealAll !== "APPROVE" && idealPosted === "APPROVE"
+        ? withheldAll
+        : []
+  const withheld: Withheld[] = listed.map(({ f, reason }) => ({
+    id: f.id,
+    title: f.title,
+    file: f.file,
+    ...(f.startLine ? { startLine: f.startLine } : {}),
+    severity: f.severity,
+    reason,
+  }))
 
   // Lint-only means no changed model resolved against a manifest. A single
   // undecidable finding does not make the whole run lint-only; those findings
@@ -2876,6 +3030,10 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   const envelope = buildEnvelope({
     engineErrors: engineErrors.length ? engineErrors : undefined,
     ai: aiStatus,
+    ...(rulesOff ? { rulesOff: offDropped } : {}),
+    ...(rulesRefuted !== undefined ? { rulesRefuted } : {}),
+    ...(rulePolicy ? { rulePolicy } : {}),
+    ...(withheld.length ? { withheld } : {}),
     policy: input.policy,
     findings,
     verdictFindings,

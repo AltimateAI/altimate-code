@@ -31,6 +31,8 @@ import { runAiReview } from "./ai-review"
 import { resolveAiSwitches } from "./ai-switches"
 import { isAiPythonFile } from "./ai-python-files"
 import { loadConventions } from "./conventions"
+import { resolveRulesOff } from "./rules-off"
+import { configuredRulePolicy } from "./rule-post-policy"
 import { loadConsumerLists } from "./consumer-lists"
 import type { ReviewMode, VerdictEnvelope } from "./verdict"
 import type { ChangedFile } from "./diff-filter"
@@ -376,6 +378,8 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
   else if (!aiLaneEnabled(config)) aiDisabledReason = "disabled in .altimate/review.yml"
   const aiOn = !aiDisabledReason
   const aiSwitches = resolveAiSwitches(config, process.env, { warn: aiOn })
+  // Rule types off once the AI lane runs; a bad list file named by the env variable fails here.
+  const rulesOff = aiOn ? resolveRulesOff(config, aiSwitches, process.env, gitRoot) : undefined
   // `pythonFiles`: .py files outside the dbt project skip every lane but the AI lane. A file
   // renamed out of this project belongs to it (`--all-projects` assigns it here), so it is offered
   // at its new path whatever other projects took.
@@ -540,6 +544,8 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     ...(aiOutsideFiles.length ? { aiOutsideFiles } : {}),
     reviewDir: gitRoot,
     ...(conventions.length ? { conventions } : {}),
+    ...(rulesOff ? { rulesOff } : {}),
+    ...(aiOn && aiSwitches.rulePolicy ? { rulePolicy: configuredRulePolicy(config) } : {}),
     grepProject: (pattern, glob) => {
       // The project's dbt directories (repo-relative), or one glob inside the project.
       const dirs = layout

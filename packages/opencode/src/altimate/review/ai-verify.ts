@@ -97,6 +97,38 @@ export interface VerifierStatus {
   dropped?: DroppedFinding[]
   /** Every finding's triage inputs and outcome (uncapped), for offline re-triage with `retriage`. */
   decisions?: VerifierDecision[]
+  /** Rule-finding run only: the verdict for every deterministic rule finding. */
+  ruleVerdicts?: RuleVerdict[]
+  /** Rule-finding run only: each batch's outcome, in batch order. */
+  batches?: VerifierBatchRecord[]
+}
+
+/** What the verifier said about one deterministic rule finding. */
+export interface RuleVerdict {
+  id: string
+  file: string
+  title: string
+  rule?: string
+  /** null when the finding got no verdict (`noVerdict`). */
+  verdict: ModelFeatures["verdict"] | null
+  claimType: ModelFeatures["claimType"] | null
+  value: ModelFeatures["value"] | null
+  evidence: string | null
+  toolsUsed: string[]
+  /** Omitted, unparsable, timeout, budget or error: the model returned nothing usable for this finding. */
+  noVerdict: boolean
+  /** Index into `VerifierStatus.batches`. */
+  batch: number
+}
+
+/** One verifier batch's outcome. */
+export interface VerifierBatchRecord {
+  findings: number
+  state: "ok" | "timeout" | "error" | "budget"
+  reason?: string
+  turns: number
+  toolCalls: number
+  tokens?: AiTokens
 }
 
 export interface RunAiVerifyInput {
@@ -108,6 +140,8 @@ export interface RunAiVerifyInput {
   model: Provider.Model
   /** Overrides the verifier system prompt (tests). */
   system?: string
+  /** The findings are deterministic rule findings: record a verdict for each, apply no triage. */
+  rulesOnly?: boolean
 }
 
 /** Most lines one `read_file` call returns. */
@@ -251,6 +285,8 @@ export interface ModelFeatures {
   /** At most 240 characters citing a tool result or a quoted line. */
   evidence: string
   toolsUsed: string[]
+  /** The answer named no valid verdict, so the parser supplied `unverifiable`. */
+  verdictMissing?: true
 }
 
 const CLAIM_TYPES: ModelFeatures["claimType"][] = [
@@ -343,6 +379,9 @@ export function parseVerifierOutput(text: string, ids: Set<string>): Map<string,
       requiresAssumedInput: r.requires_assumed_input === true || r.requires_assumed_input === "true",
       evidence: typeof r.evidence === "string" ? r.evidence.trim().slice(0, EVIDENCE_MAX) : "",
       toolsUsed: tools.map((t) => t.slice(0, 40)),
+      ...(typeof r.verdict === "string" && (VERDICTS as string[]).includes(r.verdict.trim().toLowerCase())
+        ? {}
+        : { verdictMissing: true as const }),
     })
   }
   return out
@@ -678,6 +717,62 @@ export function applyTriage(
     })
   })
   return { findings: out, dropped, decisions, counts }
+}
+
+/** The status of a rule-finding run: a verdict per finding and per-batch outcomes; nothing dropped. */
+function ruleStatus(
+  findings: Finding[],
+  batches: Array<{ idx: number[] }>,
+  outcomes: BatchOutcome[],
+  model: Array<ModelFeatures | undefined>,
+): Pick<VerifierStatus, "state"> & Partial<VerifierStatus> {
+  const batchOf = new Map<number, number>()
+  batches.forEach((b, k) => b.idx.forEach((i) => batchOf.set(i, k)))
+  const ruleVerdicts: RuleVerdict[] = findings.map((f, i) => {
+    // An answer without a valid verdict is no verdict, and a refutation without evidence is no
+    // verification (as in `triage`): it counts as unverifiable.
+    const raw = model[i]?.verdictMissing ? undefined : model[i]
+    const m = raw?.verdict === "refuted" && !raw.evidence.trim() ? { ...raw, verdict: "unverifiable" as const } : raw
+    return {
+      id: f.id,
+      file: f.file,
+      title: f.title,
+      rule: f.rule,
+      verdict: m?.verdict ?? null,
+      claimType: m?.claimType ?? null,
+      value: m?.value ?? null,
+      evidence: m ? m.evidence : null,
+      toolsUsed: m?.toolsUsed ?? [],
+      noVerdict: !m,
+      batch: batchOf.get(i) ?? -1,
+    }
+  })
+  const records: VerifierBatchRecord[] = outcomes.map((o, k) => ({
+    findings: batches[k].idx.length,
+    state: o.state,
+    ...(o.reason ? { reason: o.reason } : {}),
+    turns: o.turns,
+    toolCalls: o.toolCalls,
+    ...(o.usage ? { tokens: o.usage.tokens } : {}),
+  }))
+  const usage = outcomes.flatMap((o) => (o.usage ? [o.usage] : []))
+  const spent = usage.length ? usage.reduce(addUsage) : undefined
+  const { state, reason } = batchOutcomeState(outcomes)
+  const reviewed = ruleVerdicts.filter((v) => !v.noVerdict).length
+  return {
+    state,
+    ...(reason ? { reason } : {}),
+    ...(spent ? { tokens: spent.tokens, cost: spent.cost } : {}),
+    turns: outcomes.reduce((n, o) => n + o.turns, 0),
+    toolCalls: outcomes.reduce((n, o) => n + o.toolCalls, 0),
+    reviewed,
+    kept: findings.length,
+    discarded: 0,
+    summary: 0,
+    unreviewed: findings.length - reviewed,
+    ruleVerdicts,
+    batches: records,
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1021,6 +1116,26 @@ function requestChars(fixedChars: number, messages: ModelMessage[]): number {
   return fixedChars + JSON.stringify(messages).length
 }
 
+/**
+ * The verifier's state over its batches (pure): a timeout wins; every batch failing is an error;
+ * an early forced answer is budget. A partial failure is reported in the reason, not hidden.
+ */
+export function batchOutcomeState(
+  outcomes: Array<Pick<BatchOutcome, "state" | "reason">>,
+): { state: VerifierStatus["state"]; reason?: string } {
+  const errors = outcomes.filter((o) => o.state === "error")
+  const timeout = outcomes.find((o) => o.state === "timeout")
+  let state: VerifierStatus["state"] = "ok"
+  let reason: string | undefined
+  if (timeout) [state, reason] = ["timeout", timeout.reason]
+  else if (errors.length > 0 && errors.length === outcomes.length) [state, reason] = ["error", errors[0].reason]
+  else if (outcomes.some((o) => o.state === "budget"))
+    [state, reason] = ["budget", "answered early to stay within the token or tool-output budget"]
+  if (errors.length && state !== "error")
+    reason = [reason, `${errors.length} of ${outcomes.length} batches failed: ${errors[0].reason}`].filter(Boolean).join("; ")
+  return reason ? { state, reason } : { state }
+}
+
 interface BatchOutcome {
   verdicts: Map<string, ModelFeatures>
   state: "ok" | "timeout" | "error" | "budget"
@@ -1264,6 +1379,7 @@ export async function runAiVerify(
 
     const model: Array<ModelFeatures | undefined> = input.findings.map(() => undefined)
     batches.forEach((b, k) => b.idx.forEach((i, j) => (model[i] = outcomes[k].verdicts.get(b.ids[j]))))
+    if (input.rulesOnly) return { findings: input.findings, status: status(ruleStatus(input.findings, batches, outcomes, model)) }
     const stopped: boolean[] = input.findings.map(() => false)
     batches.forEach((b, k) => {
       if (outcomes[k].state === "budget" || outcomes[k].state === "timeout") for (const i of b.idx) stopped[i] = true
@@ -1274,20 +1390,7 @@ export async function runAiVerify(
 
     const usage = outcomes.flatMap((o) => (o.usage ? [o.usage] : []))
     const spent = usage.length ? usage.reduce(addUsage) : undefined
-    // A timeout wins; every batch failing is an error; an early forced answer is budget. A
-    // partial failure is reported, not hidden.
-    const errors = outcomes.filter((o) => o.state === "error")
-    const timeout = outcomes.find((o) => o.state === "timeout")
-    let state: VerifierStatus["state"] = "ok"
-    let reason: string | undefined
-    if (timeout) [state, reason] = ["timeout", timeout.reason]
-    else if (errors.length === outcomes.length) [state, reason] = ["error", errors[0].reason]
-    else if (outcomes.some((o) => o.state === "budget"))
-      [state, reason] = ["budget", "answered early to stay within the token or tool-output budget"]
-    if (errors.length && state !== "error")
-      reason = [reason, `${errors.length} of ${outcomes.length} batches failed: ${errors[0].reason}`]
-        .filter(Boolean)
-        .join("; ")
+    const { state, reason } = batchOutcomeState(outcomes)
     return {
       findings: triaged.findings,
       status: status({

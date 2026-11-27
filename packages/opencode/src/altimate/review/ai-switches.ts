@@ -7,8 +7,19 @@
 // down; code called without them (direct callers, unit tests) reads only the
 // env variable, as before, so an unset variable means off there.
 import type { ReviewConfig } from "./config"
+import { rulesOffEnv } from "./rules-off"
 
-export type AiSwitchName = "coverage" | "contextCard" | "focused" | "otherFiles" | "pythonFiles" | "verify" | "conventions"
+export type AiSwitchName =
+  | "coverage"
+  | "contextCard"
+  | "focused"
+  | "otherFiles"
+  | "pythonFiles"
+  | "verify"
+  | "conventions"
+  | "rulesOff"
+  | "verifyRules"
+  | "rulePolicy"
 
 export type AiSwitches = Record<AiSwitchName, boolean>
 
@@ -21,6 +32,9 @@ export const AI_SWITCH_ENV: Record<AiSwitchName, string> = {
   pythonFiles: "ALTIMATE_REVIEW_AI_PYTHON_FILES",
   verify: "ALTIMATE_REVIEW_AI_VERIFY",
   conventions: "ALTIMATE_REVIEW_CONVENTIONS",
+  rulesOff: "ALTIMATE_REVIEW_RULES_OFF",
+  verifyRules: "ALTIMATE_REVIEW_AI_VERIFY_RULES",
+  rulePolicy: "ALTIMATE_REVIEW_RULE_POLICY",
 }
 
 /**
@@ -36,17 +50,29 @@ export const AI_SWITCH_DEFAULTS: AiSwitches = {
   pythonFiles: true,
   verify: true,
   conventions: true,
+  rulesOff: true,
+  verifyRules: true,
+  rulePolicy: true,
 }
 
 type Env = Record<string, string | undefined>
 
 const ENV_TRUE = new Set(["1", "true", "on", "yes"])
 const ENV_FALSE = new Set(["0", "false", "off", "no"])
+/** Extra env spellings: `ALTIMATE_REVIEW_AI_VERIFY_RULES=drop_refuted|off`. */
+const ENV_ON: Partial<Record<AiSwitchName, string>> = { verifyRules: "drop_refuted" }
+const ENV_OFF: Partial<Record<AiSwitchName, string>> = { verifyRules: "off" }
 
 /** The env override for a switch: true for `1`/`true`/`on`/`yes`, false for `0`/`false`/`off`/`no`
- *  (case-insensitive), undefined otherwise. */
+ *  (case-insensitive) or a switch's own spelling, undefined otherwise. */
 export function envSwitch(name: AiSwitchName, env: Env = process.env): boolean | undefined {
-  return envBool(env[AI_SWITCH_ENV[name]])
+  const raw = env[AI_SWITCH_ENV[name]]
+  // `ALTIMATE_REVIEW_RULES_OFF` also takes on/off/true/false, or a path naming a replacement list.
+  if (name === "rulesOff") return rulesOffEnv(raw).on
+  const v = raw?.trim().toLowerCase()
+  if (v !== undefined && v === ENV_ON[name]) return true
+  if (v !== undefined && v === ENV_OFF[name]) return false
+  return envBool(raw)
 }
 
 /** An env value as a boolean: `1`/`true`/`on`/`yes` true, `0`/`false`/`off`/`no` false (trimmed,
@@ -58,6 +84,11 @@ export function envBool(raw: string | undefined): boolean | undefined {
 }
 
 const WARNED = new Set<string>()
+/** What else a switch's env variable accepts, for the warning. */
+const ENV_EXTRA: Partial<Record<AiSwitchName, string>> = {
+  verifyRules: ", drop_refuted/off",
+  rulesOff: ", or an absolute path to a JSON list of rule ids",
+}
 
 /** Every switch for one review: env, then the `ai:` config object, then the default. */
 export function resolveAiSwitches(
@@ -75,11 +106,19 @@ export function resolveAiSwitches(
     // No warning for a lane that will not run (`warn: false`).
     if (opts.warn !== false && fromEnv === undefined && raw?.trim() && !WARNED.has(warning)) {
       WARNED.add(warning)
-      process.stderr.write(`⚠️  ignoring ${AI_SWITCH_ENV[name]}=${raw}: use 1/0 (or true/false, on/off, yes/no)\n`)
+      process.stderr.write(`⚠️  ignoring ${AI_SWITCH_ENV[name]}=${raw}: use 1/0 (or true/false, on/off, yes/no${ENV_EXTRA[name] ?? ""})\n`)
     }
-    out[name] = fromEnv ?? configured[name] ?? AI_SWITCH_DEFAULTS[name]
+    out[name] = fromEnv ?? configuredSwitch(configured[name as keyof typeof configured]) ?? AI_SWITCH_DEFAULTS[name]
   }
+  // The rule findings are verified by the same verifier: `verify` off turns `verifyRules` off too.
+  out.verifyRules &&= out.verify
   return out
+}
+
+/** A config value as a switch: a boolean as is, an object (settings for the switch) as on. */
+function configuredSwitch(v: unknown): boolean | undefined {
+  if (typeof v === "boolean") return v
+  return v && typeof v === "object" && !Array.isArray(v) ? true : undefined
 }
 
 /** A switch from resolved switches when given, else from its env variable alone (unset = off). */

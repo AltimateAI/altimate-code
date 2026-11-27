@@ -302,6 +302,12 @@ ai: true                      # the advisory AI lane; false turns it off. Or an 
 #   pythonFiles: true         # changed Python files, inside or outside the project
 #   verify: true              # the dbt-grounded verifier over the AI comments
 #   conventions: true         # repo review instructions from the base branch (see below)
+#   rulesOff: true            # stop posting 36 noisy rule types once the AI lane answers
+#                             # (critical findings of those types are still posted)
+#   rulesOn: []               # rule ids taken back out of that list
+#   verifyRules: true         # verify the posted rule findings with the verifier (needs
+#                             # `verify`); refuted ones are not posted, except critical ones
+#   rulePolicy: true          # post-verification rule policy; or {noisyRules: [...]}
 dataDiff:                     # OFF by default — see "Data-diff in CI" below
   enabled: false
   warehouse: ""               # connection name; empty = default connection
@@ -669,11 +675,58 @@ across 12 dialects all plan; anything still unrecognized stays *undecidable*, ne
    secret-named settings whose value looks like a credential are redacted; ordinary
    text such as `env_var('DBT_PASSWORD')` examples is left as written. The verifier reads a
    convention file's base-branch text, not the PR's edit of it.
+   When the AI lane runs and answers, the rule findings are filtered too. 36 rule
+   types that were almost never real defects on public dbt PRs are not posted on
+   files the AI lane reviewed (`ai.rulesOff: false` or
+   `ALTIMATE_REVIEW_RULES_OFF=0`/`off`/`false`/`no` keeps them, `ai.rulesOn: [ids]` keeps
+   single types, `ALTIMATE_REVIEW_RULES_OFF=<path>.json` replaces the list with a
+   JSON list of rule ids; the path must be absolute and outside the reviewed
+   repository and the current directory's work tree, and is refused when neither
+   resolves to a work tree, and a missing, unreadable or malformed list file stops the review
+   before any lane runs; rule ids match in either spelling, `dbt_patterns:self_join`
+   or `dbt-patterns:self-join`). With the verifier on (`ai.verify`), the rule
+   findings that would be posted are verified too (critical ones are never
+   dropped, so they are not sent; rule types off are sent too on files the AI lane
+   does not send, and on a sent file whose finder call failed, since they are posted
+   there), up to 40 per reviewed dbt project (`--all-projects` verifies each project
+   on its own), warnings and the noisy
+   types first (`ALTIMATE_REVIEW_AI_VERIFY_RULES_MAX_FINDINGS`); findings over the
+   ceiling are posted unverified. The rule run is a second verifier run with its own
+   token budget; on the default budget most of its batches answer without tools
+   (forced at the budget), and those verdicts count. Refuted ones are not posted.
+   `ai.verifyRules: false` or `ALTIMATE_REVIEW_AI_VERIFY_RULES=off` turns this step off
+   (no rule finding is verified or dropped as refuted), and so does `ai.verify: false`.
+   Then a rule finding is not posted when the verifier answered that it could not
+   check it and it is a warning, or when its type is one of 7 noisy types and the
+   verifier did not confirm it (`ai.rulePolicy: false` or
+   `ALTIMATE_REVIEW_RULE_POLICY=0`). A rule finding that got no verdict (its batch
+   failed, or it was over the ceiling) is posted, and so is one whose batch timed
+   out (its verdict counts as no verdict). Critical rule
+   findings are never dropped by any of these steps, nor is a repeat-merged comment
+   that includes an AI finding. When the AI lane is skipped or fails (no model, dry
+   run, provider error, timeout), the rule verifier does not run, none of the steps
+   applies and every rule finding is posted as before; when only the rule verifier
+   did not run, the rule types off still apply and every other rule finding is
+   posted unchanged. The envelope counts what each step withheld, per instance as the
+   verdict counts them (`rulesOff`, `rulesRefuted`, `rulePolicy`), and the PR comment
+   gives the total per step.
 4. **Rubric → verdict.** Findings map to a verdict by a versioned rubric (data,
    not prompt): any blocking-category `critical` → `REQUEST_CHANGES`; ≥3 warnings
    → risk pattern → `REQUEST_CHANGES`; only suggestions → `COMMENT`; nothing →
    `APPROVE`. Only layer-1 findings reach `critical`, so only the engine can
-   block. In `comment` mode, `REQUEST_CHANGES` is posted as comments rather than
+   block (the rule verifier and the rule-post policy never drop a critical rule
+   finding). The rule-noise steps change what is posted, never the verdict: an
+   engine warning that is refuted, turned off or dropped by the policy is not
+   posted but still counts toward the ≥3 warnings (the summary counts it too), so
+   neither the verifier nor text it reads, such as the PR description, can unblock
+   a gate. When withheld findings change a project's verdict, the summary lists them (file
+   and line, title, and why each was not posted; the first 10, the rest are in the
+   envelope) and the envelope records them under
+   `withheld`: the engine warnings that count toward a `REQUEST_CHANGES`, or every
+   withheld finding when they alone keep the verdict from `APPROVE`. With
+   `--all-projects`, the merged summary shows the lists of the projects whose verdict
+   equals the merged one; a project below it has its list left out, and the findings
+   on that list are not counted. In `comment` mode, `REQUEST_CHANGES` is posted as comments rather than
    blocking.
 5. **Signed envelope.** The verdict is HMAC-signed (`ALTIMATE_REVIEW_SIGNING_KEY`)
    and includes the manifest hash, so it is replayable and tamper-evident.
