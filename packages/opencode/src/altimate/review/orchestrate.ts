@@ -1642,14 +1642,14 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     const hits = result.items?.length ? result.items : result.column ? [{ column: result.column, line: result.line ?? "" }] : []
     if (!hits.length || !rawBaseLacks(baseCode(f.file), hits.map((h) => h.column))) return false
     const reach = headReach(f.file)
-    const head = reindentInfo(f.file)?.head ?? []
     const mayReachOutput = (hit: { column: string; line: string }) => {
       const column = hit.column.toLowerCase()
       const lineNos = headLineNumbers(f.file, hit.line)
       if (!reach || !lineNos.length) return true
       // Any head line with this text counts: the diff does not say which one it is.
       return lineNos.some((n) => {
-        const items = head.filter((i) => i.startLine <= n && n <= i.endLine)
+        // The analysis's own items: it knows them by identity.
+        const items = reach.items.filter((i) => i.startLine <= n && n <= i.endLine)
         if (items.length) return items.some((i) => reach.passes(i, column))
         return !reach.inClause(n) || reach.mayExpose(column)
       })
