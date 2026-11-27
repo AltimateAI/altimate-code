@@ -233,7 +233,44 @@ describe("summary grouping and budget", () => {
     const md = renderSummary(buildEnvelope({ findings: fs, tier: "lite", mode: "comment" }))
     expect(md).toContain("3 findings across 3 model(s)")
     expect(md).toContain("Column `…` has no not_null test.")
-    expect(md).not.toContain("`a_id`")
+    // Each column is attributed to its own model, never shown as everyone's.
+    expect(md).not.toContain("Column `a_id`")
+    expect(md).toContain("`a`: `a_id` · `b`: `b_id` · `c`: `c_id`")
+  })
+
+  test("a group whose members differ by more than the model lists each member's values", () => {
+    const fs = [
+      ["a", "ILIKE"],
+      ["b", "QUALIFY"],
+      ["c", "IFF"],
+      ["c", "NVL2"],
+    ].map(([m, fn]) =>
+      finding({
+        severity: "warning",
+        category: "sql_quality",
+        model: m,
+        file: `models/${m}.sql`,
+        title: `${m}: unsupported function`,
+        body: `Function \`${fn}\` is unsupported on the target dialect.`,
+      }),
+    )
+    const md = renderSummary(buildEnvelope({ findings: fs, tier: "lite", mode: "comment" }))
+    expect(md).toContain("4 findings across 3 model(s)")
+    expect(md).toContain("`a`: `ILIKE` · `b`: `QUALIFY` · `c`: `IFF` · `c`: `NVL2`")
+  })
+
+  test("findings titled by their file group like findings titled by their model", () => {
+    const fs = ["a", "b", "c"].map((m) =>
+      finding({
+        model: m,
+        file: `models/${m}/schema.yml`,
+        // The removed-test shape: file prefix, model named unquoted mid-title.
+        title: `schema.yml: unique test removed from ${m}.id`,
+        category: "test_coverage",
+      }),
+    )
+    const md = renderSummary(buildEnvelope({ findings: fs, tier: "lite", mode: "comment" }))
+    expect(md).toContain("3 findings across 3 model(s)")
   })
 
   test("more than eight models: the posted comment lists eight, local output lists every finding", () => {

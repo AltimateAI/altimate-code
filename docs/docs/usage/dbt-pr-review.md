@@ -292,9 +292,10 @@ rubric:
   5,000 characters. Critical findings come first; anything that does not fit is
   counted, and the full list is always in the job log and the verdict envelope
   (`altimate review --json --output <file>`). Local CLI output is never truncated.
-- **Repeated findings are grouped:** the same rule with the same message on
-  three or more models is one bullet listing the models. Local CLI output lists
-  every finding with its location.
+- **Repeated findings are grouped:** the same rule and message (ignoring model
+  and column names) on three or more models is one bullet listing the models,
+  with each model's own names when they differ. Local CLI output lists every
+  finding with its location.
 - **Inline comments only on lines of the PR's diff.** Findings computed on
   compiled SQL, or on unchanged lines, stay in the summary.
 - **No re-posting on reruns:** each inline comment carries the finding's

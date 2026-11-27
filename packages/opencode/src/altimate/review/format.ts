@@ -200,10 +200,24 @@ function blankNames(s: string): string {
   return s.replace(/`[^`]*`/g, "`…`")
 }
 
-/** A finding's title without its leading `model: `, with backticked names
- *  blanked: the title half of the grouping key. */
+/** A finding's title without its leading `model: ` or `file: `, with its model
+ *  name and backticked names blanked: the title half of the grouping key. */
 function groupKeyTitle(f: Finding): string {
-  return blankNames(f.model && f.title.startsWith(`${f.model}: `) ? f.title.slice(f.model.length + 2) : f.title)
+  const prefixes = [f.model, f.file, f.file.split("/").pop()].filter((p): p is string => !!p)
+  const lead = prefixes.find((p) => f.title.startsWith(`${p}: `))
+  let title = lead ? f.title.slice(lead.length + 2) : f.title
+  // `Model orders modified — …`: the model named mid-title, as a whole word.
+  if (f.model)
+    title = title.replace(new RegExp(`(?<![\\w.])${f.model.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w])`, "g"), "…")
+  return blankNames(title)
+}
+
+/** The backticked values in a finding's title and body other than its own model
+ *  and file: what tells one member of a group from another. */
+function distinguishingValues(f: Finding): string[] {
+  const own = new Set([f.model, f.file].filter(Boolean))
+  const values = [...`${f.title} ${f.body}`.matchAll(/`([^`]*)`/g)].map((m) => m[1]).filter((v) => !own.has(v))
+  return [...new Set(values)]
 }
 
 // A budgeted bullet's body is clipped to this, so one long finding cannot fill
@@ -235,12 +249,26 @@ function bulletsFor(items: Finding[], group: boolean): Array<{ text: string; cou
       const more = names.length > 8 ? ` (+${names.length - 8} more)` : ""
       // Show a body verbatim only when every member says exactly that;
       // otherwise its names belong to one model, so show the blanked form.
-      const body = bodyOf(g.every((f) => f.body === g[0].body) ? oneLine(g[0].body) : blankNames(oneLine(g[0].body)))
+      const same = g.every((f) => f.body === g[0].body)
+      const body = bodyOf(same ? oneLine(g[0].body) : blankNames(oneLine(g[0].body)))
+      // Members that differ by more than their model (another function, a second
+      // column on one model): list each member's own values.
+      const values = g.map((f) => ({ f, v: distinguishingValues(f) }))
+      const differ = values.some(({ v }) => v.join("\u0000") !== values[0].v.join("\u0000"))
+      const detail =
+        differ && values.some(({ v }) => v.length)
+          ? `  ${bodyOf(
+              values
+                .slice(0, 8)
+                .map(({ f, v }) => `\`${f.model ?? f.file}\`: ${v.map((x) => `\`${x}\``).join(", ") || "—"}`)
+                .join(" · ") + (values.length > 8 ? ` (+${values.length - 8} more)` : ""),
+            )}  \n`
+          : ""
       const unverified = g.some((f) => f.degraded) ? " · _unverified_" : ""
       out.push({
         text:
           `- **${groupKeyTitle(g[0])}** — ${g.length} findings across ${names.length} model(s): ${shown}${more}  \n` +
-          `  ${body}  \n  <sub>${g[0].category}${unverified}</sub>`,
+          `  ${body}  \n${detail}  <sub>${g[0].category}${unverified}</sub>`,
         count: g.length,
       })
       continue
