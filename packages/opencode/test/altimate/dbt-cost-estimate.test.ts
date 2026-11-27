@@ -1047,6 +1047,23 @@ describe("dbt_cost_estimate cost", () => {
       })
     })
 
+    test("a DONE job with no end time before the cutoff is read as live and leaves out the same user's build two days later", async () => {
+      await withNow(async () => {
+        useAdapter(calls, {
+          ...answer(fullRows()),
+          boundary: fullBoundary,
+          // An adapter consistent with the SQL: the job is returned only if the query's predicate takes a null end time.
+          live: async (jinja) =>
+            /or end_time is null\)/.test(jinja)
+              ? table(["job_id", "user_email", "creation_time", "end_time", "state"], [["q", "a@x.com", iso(T0 - 60_000), null, "DONE"]])
+              : table(["job_id", "user_email", "creation_time", "end_time", "state"], []),
+        })
+        const cost = await ask()
+        expect(cost.notes).toContain("2 runs still in progress were left out.")
+        expect(cost.highest).toBeLessThan(100 * 6.25)
+      })
+    })
+
     test("without a live job the same build is priced", async () => {
       await withNow(async () => {
         useAdapter(calls, { ...answer(fullRows()), boundary: fullBoundary })

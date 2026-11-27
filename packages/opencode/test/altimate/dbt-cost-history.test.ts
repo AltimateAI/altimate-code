@@ -628,7 +628,8 @@ describe("boundary SQL", () => {
     const sql = bigqueryLiveSql({ project: "p", location: "EU", needle, view: "JOBS_BY_USER", asOfMs: ASOF })
     expect(sql).toContain("`p`.`region-eu`.INFORMATION_SCHEMA.JOBS_BY_USER")
     expect(sql).toContain(`creation_time > timestamp_millis(${WINDOW}) and creation_time <= timestamp_millis(${ASOF})`)
-    expect(sql).toContain("upper(state) in ('PENDING','RUNNING')")
+    // A job with no end time yet is still going whatever its state says.
+    expect(sql).toContain("(upper(state) in ('PENDING','RUNNING') or end_time is null)")
     expect(sql).toContain("strpos(query, 'altimate_cost_read') = 0")
     expect(sql).toContain(`strpos(query, '"node_id": "model.shop.orders"') > 0`)
     expect(sql).toContain("parent_job_id is null")

@@ -242,14 +242,14 @@ order by creation_time desc limit ${HISTORY_LIMIT}`
 }
 
 /**
- * The model's jobs that are still queued or running anywhere in the history window, read apart from the boundary so
+ * The model's jobs that are still queued or running (or have no end time yet) anywhere in the history window, read apart from the boundary so
  * that they cannot be crowded out by finished jobs. A job still going can chain into any run after its start.
  */
 export function bigqueryLiveSql(input: { project: string; location?: unknown; needle: string; view?: JobsView; asOfMs: number }): string {
   return `select /* ${OWN_MARK} */ job_id, user_email, creation_time, end_time, state
 from ${bqJobs(input.project, input.location, input.view ?? "JOBS")}
 where creation_time > timestamp_millis(${windowStartMs(input.asOfMs)}) and creation_time <= timestamp_millis(${input.asOfMs})
-  and upper(job_type) = 'QUERY' and upper(state) in ('PENDING','RUNNING')
+  and upper(job_type) = 'QUERY' and (upper(state) in ('PENDING','RUNNING') or end_time is null)
   and parent_job_id is null
   and ${notOwn}
   and strpos(query, ${sqlString(input.needle)}) > 0
