@@ -56,7 +56,9 @@ export function trustedFilePath(name: string, file: string, reviewDirs: Array<st
     } catch {}
     if (path.dirname(d) === d) break
   }
-  if (trees.some((t) => spots.some((p) => isInsideDir(p, t))))
-    throw new Error(`${name} is inside the git work tree; place it outside the checkout`)
+  // Names the work tree (not the file), so a tree the operator did not expect (a home directory
+  // kept in git) is visible.
+  const tree = trees.find((t) => spots.some((p) => isInsideDir(p, t)))
+  if (tree) throw new Error(`${name} is inside the git work tree ${tree}; place it outside the checkout`)
   return real
 }

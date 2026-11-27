@@ -647,7 +647,9 @@ across 12 dialects all plan; anything still unrecognized stays *undecidable*, ne
    example under `$RUNNER_TEMP`); a file inside the reviewed repository or the
    current directory's git work tree (or any work tree around them), a symlink to
    one, or a path through a symlink inside one is refused, since a PR could change
-   it, and so is any file when neither resolves to a work tree.
+   it, and so is any file when neither resolves to a work tree. The error names the
+   work tree it found; note that a home directory that is itself a git repository
+   (dotfiles kept in git) is such a work tree, so files anywhere under it are refused.
 4. **Rubric → verdict.** Findings map to a verdict by a versioned rubric (data,
    not prompt): any blocking-category `critical` → `REQUEST_CHANGES`; ≥3 warnings
    → risk pattern → `REQUEST_CHANGES`; only suggestions → `COMMENT`; nothing →

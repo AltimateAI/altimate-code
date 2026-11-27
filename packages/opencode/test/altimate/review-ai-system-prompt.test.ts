@@ -104,7 +104,11 @@ describe("ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE", () => {
     const cwd = process.cwd()
     process.chdir(nested)
     try {
-      await expect(finderSystemPrompt({ ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE: file }, nested)).rejects.toThrow("inside the git work tree")
+      // The error names the enclosing work tree the file was found in.
+      const outer = await fs.realpath(repo.path)
+      await expect(finderSystemPrompt({ ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE: file }, nested)).rejects.toThrow(
+        `inside the git work tree ${outer};`,
+      )
     } finally {
       process.chdir(cwd)
     }
