@@ -691,9 +691,9 @@ function splitTable(table: string): { prefix: string; name: string } {
   return dot < 0 ? { prefix: "", name: table } : { prefix: table.slice(0, dot), name: table.slice(dot + 1) }
 }
 
-/** The database/schema prefixes each side's SQL reads tables under. */
+/** The database/schema prefixes the base's SQL reads tables under: `sameTable`
+ *  asks only whether the base already read tables under the head's prefix. */
 export interface RelationPrefixes {
-  head: Set<string>
   base: Set<string>
 }
 

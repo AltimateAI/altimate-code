@@ -1240,13 +1240,10 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     }
     return parsed
   }
-  // The schema prefixes each side reads tables under: a base compiled into
+  // The schema prefixes the base reads tables under: a base compiled into
   // another environment (prod `target-base`, a `+schema` change) reads the same
   // tables under different prefixes, which `refCovered` then ignores.
-  const envOf = (file: string): RelationPrefixes => ({
-    head: outputs(file, "new").prefixes,
-    base: outputs(file, "old").prefixes,
-  })
+  const envOf = (file: string): RelationPrefixes => ({ base: outputs(file, "old").prefixes })
   // `source.column` refs the base exposed raw under a name its PII detection
   // reported: named in its final select, or passed through its plain `*`
   // (`select * from customers` exposes `customers.ssn` when `ssn` is base PII).
