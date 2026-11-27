@@ -64,9 +64,9 @@ export async function runRuleVerify(
   const max = Number(env.ALTIMATE_REVIEW_AI_VERIFY_RULES_MAX_FINDINGS)
   const cap = Number.isInteger(max) && max > 0 ? max : RULE_VERIFY_MAX_FINDINGS
   // Critical findings are never dropped, so they are not verified. Warnings first, since the policy
-  // acts on them, and within a severity the default noisy types, whose posting depends on a verdict.
+  // acts on them, and within a severity the policy's noisy types, whose posting depends on a verdict.
   const order = { critical: 2, warning: 1, suggestion: 0 } as const
-  const noisy = new Set(NOISY_RULE_TYPES.map(normalizeRuleId))
+  const noisy = new Set((input.noisyRules ?? NOISY_RULE_TYPES).map(normalizeRuleId))
   const isNoisy = (f: Finding) => (f.rule && noisy.has(normalizeRuleId(f.rule)) ? 1 : 0)
   const sent = [...candidates].sort((a, b) => order[b.severity] - order[a.severity] || isNoisy(b) - isNoisy(a)).slice(0, cap)
   log.info("verifying rule findings", { findings: sent.length, total: rules.length })

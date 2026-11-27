@@ -759,6 +759,9 @@ export interface AiReviewInput {
   /** Rule findings verified only when the finder's call for their file failed: rule types off on
    *  sent files, which are posted only then (the orchestrator drops them where the lane answered). */
   verifyRulesIfUnreviewed?: Finding[]
+  /** The rule-post policy's noisy types (`ai.rulePolicy.noisyRules`, else the default list): verified
+   *  first under the per-PR ceiling, since their posting depends on a verdict. */
+  noisyRules?: readonly string[]
 }
 
 /** What happened in the advisory lane, reported on the envelope and in the comment. */

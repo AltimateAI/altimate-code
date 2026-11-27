@@ -617,3 +617,11 @@ describe("round 4: withheld findings in the comment and the merge", () => {
     expect(renderSummary(env, { maxChars: Infinity })).toContain("6 rule finding(s) not posted")
   })
 })
+
+describe("round 4: the lane gets the policy's noisy types", () => {
+  test("the orchestrator passes `ai.rulePolicy.noisyRules` to the rule verifier", async () => {
+    const seen: AiReviewInput[] = []
+    await run({}, seen)
+    expect(seen[0].noisyRules).toEqual(DEFAULT_RULE_POST_POLICY.noisyRules)
+  })
+})

@@ -2858,6 +2858,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
         ...(input.conventions?.length ? { conventions: input.conventions } : {}),
         ...(verifyRulesAfter?.length ? { verifyRulesAfter } : {}),
         ...(ruleCandidates?.ifUnreviewed.length ? { verifyRulesIfUnreviewed: ruleCandidates.ifUnreviewed } : {}),
+        ...(input.rulePolicy ? { noisyRules: input.rulePolicy.noisyRules } : {}),
       })
       const aiFindings = Array.isArray(res) ? res : res.findings
       if (Array.isArray(res)) aiStatus = { state: "ok" }

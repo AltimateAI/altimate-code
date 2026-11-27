@@ -623,4 +623,16 @@ describe("round 4: what counts as a rule verdict; which findings go first under 
     ])
     expect(res.status).toMatchObject({ reviewed: 2, unreviewed: 2 })
   })
+
+  test("the configured noisy types (`ai.rulePolicy.noisyRules`) go first under the ceiling", async () => {
+    scriptModels([], /x/)
+    const custom = { ...ruleFinding(9), rule: ruleId("dbt-patterns", "custom-noisy") }
+    const rules = [ruleFinding(1), ruleFinding(2), custom]
+    const env = { ALTIMATE_REVIEW_AI_VERIFY_RULES_MAX_FINDINGS: "1" }
+    const input = { files: [FILE], grounding: [], evidence: evidence() }
+    const byDefault = await runRuleVerify(input, rules, { env })
+    expect(byDefault.status.verifier?.ruleVerdicts?.map((v) => v.id)).toEqual([rules[0].id])
+    const configured = await runRuleVerify({ ...input, noisyRules: ["dbt_patterns:custom_noisy"] }, rules, { env })
+    expect(configured.status.verifier?.ruleVerdicts?.map((v) => v.id)).toEqual([custom.id])
+  })
 })
