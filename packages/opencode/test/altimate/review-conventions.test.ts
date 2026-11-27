@@ -832,6 +832,15 @@ describe("folded findings in the PR comment", () => {
     }
   })
 
+  test("a budgeted summary without inline comments groups the lead with its members (same-applies sentence ignored)", async () => {
+    const { renderSummary } = await import("../../src/altimate/review/format")
+    const env = envelopeOf(groupConventionFindings([mk("models/a.sql", 1), mk("models/b.sql", 1)], conv))
+    const summary = renderSummary(env, { inline: false })
+    expect(summary).toContain("2 findings across 2 model(s)")
+    expect(summary).toContain("Per models/CLAUDE.md.")
+    expect(summary).not.toContain("The same applies to")
+  })
+
   test("a folded finding the verifier demoted or that is pre-existing is not folded; it keeps its summary entry", async () => {
     const { inlineComments, renderSummary, postedFindingIds } = await import("../../src/altimate/review/format")
     const grouped = groupConventionFindings([mk("models/a.sql", 1), mk("models/b.sql", 1), mk("models/c.sql", 1)], conv)

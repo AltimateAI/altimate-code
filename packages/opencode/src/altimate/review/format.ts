@@ -215,7 +215,7 @@ function bulletsFor(items: Finding[], group: boolean): Array<{ text: string; cou
   for (const f of items) {
     // The body is part of the key: one rule with different messages (e.g. a
     // dialect check naming different functions) is different findings.
-    const key = group ? `${f.category}|${groupKeyTitle(f)}|${blankNames(oneLine(f.body))}` : f.id
+    const key = group ? `${f.category}|${groupKeyTitle(f)}|${blankNames(oneLine(shownBody(f)))}` : f.id
     const g = groups.get(key)
     if (g) g.push(f)
     else groups.set(key, [f])
@@ -231,7 +231,7 @@ function bulletsFor(items: Finding[], group: boolean): Array<{ text: string; cou
       // Show a body verbatim only when every member says exactly that;
       // otherwise its names belong to one model, so show the blanked form.
       const lead = shownBody(g[0])
-      const body = oneLine(clampBody(g.every((f) => f.body === g[0].body) ? lead : blankNames(lead)))
+      const body = oneLine(clampBody(g.every((f) => shownBody(f) === lead) ? lead : blankNames(lead)))
       const unverified = g.some((f) => f.degraded) ? " · _unverified_" : ""
       out.push({
         text:
