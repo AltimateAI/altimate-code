@@ -1108,17 +1108,25 @@ interface ModelContext {
 }
 
 /**
- * The raw (uncompiled) base cannot expose any of `names`: none appears in it as
- * a word, no select item is a `*`, and its only Jinja expressions are `ref`,
- * `source`, `config` or `this`. A macro (`dbt_utils.star(…)`), a variable or a
- * `{{ col }}` loop could emit any column, so any other expression proves nothing.
+ * The raw (uncompiled) base cannot expose any of the source columns `names`:
+ * none appears in it as a word outside comments, no select item is a `*`, its
+ * only Jinja expressions are `ref`, `source`, `config` or `this`, and its only
+ * Jinja statements are control flow (`if`/`for`/`set` and their ends), which
+ * emit no text of their own. A macro (`dbt_utils.star(…)`), a variable, a
+ * `{{ col }}` loop, an `{% include %}` or a `{% call %}` block could emit any
+ * column, so any other tag proves nothing. String literals still count as
+ * evidence: a JSON path (`payload:ssn`, `'$.ssn'`) can expose the column.
  */
+const RAW_BASE_PLAIN_EXPR = /^\{\{-?\s*(?:(?:ref|source|config)\s*\([^{}]*\)|this)\s*-?\}\}$/
+const RAW_BASE_SILENT_TAG = /^\{%[-+]?\s*(?:if|elif|else|endif|for|endfor|set|endset)\b[\s\S]*%\}$/
 function rawBaseLacks(oldSql: string | undefined, names: string[]): boolean {
   if (!oldSql || !names.length) return false
-  const plain = /^\{\{-?\s*(?:(?:ref|source|config)\s*\([^{}]*\)|this)\s*-?\}\}$/
-  if (!(oldSql.match(/\{\{[\s\S]*?\}\}/g) ?? []).every((e) => plain.test(e))) return false
+  if (!(oldSql.match(/\{\{[\s\S]*?\}\}/g) ?? []).every((e) => RAW_BASE_PLAIN_EXPR.test(e))) return false
+  if (!(oldSql.match(/\{%[\s\S]*?%\}/g) ?? []).every((t) => RAW_BASE_SILENT_TAG.test(t))) return false
   if (selectItems(oldSql).some((i) => /(?:^|\.)\*(?:\s|$)/.test(i.text))) return false
-  return names.every((n) => !new RegExp(`(?<![\\w$])${n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w$])`, "i").test(oldSql))
+  // Comments out, literals kept (one pass, so `--` inside a literal is not a comment).
+  const code = oldSql.replace(/\{#[\s\S]*?#\}|\/\*[\s\S]*?\*\/|--[^\n]*|'(?:[^']|'')*'/g, (m) => (m.startsWith("'") ? m : " "))
+  return names.every((n) => !new RegExp(`(?<![\\w$])${n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w$])`, "i").test(code))
 }
 
 export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelope> {
@@ -1580,9 +1588,9 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   const provenNewTwin = (f: Finding) => {
     const ctx = ctxByPath.get(f.file)
     if (!ctx || !hasOldSide(ctx.file) || ctx.engineOldSql) return false
-    const result = (f.evidence?.result ?? {}) as { column?: string; alias?: string; items?: SelectItemColumn[] }
-    const names = [result.column, result.alias, ...(result.items ?? []).flatMap((it) => [it.column, it.alias])]
-    return rawBaseLacks(ctx.oldSql, names.filter((n): n is string => !!n))
+    const result = (f.evidence?.result ?? {}) as { column?: string; items?: SelectItemColumn[] }
+    const columns = [result.column, ...(result.items ?? []).map((it) => it.column)]
+    return rawBaseLacks(ctx.oldSql, columns.filter((c): c is string => !!c))
   }
   const merged = flat.filter((f) => {
     const tool = f.evidence?.tool

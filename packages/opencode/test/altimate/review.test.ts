@@ -3181,6 +3181,44 @@ describe("orchestrate", () => {
     }
   })
 
+  test("raw-base proof: control-flow tags and comments prove nothing away, other Jinja tags and literals stay undecided", async () => {
+    const run = (base: string, head = "select customer_id,\n    ssn\nfrom {{ ref('customers') }}", diff = "+    ssn\n") =>
+      runReview({
+        changedFiles: MARTS.map((path) => ({ path, status: "modified" as const, diff })),
+        config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"] },
+        rubric: DEFAULT_RUBRIC,
+        mode: "gate",
+        runner: piiRunner(["ssn"]),
+        getContent: content(head, base),
+      })
+    const blocks = async (base: string, head?: string, diff?: string) => {
+      const env = await run(base, head, diff)
+      return { base, critical: env.findings.filter(isTwin).some((f) => f.severity === "critical"), verdict: env.verdict }
+    }
+    // Proven new: `if`/`for`/`set` emit no text, a comment naming the column is
+    // not a read, and an output alias the base used for another column is not
+    // the source column (`email as contact` → `ssn as contact`).
+    for (const base of [
+      "select customer_id\nfrom {{ ref('customers') }}\n{% if is_incremental() %}\nwhere updated_at > (select max(updated_at) from {{ this }})\n{% endif %}",
+      "{% set days = 3 %}\nselect customer_id -- ssn moved to the vault\nfrom {{ ref('customers') }} /* no ssn here */",
+    ])
+      expect(await blocks(base)).toEqual({ base, critical: true, verdict: "REQUEST_CHANGES" })
+    const aliasBase = "select customer_id,\n    email as contact\nfrom {{ ref('customers') }}"
+    expect(
+      await blocks(aliasBase, "select customer_id,\n    ssn as contact\nfrom {{ ref('customers') }}", "-    email as contact\n+    ssn as contact\n"),
+    ).toEqual({ base: aliasBase, critical: true, verdict: "REQUEST_CHANGES" })
+    // Undecided: a tag that can emit text, a `*` behind a select-list `if`, or a
+    // string literal that can read the column (a JSON path).
+    for (const base of [
+      "select customer_id,\n{% include 'customer_columns.sql' %}\nfrom {{ ref('customers') }}",
+      "select customer_id\n{% call add_columns() %}x{% endcall %}\nfrom {{ ref('customers') }}",
+      "select customer_id{% if var('wide', false) %}, *{% endif %}\nfrom {{ ref('customers') }}",
+      "select {% if var('wide', false) %}*{% else %}customer_id{% endif %}\nfrom {{ ref('customers') }}",
+      "select customer_id, json_extract(payload, '$.ssn') as tax_ref\nfrom {{ ref('customers') }}",
+    ])
+      expect(await blocks(base)).toEqual({ base, critical: false, verdict: expect.not.stringMatching(/^REQUEST_CHANGES$/) })
+  })
+
   test("without a compiled base, an added `c.ssn` over a raw base with no `ssn` still blocks", async () => {
     for (const reviewers of [[], ["dbt_patterns"]]) {
       const env = await runReview({
