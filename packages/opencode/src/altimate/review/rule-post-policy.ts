@@ -3,7 +3,8 @@
 // After the rule types off and the refuted rule findings are dropped, a rule finding is not
 // posted when (1) the verifier's verdict on it is `unverifiable` and its severity is warning,
 // or (2) its rule type is on the noisy list and the verdict is not `confirmed`. A finding with
-// no verdict counts as unverifiable. AI findings and critical rule findings are never touched:
+// no verdict (its batch failed or timed out, the answer omitted it, or it was never sent) was
+// not judged and is kept. AI findings and critical rule findings are never touched:
 // a critical rule finding is always posted. The caller skips the policy when the rule
 // verifier did not run (fail-open).
 import { type Finding, findingOrigin, normalizeRuleId } from "./finding"
@@ -39,10 +40,13 @@ export function rulePolicyDrop(
   policy: RulePostPolicy,
 ): keyof RulePolicyDrops | undefined {
   if (findingOrigin(f) === "ai" || f.severity === "critical") return undefined
-  const v = verdict ?? "unverifiable"
-  if (v === "unverifiable" && f.severity === "warning") return "unverifiable_high_sev"
-  if (f.rule && v !== "confirmed" && policy.noisyRules.some((r) => normalizeRuleId(r) === normalizeRuleId(f.rule!)))
-    return "noisy_type_not_confirmed"
+  // No verdict is an infrastructure outcome, not a model judgement: keep the finding.
+  if (verdict == null) return undefined
+  if (verdict === "unverifiable" && f.severity === "warning") return "unverifiable_high_sev"
+  if (f.rule && verdict !== "confirmed") {
+    const rule = normalizeRuleId(f.rule)
+    if (policy.noisyRules.some((r) => normalizeRuleId(r) === rule)) return "noisy_type_not_confirmed"
+  }
   return undefined
 }
 

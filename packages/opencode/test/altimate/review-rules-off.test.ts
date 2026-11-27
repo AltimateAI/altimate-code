@@ -255,3 +255,46 @@ describe("orchestrator: rule types off", () => {
     expect(withList.rulesOff).toBeUndefined()
   })
 })
+
+describe("round 2: rule types off apply only to files the AI lane reviewed", () => {
+  const runner: ReviewRunner = {
+    async impact() {
+      return { hasManifest: true, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 }
+    },
+    async grade() {
+      return { grade: "B" }
+    },
+    async check() {
+      return { issues: [], ran: true }
+    },
+    async equivalence() {
+      return { decided: true, equivalent: true }
+    },
+    async detectPii() {
+      return { columns: [] }
+    },
+  } as ReviewRunner
+  const SQL = "select *\nfrom raw.orders\nwhere status = 'x'\norder by 1"
+  const run = (rulesOff: Set<string> | undefined, status: AiLaneStatus) =>
+    runReview({
+      changedFiles: [{ path: "models/marts/m.sql", status: "modified", diff: `@@ -1 +1,4 @@\n-select 1\n+${SQL.split("\n").join("\n+")}\n` }],
+      config: { ...DEFAULT_REVIEW_CONFIG },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner,
+      forceTier: "full",
+      getContent: async (_f, side) => (side === "old" ? "select 1" : SQL),
+      generatedAt: "2026-11-27T00:00:00Z",
+      ...(rulesOff ? { rulesOff } : {}),
+      aiReview: async () => ({ findings: [], status }),
+    })
+
+  test("the file's call failed while others answered: its rule findings of off types are posted", async () => {
+    const base = await run(undefined, { state: "ok" })
+    const target = base.findings[0].rule!
+    const reviewed = await run(new Set([target]), { state: "ok" })
+    expect(reviewed.findings.length).toBeLessThan(base.findings.length)
+    const failed = await run(new Set([target]), { state: "ok", reason: "1 of 2 calls failed: boom", failedFiles: ["models/marts/m.sql"] })
+    expect(failed.findings).toEqual(base.findings)
+  })
+})

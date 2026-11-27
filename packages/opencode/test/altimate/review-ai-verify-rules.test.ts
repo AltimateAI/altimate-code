@@ -517,3 +517,64 @@ describe("batchOutcomeState", () => {
     expect(batchOutcomeState([{ state: "ok" }, { state: "error", reason: "boom" }])).toEqual({ state: "ok", reason: "1 of 2 batches failed: boom" })
   })
 })
+
+describe("round 2: the rule verifier runs only after a finder that answered, under a per-PR ceiling", () => {
+  test("the finder failed: no rule-verifier call, no verdicts, no drop_refuted", async () => {
+    const llm = scriptModels([], /x/)
+    spyOn(Dispatcher, "call").mockResolvedValue({ success: true, data: {} } as any)
+    const rules = [ruleFinding(1)]
+    const res = await runAiReview({ files: [FILE], grounding: rules, evidence: evidence(), verifyRulesAfter: rules })
+    expect(res.status.state).toBe("error")
+    expect(res.status.verifyRules).toBeUndefined()
+    expect(res.status.ruleVerifier).toBeUndefined()
+    expect(llm).not.toHaveBeenCalled()
+  })
+
+
+})
+
+describe("round 2: credential-like paths", () => {
+  test("rule findings on a file named like a credential file are not sent to the rule verifier", async () => {
+    const runner = {
+      async impact() {
+        return { hasManifest: true, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 }
+      },
+      async grade() {
+        return { grade: "B" }
+      },
+      async check() {
+        return { issues: [{ rule: "ambiguous-column", severity: "error", category: "correctness", message: "ambiguous column status", line: 3 }], ran: true }
+      },
+      async equivalence() {
+        return { decided: true, equivalent: true }
+      },
+      async detectPii() {
+        return { columns: [] }
+      },
+    } as unknown as ReviewRunner
+    const SQL = "select *\nfrom raw.orders\nwhere status = 'x'\norder by 1"
+    const seen: AiReviewInput[] = []
+    const changed = (p: string) => ({ path: p, status: "modified" as const, diff: `@@ -1 +1,4 @@\n-select 1\n+${SQL.split("\n").join("\n+")}\n` })
+    const env = await runReview({
+      changedFiles: [changed("models/marts/m.sql"), { path: "models/secrets.yml", status: "modified" as const, diff: "@@ -1 +1 @@\n-a: 1\n+a: [\n" }],
+      config: { ...DEFAULT_REVIEW_CONFIG },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner,
+      forceTier: "full",
+      aiVerify: true,
+      aiSwitches: { verifyRules: true },
+      getContent: async (f, side) => (f.endsWith(".yml") ? (side === "old" ? "a: 1\n" : "a: [\n") : side === "old" ? "select 1" : SQL),
+      generatedAt: "2026-11-27T00:00:00Z",
+      aiReview: async (input) => {
+        seen.push(input)
+        return { findings: [], status: { state: "ok" } }
+      },
+    })
+    const files = new Set((seen[0].verifyRulesAfter ?? []).map((f) => f.file))
+    expect(files.has("models/marts/m.sql")).toBe(true)
+    // The deterministic lanes still report the file; only the model never sees its findings.
+    expect(env.findings.some((f) => f.file === "models/secrets.yml")).toBe(true)
+    expect(files.has("models/secrets.yml")).toBe(false)
+  })
+})

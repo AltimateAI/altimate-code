@@ -2820,7 +2820,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
             (f) => SEVERITY_ORDER[f.severity] >= SEVERITY_ORDER[input.config.severityThreshold] && findingOrigin(f) !== "ai",
           ),
           input.rulesOff,
-        ).kept
+        ).kept.filter((f) => !mayHoldCredentials(f.file))
       : undefined
     try {
       const res = await input.aiReview({
@@ -2886,18 +2886,25 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     return list.filter((f) => inMixed(f) || kept.has(f))
   }
   const rulesOff = aiLaneRan ? input.rulesOff : undefined
+  // Rule types off stand on the AI lane having reviewed the same file: a finding on a file the
+  // lane did not review (not sent, or its call failed) is posted.
+  const offStep = (list: Finding[]) => {
+    const r = dropRulesOff(list.filter((f) => aiReviewed.has(f.file)), rulesOff)
+    const kept = new Set(r.kept)
+    return { kept: list.filter((f) => !aiReviewed.has(f.file) || kept.has(f)), dropped: r.dropped }
+  }
   let offDropped: Record<string, number> = {}
   findings = ruleStep(findings, (list) => {
-    const r = dropRulesOff(list, rulesOff)
+    const r = offStep(list)
     offDropped = r.dropped
     return r.kept
   })
-  verdictFindings = ruleStep(verdictFindings, (list) => dropRulesOff(list, rulesOff).kept)
+  verdictFindings = ruleStep(verdictFindings, (list) => offStep(list).kept)
   const verdictOf = (f: Finding) => ruleVerdicts.get(f.id) ?? ruleVerdicts.get(repeatGroupId(f))
   const refuted = (f: Finding) =>
     findingOrigin(f) !== "ai" && !inMixed(f) && f.severity !== "critical" && verdictOf(f) === "refuted"
-  const rulesRefuted = ruleVerifyAttempted ? findings.filter(refuted).length : undefined
-  if (ruleVerdicts.size) {
+  const rulesRefuted = aiLaneRan && ruleVerifyAttempted ? findings.filter(refuted).length : undefined
+  if (aiLaneRan && ruleVerdicts.size) {
     findings = findings.filter((f) => !refuted(f))
     verdictFindings = verdictFindings.filter((f) => !refuted(f))
   }
@@ -2911,9 +2918,8 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
         postedDropped = r.dropped
         return r.kept
       })
-      const posted = { dropped: postedDropped }
       verdictFindings = ruleStep(verdictFindings, (list) => dropByRulePolicy(list, byId(list), input.rulePolicy).kept)
-      rulePolicy = { applied: true, dropped: posted.dropped }
+      rulePolicy = { applied: true, dropped: postedDropped }
     } else rulePolicy = { applied: false, dropped: { unverifiable_high_sev: 0, noisy_type_not_confirmed: 0 } }
   }
 

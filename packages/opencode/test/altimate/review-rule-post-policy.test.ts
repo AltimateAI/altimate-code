@@ -87,14 +87,14 @@ describe("dropByRulePolicy", () => {
     expect(r.kept).toEqual([a, b])
   })
 
-  test("a finding with no verdict (null or absent) counts as unverifiable", () => {
+  test("a finding with no verdict (null or absent) was not judged: it is kept", () => {
     const nul = rule(1, "warning")
     const absent = rule(2, "warning")
     const noisySuggestion = rule(3, "suggestion", NOISY)
     const plainSuggestion = rule(4, "suggestion")
     const r = dropByRulePolicy([nul, absent, noisySuggestion, plainSuggestion], verdicts([[nul, null]]))
-    expect(r.kept).toEqual([plainSuggestion])
-    expect(r.dropped).toEqual({ unverifiable_high_sev: 2, noisy_type_not_confirmed: 1 })
+    expect(r.kept).toEqual([nul, absent, noisySuggestion, plainSuggestion])
+    expect(r.dropped).toEqual({ unverifiable_high_sev: 0, noisy_type_not_confirmed: 0 })
   })
 
   test("AI findings are never dropped, whatever their verdict, severity or rule id", () => {
@@ -211,6 +211,9 @@ interface RunOpts {
   rulesOff?: Set<string>
   ai?: boolean
   runner?: ReviewRunner
+  /** The finder lane's state (the rule verdicts are recorded whatever it is). */
+  finderState?: "ok" | "timeout" | "error"
+  mode?: "comment" | "gate"
 }
 
 function run(o: RunOpts = {}, seen: AiReviewInput[] = []) {
@@ -218,7 +221,7 @@ function run(o: RunOpts = {}, seen: AiReviewInput[] = []) {
     changedFiles: [{ path: "models/marts/m.sql", status: "modified", diff: `@@ -1 +1,4 @@\n-select 1\n+${SQL.split("\n").join("\n+")}\n` }],
     config: { ...DEFAULT_REVIEW_CONFIG },
     rubric: DEFAULT_RUBRIC,
-    mode: "comment",
+    mode: o.mode ?? "comment",
     runner: o.runner ?? runner,
     forceTier: "full",
     aiVerify: true,
@@ -254,9 +257,9 @@ function run(o: RunOpts = {}, seen: AiReviewInput[] = []) {
             const reviewed = records.filter((r) => !r.noVerdict).length
             const state = o.ruleState ?? "ok"
             return {
-              findings: [aiFinding],
+              findings: o.finderState && o.finderState !== "ok" ? [] : [aiFinding],
               status: {
-                state: "ok" as const,
+                state: o.finderState ?? ("ok" as const),
                 verifyRules: "drop_refuted" as const,
                 verifier: {
                   state: "skipped" as const,
@@ -306,15 +309,15 @@ describe("orchestrator: rule-post policy", () => {
     expect(env.rulesRefuted).toBe(0)
   })
 
-  test("a single rule finding with no verdict counts as unverifiable", async () => {
+  test("a single rule finding with no verdict is posted (the verifier never judged it)", async () => {
     const seen: AiReviewInput[] = []
     const all = await run({}, seen)
     const sent = seen[0].verifyRulesAfter!
     const idx = sent.findIndex((f) => f.severity !== "suggestion")
     expect(idx).toBeGreaterThanOrEqual(0)
     const env = await run({ verdictAt: (i) => (i === idx ? undefined : "confirmed") })
-    expect(env.findings).toEqual(all.findings.filter((f) => f.id !== sent[idx].id))
-    expect(env.rulePolicy).toEqual({ applied: true, dropped: { unverifiable_high_sev: 1, noisy_type_not_confirmed: 0 } })
+    expect(env.findings).toEqual(all.findings)
+    expect(env.rulePolicy).toEqual({ applied: true, dropped: { unverifiable_high_sev: 0, noisy_type_not_confirmed: 0 } })
   })
 
   test("all confirmed: nothing dropped, applied with zero counts", async () => {
@@ -333,13 +336,12 @@ describe("orchestrator: rule-post policy", () => {
     }
   })
 
-  test("budget with some findings reviewed: the policy applies, unreviewed findings count as unverifiable", async () => {
-    const seen: AiReviewInput[] = []
-    const env = await run({ verdictAt: (i) => (i === 0 ? "confirmed" : undefined), ruleState: "budget" }, seen)
+  test("budget with some findings reviewed: the policy applies, unreviewed findings are posted", async () => {
+    const base = await run({ switches: { verifyRules: false, rulePolicy: false }, policy: false })
+    const env = await run({ verdictAt: (i) => (i === 0 ? "confirmed" : undefined), ruleState: "budget" })
     expect(env.rulePolicy?.applied).toBe(true)
-    const sent = seen[0].verifyRulesAfter!
-    const expected = sent.slice(1).filter((f) => f.severity !== "suggestion").length
-    expect(env.rulePolicy?.dropped.unverifiable_high_sev).toBe(expected)
+    expect(env.rulePolicy?.dropped.unverifiable_high_sev).toBe(0)
+    expect(env.findings).toEqual(base.findings)
   })
 
   test("a critical rule finding the verifier could not check is posted; the warning one is not", async () => {
@@ -404,5 +406,39 @@ describe("flags off: unchanged behaviour", () => {
     expect(withAll).toEqual(plain)
     expect(withAll.rulesOff).toBeUndefined()
     expect(withAll.rulePolicy).toBeUndefined()
+  })
+})
+
+describe("round 2: rule noise fails open", () => {
+  test("finder timed out or failed: refuted rule findings are posted and not counted as refuted", async () => {
+    // The deterministic review alone: the rule findings a failed AI lane must leave untouched.
+    const off = await run({ ai: false })
+    for (const finderState of ["timeout", "error"] as const) {
+      const env = await run({ verdictAt: () => "refuted", finderState })
+      expect(env.findings).toEqual(off.findings)
+      expect(env.rulesRefuted).toBeUndefined()
+    }
+  })
+
+  test("a rule-verifier batch that errored while others answered: its warnings are posted", async () => {
+    const seen: AiReviewInput[] = []
+    const all = await run({ runner: critRunner }, seen)
+    const sent = seen[0].verifyRulesAfter!
+    // The critical finding's batch answered; the warning's batch failed (no verdict), run state ok.
+    const env = await run({ runner: critRunner, verdictAt: (i) => (sent[i].severity === "critical" ? "confirmed" : undefined) })
+    expect(sent.some((f) => f.severity === "warning")).toBe(true)
+    expect(env.rulePolicy?.applied).toBe(true)
+    expect(env.findings).toEqual(all.findings)
+    expect(env.rulePolicy?.dropped.unverifiable_high_sev).toBe(0)
+  })
+
+  test("verdict: refuted engine warnings no longer count toward the warning block; a critical one still blocks", async () => {
+    const gate = { mode: "gate" as const }
+    const confirmed = await run({ ...gate, runner: critRunner, verdictAt: () => "confirmed" })
+    expect(confirmed.verdict).toBe("REQUEST_CHANGES")
+    const refuted = await run({ ...gate, runner: critRunner, verdictAt: () => "refuted" })
+    // The critical contract finding is never dropped, so the PR still blocks.
+    expect(refuted.findings.some((f) => f.severity === "critical")).toBe(true)
+    expect(refuted.verdict).toBe("REQUEST_CHANGES")
   })
 })

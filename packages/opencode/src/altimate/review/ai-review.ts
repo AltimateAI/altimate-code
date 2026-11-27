@@ -1013,8 +1013,9 @@ export function planAiInput(input: AiReviewInput, env: Record<string, string | u
  */
 export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult> {
   const res = await runFinderLane(input)
-  if (!input.verifyRulesAfter) return res
-  // The rule verifier over the rule findings the review would post, after the finder and its verifier.
+  // The rule verifier over the rule findings the review would post, after the finder and its verifier;
+  // only when the finder answered, since the orchestrator applies rule noise only then (fail-open).
+  if (!input.verifyRulesAfter || res.status.state !== "ok") return res
   return withRuleVerdicts(res, await runRuleVerify(input, input.verifyRulesAfter))
 }
 
