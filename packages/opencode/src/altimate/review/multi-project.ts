@@ -151,11 +151,11 @@ export async function reviewAllProjects(opts: ReviewPullRequestOptions): Promise
   const prFiles = collected.map((f) => f.path)
   const prRenames = collected.flatMap((f) => (f.status === "renamed" && f.oldPath ? [[f.path, f.oldPath] as [string, string]] : []))
   const runs: ProjectRun[] = []
-  // Python files outside every project go to one project's AI lane only (`pythonFiles`): the
-  // first project whose lane runs and takes them. While a project's lane does not (off in its
-  // policy, a tier without the lane), they are offered to the next project.
-  const unassignedPaths = new Set(unassigned.map((f) => f.path))
-  let outsidePythonPending = true
+  // Python files outside every project go to one project's AI lane only (`pythonFiles`): each
+  // file is offered to project after project until a lane takes it (it is in the lane's input,
+  // or the lane reviewed it). A project that does not take it (lane off in its policy,
+  // `pythonFiles: false`, a tier without the lane, its quota) passes it on.
+  const pendingOutside = new Set(unassigned.map((f) => f.path))
   for (const root of touched) {
     const own = byProject.get(root)!
     process.stderr.write(`ℹ️  reviewing dbt project ${root || "."} (${own.length} changed file(s))\n`)
@@ -164,9 +164,9 @@ export async function reviewAllProjects(opts: ReviewPullRequestOptions): Promise
       changedFiles: [...own, ...unassigned],
       prFiles,
       prRenames,
-      aiOutsidePython: outsidePythonPending,
+      aiOutsidePaths: [...pendingOutside],
     })
-    if (env.ai?.state === "ok" || (env.ai?.input ?? []).some((r) => unassignedPaths.has(r.path))) outsidePythonPending = false
+    for (const p of [...(env.ai?.input ?? []).map((r) => r.path), ...(env.scope?.aiReviewedOutside ?? [])]) pendingOutside.delete(p)
     runs.push({ root, paths: own.map((f) => f.path), env })
   }
   return mergeProjectEnvelopes(runs, roots)

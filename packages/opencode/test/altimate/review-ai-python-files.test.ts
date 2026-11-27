@@ -10,6 +10,7 @@ import { DEFAULT_DBT_DIRS, type ChangedFile } from "../../src/altimate/review/di
 import { aiInputBudget, planAiInput, selectAiFilesByQuota, type AiReviewFile, type AiReviewInput } from "../../src/altimate/review/ai-review"
 import { AI_PYTHON_KIND, isAiPythonFile } from "../../src/altimate/review/ai-python-files"
 import { mergeProjectEnvelopes, reviewAllProjects } from "../../src/altimate/review/multi-project"
+import { makeFinding, ruleId } from "../../src/altimate/review/finding"
 
 // The `pythonFiles` switch (ALTIMATE_REVIEW_AI_PYTHON_FILES) sends changed .py files, inside or outside the dbt project, to the AI lane.
 
@@ -434,5 +435,103 @@ describe("ai.unsent lists only files the deterministic lanes checked", () => {
     const res = await runAiReview({ grounding: [], files: py, switches: { coverage: true, pythonFiles: true } })
     expect(res.status.input?.length).toBe(6)
     expect(res.status.unsent).toBeUndefined()
+  })
+})
+
+describe("--all-projects: the outside-project handoff follows what a project actually took", () => {
+  const git = (cwd: string, ...args: string[]) =>
+    execFileSync("git", ["-c", "commit.gpgsign=false", ...args], {
+      cwd,
+      env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" },
+    }).toString()
+  const write = async (root: string, rel: string, body: string) => {
+    await fs.mkdir(path.dirname(path.join(root, rel)), { recursive: true })
+    await fs.writeFile(path.join(root, rel), body)
+  }
+  const ENV = ["ALTIMATE_REVIEW_AI_REPLAY", "ALTIMATE_REVIEW_AI_VERIFY"]
+  const savedEnv = Object.fromEntries(ENV.map((k) => [k, process.env[k]]))
+  afterEach(() => {
+    for (const k of ENV) {
+      if (savedEnv[k] === undefined) delete process.env[k]
+      else process.env[k] = savedEnv[k]
+    }
+  })
+
+  test("the first project's lane answers with `pythonFiles: false`: the next project's lane reviews the file", async () => {
+    const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "review-py-mp-took-")))
+    try {
+      await write(root, "a/dbt_project.yml", "name: a\n")
+      await write(root, "a/.altimate/review.yml", "ai:\n  pythonFiles: false\n")
+      await write(root, "a/models/m.sql", "select 1 as id\n")
+      await write(root, "b/dbt_project.yml", "name: b\n")
+      await write(root, "b/models/n.sql", "select 1 as id\n")
+      await write(root, "airflow/load.py", "print(1)\n")
+      git(root, "init", "-q", "-b", "main")
+      git(root, "add", "-A")
+      git(root, "commit", "-q", "-m", "base")
+      git(root, "checkout", "-q", "-b", "pr")
+      await write(root, "a/models/m.sql", "select 1 as id, 2 as x\n")
+      await write(root, "b/models/n.sql", "select 1 as id, 3 as y\n")
+      await write(root, "airflow/load.py", "print(2)\n")
+      git(root, "add", "-A")
+      git(root, "commit", "-q", "-m", "pr")
+      for (const k of ["GITHUB_EVENT_PATH", "GITHUB_BASE_REF", "CI_MERGE_REQUEST_TARGET_BRANCH_NAME", "ALTIMATE_REVIEW_AI_PYTHON_FILES"])
+        delete process.env[k]
+      // A replayed lane answers (`state: ok`) without a model call; the verifier is off.
+      const replay = path.join(root, "..", path.basename(root) + "-replay.json")
+      await fs.writeFile(replay, JSON.stringify({ findings: [], ai: { state: "ok", calls: 1 } }))
+      process.env.ALTIMATE_REVIEW_AI_REPLAY = replay
+      process.env.ALTIMATE_REVIEW_AI_VERIFY = "0"
+      try {
+        const env = await reviewAllProjects({ cwd: root, base: "main", head: "HEAD" })
+        expect(env.scope?.aiReviewedOutside).toEqual(["airflow/load.py"])
+        expect((env.scope?.notReviewed ?? []).map((n) => n.path)).not.toContain("airflow/load.py")
+      } finally {
+        await fs.rm(replay, { force: true })
+      }
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  }, 60_000)
+})
+
+describe("outside-project Python findings are classified pre-existing like in-project ones", () => {
+  test("a finding on a context line of an outside .py file is marked pre-existing", async () => {
+    process.env.ALTIMATE_REVIEW_AI_PYTHON_FILES = "1"
+    const outside: ChangedFile = { path: "airflow/load.py", status: "modified", diff: "@@ -1,2 +1,3 @@\n a = 1\n b = 2\n+c = 3\n" }
+    const env = await runReview({
+      changedFiles: [mod("dbt/models/m.sql")],
+      config: { ...DEFAULT_REVIEW_CONFIG },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner,
+      forceTier: "full",
+      layout: { root: "dbt", dirs: DEFAULT_DBT_DIRS },
+      aiOutsideFiles: [outside],
+      getContent: async (f, side) => (side === "old" ? undefined : "a = 1\nb = 2\nc = 3\n"),
+      generatedAt: "2026-11-27T00:00:00Z",
+      aiReview: async () => ({
+        findings: [
+          makeFinding({
+            severity: "warning",
+            category: "sql_correctness",
+            title: "load: unused name",
+            body: "b is never read.",
+            file: "airflow/load.py",
+            model: "load",
+            startLine: 2,
+            endLine: 2,
+            confidence: "high",
+            evidence: { tool: "ai-review", result: {} },
+            ruleKey: "ai:sql_correctness:unused name",
+            rule: ruleId("ai-review", "sql_correctness"),
+          }),
+        ],
+        status: { state: "ok" },
+      }),
+    })
+    const f = env.findings.find((x) => x.file === "airflow/load.py")
+    expect(f).toBeDefined()
+    expect(f!.preExisting).toBe(true)
   })
 })

@@ -2606,6 +2606,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // exclusions and off-engine portability advice dropped, repeats merged, most
   // severe first. The AI lane is grounded in this list (its prompt keeps the
   // top 40), so dropped or repeated findings don't crowd out real ones.
+  const scopedFiles = [...input.changedFiles, ...(input.aiOutsideFiles ?? [])]
   const cleanFindings = (list: Finding[], merge = true): Finding[] => {
     let out = dedupe(list)
       .filter((f) => !exclusionReason(f, input.rubric))
@@ -2626,7 +2627,8 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     // project that runs on one known engine. Core's dialect-aware check (a
     // function missing on THIS engine) is a real error and is kept.
     if (input.suppressPortability) out = out.filter((f) => !isSuppressiblePortability(f, dialect, input.portabilityTargets))
-    out = markPreExisting(anchorByEvidence(out, input.changedFiles), input.changedFiles)
+    // Outside-project files the AI lane reads are classified like in-project ones.
+    out = markPreExisting(anchorByEvidence(out, scopedFiles), scopedFiles)
     if (merge) out = mergeRepeats(out)
     return out.sort((a, b) => SEVERITY_ORDER[b.severity] - SEVERITY_ORDER[a.severity] || a.file.localeCompare(b.file))
   }

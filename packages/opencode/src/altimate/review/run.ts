@@ -80,9 +80,10 @@ export interface ReviewPullRequestOptions {
   prFiles?: string[]
   /** Every rename the PR makes (new → old path), when `changedFiles` is a subset of it. */
   prRenames?: Array<[string, string]>
-  /** Send changed Python files outside the dbt project to this review's AI lane (`pythonFiles`
-   *  switch). Default true; `--all-projects` sets it until one project's AI lane runs. */
-  aiOutsidePython?: boolean
+  /** The changed Python files outside the dbt project this review's AI lane may take
+   *  (`pythonFiles` switch). Default all of them; `--all-projects` passes those no earlier
+   *  project's lane took. */
+  aiOutsidePaths?: string[]
 }
 
 /** dbt adapter_type → core SQL dialect. Mostly identity; a few aliases. */
@@ -375,9 +376,10 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
   const aiSwitches = resolveAiSwitches(config)
   // `pythonFiles`: .py files outside the dbt project skip every lane but the AI lane.
   const outside = new Set(scoped.outOfScopePaths)
+  const offered = opts.aiOutsidePaths && new Set(opts.aiOutsidePaths)
   const aiOutsideFiles =
-    aiOn && aiSwitches.pythonFiles && opts.aiOutsidePython !== false
-      ? collected.filter((f) => outside.has(f.path) && isAiPythonFile(f))
+    aiOn && aiSwitches.pythonFiles
+      ? collected.filter((f) => outside.has(f.path) && isAiPythonFile(f) && (!offered || offered.has(f.path)))
       : []
   const notReviewedOutside = scoped.outOfScope - aiOutsideFiles.length
   if (notReviewedOutside > 0) {
