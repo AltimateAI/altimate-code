@@ -1092,6 +1092,41 @@ describe("dbt_cost_estimate cost", () => {
       })
     })
 
+    // Rows where user a's 50 TiB merge starts `afterMs` after the cutoff; every other run is one TiB by its own user.
+    const rowsWithMerge = (afterMs: number) => {
+      const rows = fullRows()
+      rows[1] = row("am", T0 + afterMs, T0 + afterMs + 60_000, "MERGE", 50 * TIB, "DONE", "d")
+      for (let i = 2; i < rows.length; i++) {
+        rows[i][1] = `u${i}@x.com`
+        rows[i][7] = String(TIB)
+      }
+      rows[0][1] = "z@x.com"
+      return rows
+    }
+    const HOUR = 3_600_000
+
+    test("a full boundary read leaves out a run starting 25 hours after the cutoff: a job can be in flight for 42 hours", async () => {
+      await withNow(async () => {
+        useAdapter(calls, { ...answer(rowsWithMerge(25 * HOUR)), boundary: fullBoundaryWith([]) })
+        expect((await ask()).highest).toBeLessThanOrEqual(6.25 + 1e-9)
+      })
+    })
+
+    test("a full boundary read keeps the finished jobs it returned: a CTAS queued 23 hours and run for 2 chains into a merge past the 42 hours", async () => {
+      await withNow(async () => {
+        const merge = 42 * HOUR + 5 * 60_000
+        const ctas = ["t", "a@x.com", iso(T0 - 60_000), iso(T0 + 42 * HOUR + 3 * 60_000), "DONE", "CREATE_TABLE_AS_SELECT", "orders__dbt_tmp", "d"]
+        const boundary = async () =>
+          table(BOUNDARY_COLS, [ctas, ...Array.from({ length: 499 }, (_, i) => [`b${i}`, `x${i}@x.com`, iso(T0 - HOUR), iso(T0 - HOUR + 60_000), "DONE", "MERGE", null, null])])
+        useAdapter(calls, { ...answer(rowsWithMerge(merge)), boundary })
+        expect((await ask()).highest).toBeLessThanOrEqual(6.25 + 1e-9)
+        // Without that CTAS in the read, the merge is beyond the fallback and priced.
+        resetDbtAdapter()
+        useAdapter(calls, { ...answer(rowsWithMerge(merge)), boundary: fullBoundaryWith([]) })
+        expect((await ask()).highest).toBeCloseTo(50 * 6.25, 8)
+      })
+    })
+
     test("without a job still going the same build is priced", async () => {
       await withNow(async () => {
         useAdapter(calls, { ...answer(fullRows()), boundary: fullBoundaryWith([]) })

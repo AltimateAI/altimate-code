@@ -190,14 +190,16 @@ where creation_time > timestamp_millis(${windowStartMs(input.asOfMs, 7)}) and cr
 }
 
 /**
- * The matching statements that started before the period the history read covers (`cutoffMs`, or the start of the
- * window when the read did not hit its limit) and could join a run the history saw only the end of. The lookback bounds the scan
- * to the longest a job can plausibly be in flight: BigQuery times out a query that has not started after 6 hours (interactive)
- * or 24 hours (batch) in the queue, and lets one run up to 6 hours per attempt with up to three attempts (18 hours), so
- * 24 + 18 = 42 hours, inside two days. A job in flight longer than that (a queue timeout raised in the project's settings)
- * is not covered, unless it is still going: those are read from the start of the history window.
+ * The boundary reads the matching statements that started before the period the history read covers (`cutoffMs`, or the
+ * start of the window when the read did not hit its limit) and could join a run the history saw only the end of.
+ *
+ * The longest a job can plausibly be in flight: BigQuery times out a query that has not started after 6 hours
+ * (interactive) or 24 hours (batch) in the queue, and lets one run up to 6 hours per attempt with up to three attempts
+ * (18 hours), so 24 + 18 = 42 hours. It is the boundary's lookback for finished jobs, and the span after the cutoff in
+ * which a run is not trusted when the boundary read is full. A job in flight longer than that (a queue timeout raised
+ * in the project's settings) is not covered, unless it is still going: those are read from the start of the history window.
  */
-export const BOUNDARY_LOOKBACK_DAYS = 2
+export const MAX_JOB_SPAN_MS = 42 * 3_600_000
 
 /**
  * The instants a boundary query is written with, all derived from the cutoff itself. `startBeforeMs` is one
@@ -207,7 +209,7 @@ export const BOUNDARY_LOOKBACK_DAYS = 2
 export type BoundaryWindow = {
   /** Statements must start before this (the cutoff plus one millisecond). */
   startBeforeMs: number
-  /** ... and after this (the lookback), for a job that has finished. */
+  /** ... and after this (the longest a job can be in flight), for a job that has finished. */
   startAfterMs: number
   /** A job still going (not done, or with no end time yet) may have been created anywhere in the history window. */
   liveStartAfterMs: number
@@ -221,7 +223,7 @@ export function boundaryWindow(cutoffMs: number, windowStart = cutoffMs - HISTOR
   const cutoff = Math.trunc(cutoffMs)
   return {
     startBeforeMs: cutoff + 1,
-    startAfterMs: cutoff - BOUNDARY_LOOKBACK_DAYS * DAY_MS,
+    startAfterMs: cutoff - MAX_JOB_SPAN_MS,
     liveStartAfterMs: Math.trunc(windowStart),
     joinEndAtLeastMs: cutoff - BQ_CHAIN_MS,
     tmpEndAtLeastMs: cutoff - BQ_TMP_JOIN_MS,
@@ -325,12 +327,14 @@ export type Boundary = {
   stmts?: { user: string | null; start: number; end: number; tmp?: boolean; dataset?: string | null }[]
   /** Jobs still going (queued, running, or with no end time) in the window, each lasting to the instant read. They leave out any run they could chain into. */
   live?: { user: string | null; start: number }[]
+  /** The boundary read was full: it cannot say what it left out, so runs near the cutoff are not trusted besides. */
+  full?: boolean
   /** The boundary read was full: every run by these users, who have a job still going, is left out. */
   liveFullUsers?: string[]
 }
 
-/** When the boundary statements can't be read, runs starting this close to the cutoff are not trusted. */
-export const BOUNDARY_FALLBACK_MS = 24 * 3_600_000
+/** When the boundary read is full or its statements are unknown, runs starting this close to the cutoff are not trusted. */
+export const BOUNDARY_FALLBACK_MS = MAX_JOB_SPAN_MS
 
 export function median(values: number[]): number {
   const s = [...values].sort((a, b) => a - b)
@@ -555,7 +559,9 @@ export function bigqueryRuns(
   // into the dataset of a final build (or any, when that build names none), that ended at or before the build's start
   // and within ten minutes of it (an unread CTAS could have been the one that build took). Such a run is not trusted.
   const unsure = (r: BqUnit) =>
-    boundary ? (boundary.stmts ? boundary.stmts.some((b) => joins(b, r)) : r.start <= boundary.cutoff + BOUNDARY_FALLBACK_MS) : false
+    boundary
+      ? !!boundary.stmts?.some((b) => joins(b, r)) || ((!boundary.stmts || boundary.full === true) && r.start <= boundary.cutoff + BOUNDARY_FALLBACK_MS)
+      : false
   const counted = live.filter((r) => !unsure(r))
   const runs = counted.filter((r) => r.known && Number.isFinite(r.start))
   const causes: Causes = {}
@@ -841,12 +847,13 @@ export async function loadHistory(input: {
       const readIds = new Set(read.map((r) => r.job_id))
       const unread = found.filter((r) => !readIds.has(r.job_id))
       const live = unread.filter(going).map((r) => ({ user: r.user_email ?? null, start: parseTime(r.creation_time) }))
-      // Full: the read cannot say what it left out, so the day's fallback applies besides, and every run by a user with a
-      // job still going is left out.
-      if (found.length >= HISTORY_LIMIT) return { cutoff, live, liveFullUsers: [...new Set(live.map((j) => j.user ?? ""))] }
+      // Full: the read cannot say what it left out, so the fallback applies besides all the evidence it did return, and
+      // every run by a user with a job still going is left out.
+      const full = found.length >= HISTORY_LIMIT
       return {
         cutoff,
         live,
+        ...(full && { full, liveFullUsers: [...new Set(live.map((j) => j.user ?? ""))] }),
         stmts: unread
           .filter((r) => !going(r))
           .map((r) => ({
