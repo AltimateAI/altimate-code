@@ -135,8 +135,9 @@ export function renderSummary(env: VerdictEnvelope, opts: RenderOptions = {}): s
   // diff carries the detail. Pre-existing findings sit in a collapsed list.
   const deferredIds = new Set(inlineComments(env, opts.alreadyPosted, opts.commentable).deferred.map((f) => f.id))
   const posting = postingPolicy(env)
-  // Findings shown through their lead's comment (`groupedInto`) get no line of their own.
-  const collapsed = collapsedFindings(env, opts.alreadyPosted, opts.commentable)
+  // Findings shown through their lead's inline comment (`groupedInto`) get no line of their own;
+  // without inline comments every finding is listed.
+  const collapsed = opts.inline === false ? new Set<string>() : collapsedFindings(env, opts.alreadyPosted, opts.commentable)
   const shown = env.findings.filter((f) => !collapsed.has(f.id))
   const inline =
     opts.inline === false
@@ -465,48 +466,37 @@ export function inlineEligible(f: Finding, posting: PostingPolicy, commentable?:
 }
 
 /**
- * Inline comments for this run: eligible findings not already on the PR, most
- * severe and most confident first, capped at the posting budget. Findings over
- * the budget are `deferred` and stay in the summary. A finding whose line is
- * outside the diff (see `commentable`) keeps its line in the envelope and is
- * listed in the summary instead.
- */
-/**
  * Findings folded into a lead comment (`groupedInto`, see `groupConventionFindings`) that this
- * run shows only through the lead: the lead is in the envelope, may be posted inline and is not
- * yet on the PR. Once the lead is on the PR it is not posted again, so a finding newly folded
- * into it is posted on its own; those the posted lead already listed carry its markers and
- * count as posted. When the lead cannot go inline, each folded finding stands on its own.
+ * run shows only through the lead: the lead is in the envelope, is posted inline by this run
+ * (eligible, not yet on the PR, within the inline budget). Once the lead is on the PR it is not
+ * posted again, so a finding newly folded into it is posted on its own; those the posted lead
+ * already listed carry its markers and count as posted. When the lead does not go inline this
+ * run (ineligible, or over the budget), each folded finding stands on its own.
  */
 export function collapsedFindings(
   env: Pick<VerdictEnvelope, "findings" | "policy">,
   alreadyPosted: Set<string> = new Set(),
   commentable?: Map<string, Set<number>>,
 ): Set<string> {
-  const posting = postingPolicy(env)
-  const leads = new Map(env.findings.map((f) => [f.id, f]))
-  return new Set(
-    env.findings
-      .filter((f) => {
-        const lead = f.groupedInto ? leads.get(f.groupedInto) : undefined
-        return !!lead && !alreadyPosted.has(lead.id) && inlineEligible(lead, posting, commentable)
-      })
-      .map((f) => f.id),
-  )
+  return inlinePlan(env, alreadyPosted, commentable).collapsed
 }
 
-export function inlineComments(
-  env: VerdictEnvelope,
-  alreadyPosted: Set<string> = new Set(),
+/** Which findings this run posts inline, which are deferred, and which are folded into a posted lead. */
+function inlinePlan(
+  env: Pick<VerdictEnvelope, "findings" | "policy">,
+  alreadyPosted: Set<string>,
   commentable?: Map<string, Set<number>>,
-): { comments: InlineComment[]; deferred: Finding[] } {
+): { posted: Finding[]; deferred: Finding[]; collapsed: Set<string> } {
   const posting = postingPolicy(env)
-  const collapsed = collapsedFindings(env, alreadyPosted, commentable)
-  const byId = new Map(env.findings.map((f) => [f.id, f]))
-  const foldedInto = new Map<string, string[]>()
-  for (const f of env.findings) if (collapsed.has(f.id)) foldedInto.set(f.groupedInto!, [...(foldedInto.get(f.groupedInto!) ?? []), f.id])
+  const leads = new Map(env.findings.map((f) => [f.id, f]))
+  // Folded into a lead that may go inline; settled below against the budget.
+  const foldable = env.findings.filter((f) => {
+    const lead = f.groupedInto ? leads.get(f.groupedInto) : undefined
+    return !!lead && !alreadyPosted.has(lead.id) && inlineEligible(lead, posting, commentable)
+  })
+  const foldableIds = new Set(foldable.map((f) => f.id))
   const fresh = env.findings
-    .filter((f) => !collapsed.has(f.id) && inlineEligible(f, posting, commentable) && !alreadyPosted.has(f.id))
+    .filter((f) => !foldableIds.has(f.id) && inlineEligible(f, posting, commentable) && !alreadyPosted.has(f.id))
     .sort(
       (a, b) =>
         SEVERITY_ORDER[b.severity] - SEVERITY_ORDER[a.severity] ||
@@ -514,7 +504,31 @@ export function inlineComments(
         a.file.localeCompare(b.file) ||
         a.startLine! - b.startLine!,
     )
-  const comments = fresh.slice(0, posting.inlineBudget).map((f): InlineComment => {
+  const posted = fresh.slice(0, posting.inlineBudget)
+  const postedIds = new Set(posted.map((f) => f.id))
+  const collapsed = new Set(foldable.filter((f) => postedIds.has(f.groupedInto!)).map((f) => f.id))
+  // A finding whose lead is over the budget stands on its own; the budget is spent, so it is deferred.
+  const released = foldable.filter((f) => !collapsed.has(f.id) && inlineEligible(f, posting, commentable) && !alreadyPosted.has(f.id))
+  return { posted, deferred: [...fresh.slice(posting.inlineBudget), ...released], collapsed }
+}
+
+/**
+ * Inline comments for this run: eligible findings not already on the PR, most
+ * severe and most confident first, capped at the posting budget. Findings over
+ * the budget are `deferred` and stay in the summary. A finding whose line is
+ * outside the diff (see `commentable`) keeps its line in the envelope and is
+ * listed in the summary instead.
+ */
+export function inlineComments(
+  env: VerdictEnvelope,
+  alreadyPosted: Set<string> = new Set(),
+  commentable?: Map<string, Set<number>>,
+): { comments: InlineComment[]; deferred: Finding[] } {
+  const { posted, deferred, collapsed } = inlinePlan(env, alreadyPosted, commentable)
+  const byId = new Map(env.findings.map((f) => [f.id, f]))
+  const foldedInto = new Map<string, string[]>()
+  for (const f of env.findings) if (collapsed.has(f.id)) foldedInto.set(f.groupedInto!, [...(foldedInto.get(f.groupedInto!) ?? []), f.id])
+  const comments = posted.map((f): InlineComment => {
     const parts = [`${SEVERITY_EMOJI[f.severity]} **${f.title}**`]
     if (f.evidenceLine) parts.push(evidenceText(f))
     // A lead's list of folded files is its own part, after the clamp: a long body must not cut it
@@ -540,7 +554,7 @@ export function inlineComments(
       body,
     }
   })
-  return { comments, deferred: fresh.slice(posting.inlineBudget) }
+  return { comments, deferred }
 }
 
 function groupBySeverity(findings: Finding[]): Record<Severity, Finding[]> {

@@ -764,6 +764,30 @@ describe("folded findings in the PR comment", () => {
     expect(inlineComments(env, postedFindingIds([comments[0].body])).comments).toEqual([])
   })
 
+  test("a summary rendered without inline comments (CLI, agent tool, 422 fallback) lists every folded finding", async () => {
+    const { renderSummary } = await import("../../src/altimate/review/format")
+    const env = envelopeOf(groupConventionFindings([mk("models/a.sql", 1), mk("models/b.sql", 1)], conv))
+    const summary = renderSummary(env, { maxChars: Infinity, inline: false })
+    expect(summary).toContain("`models/a.sql:1`")
+    expect(summary).toContain("`models/b.sql:1`")
+  })
+
+  test("a lead over the inline budget: its folded findings are deferred to the summary, not hidden", async () => {
+    const { inlineComments, renderSummary, postedFindingIds } = await import("../../src/altimate/review/format")
+    const grouped = groupConventionFindings([mk("models/a.sql", 1), mk("models/b.sql", 1)], conv)
+    // A critical finding takes the only inline slot, so the lead is deferred.
+    const top = { ...mk("models/z.sql", 7), severity: "critical" as const, title: "Fan-out join", ruleKey: "ai:correctness:fan-out" }
+    const env = { ...envelopeOf([top, ...grouped]), policy: { source: "default" as const, hash: "h", posting: { inlineBudget: 1, inlineSeverityFloor: "warning" as const, silentWhenClean: true } } }
+    const folded = grouped.find((x) => x.groupedInto)!
+    const { comments, deferred } = inlineComments(env)
+    expect(comments.map((c) => c.path)).toEqual(["models/z.sql"])
+    expect(postedFindingIds(comments.map((c) => c.body)).has(folded.id)).toBe(false)
+    expect(deferred.map((f) => f.file).sort()).toEqual(["models/a.sql", "models/b.sql"])
+    const summary = renderSummary(env, { maxChars: Infinity })
+    expect(summary).toContain("`models/a.sql:1`")
+    expect(summary).toContain("`models/b.sql:1`")
+  })
+
   test("re-review: a file newly folded into an already-posted lead is posted on its own", async () => {
     const { inlineComments, postedFindingIds } = await import("../../src/altimate/review/format")
     const first = envelopeOf(groupConventionFindings([mk("models/a.sql", 1)], conv))
