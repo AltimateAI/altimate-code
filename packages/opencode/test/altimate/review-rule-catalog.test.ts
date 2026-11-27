@@ -304,6 +304,9 @@ describe("rawColumnExposures", () => {
       "select date '2024-01-01' as dob,",
       "  timestamp '2024-01-01 00:00:00' as signup_at,",
       "  interval '1 day' as gap,",
+      "  interval 1 day as gap_bq,",
+      "  interval '2' hour as gap_unit,",
+      "  c.signup_at + interval 3 day as later,",
       "  date_trunc('day', c.signup_date) as d,",
       "  concat(time, ' ', zone) as t",
       "from customers c",
@@ -312,9 +315,12 @@ describe("rawColumnExposures", () => {
     expect([...out.reads.get("dob")!]).toEqual([])
     expect([...out.reads.get("signup_at")!]).toEqual([])
     expect([...out.reads.get("gap")!]).toEqual([])
+    expect([...out.reads.get("gap_bq")!]).toEqual([])
+    expect([...out.reads.get("gap_unit")!]).toEqual([])
+    expect([...out.reads.get("later")!]).toEqual(["customers.signup_at"])
     expect([...out.reads.get("d")!]).toEqual(["customers.signup_date"])
     expect([...out.reads.get("t")!].sort()).toEqual(["customers.time", "customers.zone"])
-    expect(selectItems(sql).filter((i) => i.constant).map((i) => i.name)).toEqual(["dob", "signup_at", "gap"])
+    expect(selectItems(sql).filter((i) => i.constant).map((i) => i.name)).toEqual(["dob", "signup_at", "gap", "gap_bq", "gap_unit"])
   })
   test("ignores commas and keywords inside literals and comments", () => {
     const sql = "select ssn as a, -- , email as a\n  'x, from y' as b, email as c from t"

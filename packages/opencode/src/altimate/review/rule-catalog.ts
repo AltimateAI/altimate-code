@@ -309,10 +309,11 @@ const EXPR_KEYWORDS = new Set(
     " ",
   ),
 )
-// A typed literal (`date '2024-01-01'`, `timestamp '…'`, `interval '1 day'`): its
-// type word is part of the constant, not a column.
+// A typed literal (`date '2024-01-01'`, `timestamp '…'`, `interval '1 day'`,
+// BigQuery `interval 1 day`): its type and unit words are part of the constant,
+// not columns.
 const TYPED_LITERAL =
-  /(?<![\w$."`])(?:date|time|timestamp(?:_[nlt]tz|tz)?|datetime|interval)\s*'(?:[^']|'')*'/gi
+  /(?<![\w$."`])(?:(?:date|time|timestamp(?:_[nlt]tz|tz)?|datetime)\s*'(?:[^']|'')*'|interval\s*(?:'(?:[^']|'')*'|[+-]?\d+(?:\.\d+)?)(?:\s+(?:year|quarter|month|week|day|hour|minute|second|millisecond|microsecond)s?\b)?)/gi
 const COLUMN_TOKEN = new RegExp(String.raw`(?<![\w$."\x60])${COLUMN_REF}(?![\w$"\x60])(\s*\()?`, "gi")
 
 /** The column references an expression reads, from masked SQL: function names,
