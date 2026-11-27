@@ -277,6 +277,20 @@ describe("rawColumnExposures", () => {
       { column: "ssn", alias: "ssns", line: "listagg(ssn, ',') within group (order by id) as ssns" },
     ])
   })
+  test("`within group` split by a long comment or whitespace run does not end the select list", () => {
+    for (const gap of [" /* ordered-set aggregate, keep the order stable */ ", " ".repeat(30), "\n\n" + " ".repeat(24)]) {
+      for (const sql of [
+        `select listagg(c.ssn, ',') within${gap}group (order by c.id) as ssns, c.email from customers c`,
+        `select listagg(c.ssn, ',') within group${gap}(order by c.id) as ssns, c.email from customers c`,
+      ]) {
+        const out = finalOutputs(sql)
+        expect([...out.names].sort()).toEqual(["email", "ssns"])
+        expect(asObject(out.raw)).toEqual({ email: ["customers.email"] })
+      }
+    }
+    // `group by` is still a clause.
+    expect([...finalOutputs("select c.email from customers c group  by c.email").names]).toEqual(["email"])
+  })
   test("ignores commas and keywords inside literals and comments", () => {
     const sql = "select ssn as a, -- , email as a\n  'x, from y' as b, email as c from t"
     expect(asObject(rawColumnExposures(sql))).toEqual({ a: ["t.ssn"], c: ["t.email"] })

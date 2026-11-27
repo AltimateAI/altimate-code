@@ -204,9 +204,17 @@ const NOT_AN_ALIAS = new Set(
 const SELECT_LIST_END =
   /^(from|where|group|order|limit|qualify|having|union|intersect|except|minus|window|into|fetch|offset)\b/i
 
-/** The `group` at `at` is the `within group (…)` of an ordered-set aggregate. */
-const withinGroup = (sql: string, at: number) =>
-  /^group\s*\(/i.test(sql.slice(at, at + 20)) && /\bwithin\s+$/i.test(sql.slice(Math.max(0, at - 20), at))
+/** The `group` at `at` is the `within group (…)` of an ordered-set aggregate.
+ *  Any run of whitespace (a masked comment is one) may separate the words. */
+const withinGroup = (sql: string, at: number) => {
+  if (!/^group$/i.test(sql.slice(at, at + 5))) return false
+  let after = at + 5
+  while (/\s/.test(sql[after] ?? "")) after++
+  if (sql[after] !== "(") return false
+  let before = at
+  while (before > 0 && /\s/.test(sql[before - 1])) before--
+  return before < at && /(?:^|[^\w$."`])within$/i.test(sql.slice(Math.max(0, before - 7), before))
+}
 
 /** `line` with everything outside a select list blanked: from a clause keyword
  *  (`from`, `where`, …) at a query's own level up to the next `select`. A
