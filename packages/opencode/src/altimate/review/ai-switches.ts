@@ -66,8 +66,10 @@ export function resolveAiSwitches(cfg: Pick<ReviewConfig, "ai">, env: Env = proc
     const raw = env[AI_SWITCH_ENV[name]]
     // Once per value per process: `--all-projects` resolves the switches for every project.
     const warning = `${AI_SWITCH_ENV[name]}=${raw}`
-    if (fromEnv === undefined && raw?.trim() && !WARNED.has(warning) && !!WARNED.add(warning))
+    if (fromEnv === undefined && raw?.trim() && !WARNED.has(warning)) {
+      WARNED.add(warning)
       process.stderr.write(`⚠️  ignoring ${AI_SWITCH_ENV[name]}=${raw}: use 1/0 (or true/false, on/off, yes/no)\n`)
+    }
     out[name] = fromEnv ?? configured[name] ?? AI_SWITCH_DEFAULTS[name]
   }
   return out
