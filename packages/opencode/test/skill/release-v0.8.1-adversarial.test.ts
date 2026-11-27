@@ -76,6 +76,7 @@ describe("v0.8.1 — no formal GitHub APPROVE (review bot)", () => {
       title: "drops rows",
       body: "the refactor is not equivalent",
       file: "models/m.sql",
+      evidence: { tool: "altimate_core.equivalence" },
     })
     const env = buildEnvelope({ findings: [finding], tier: "full", mode: "comment" })
     expect(env.idealVerdict).toBe("REQUEST_CHANGES") // would have blocked
@@ -91,6 +92,7 @@ describe("v0.8.1 — no formal GitHub APPROVE (review bot)", () => {
       title: "new PII column",
       body: "exposes email",
       file: "models/users.sql",
+      evidence: { tool: "altimate_core.classify_pii" },
     })
     const env = buildEnvelope({ findings: [finding], tier: "full", mode: "gate" })
     expect(env.verdict).toBe("REQUEST_CHANGES")
