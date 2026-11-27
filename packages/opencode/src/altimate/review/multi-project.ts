@@ -303,7 +303,7 @@ export function mergeProjectEnvelopes(runs: ProjectRun[], coveredProjects?: stri
       })),
     },
     ai: mergeAi(runs),
-    ...mergeRuleNoise(envs, idealVerdict),
+    ...mergeRuleNoise(envs, verdict),
     generatedAt: first.generatedAt,
   }
   return signEnvelope(VerdictEnvelope.parse(merged))
@@ -325,13 +325,14 @@ function mergedSummary(findings: VerdictEnvelope["findings"], envs: VerdictEnvel
 }
 
 /** Rule-noise counts summed over the projects (each present only when some project has it), and
- *  the withheld findings that change the merged verdict (`idealVerdict`, the worst of the
- *  projects'). Each project lists its withheld findings only when they change its own verdict, so
- *  a project without a list at the merged verdict blocks (or comments) on its posted findings
- *  alone: then no list is kept. Otherwise only the lists of projects at the merged verdict are. */
+ *  the withheld findings behind the merged verdict (`verdict`, the applied one the comment shows).
+ *  When a project's posted findings alone reach that verdict, no list is kept. Otherwise the lists
+ *  of the projects at that verdict are: their withheld findings raised them to it. A project that
+ *  reaches it only because a check did not run (`reviewIncomplete`) does not drop them, so the
+ *  withheld findings the tally counts are listed whenever nothing is posted. */
 function mergeRuleNoise(
   envs: VerdictEnvelope[],
-  idealVerdict: Verdict,
+  verdict: Verdict,
 ): Pick<VerdictEnvelope, "rulesOff" | "rulesRefuted" | "rulePolicy" | "withheld"> {
   const out: Pick<VerdictEnvelope, "rulesOff" | "rulesRefuted" | "rulePolicy" | "withheld"> = {}
   if (envs.some((e) => e.rulesOff)) {
@@ -349,8 +350,11 @@ function mergeRuleNoise(
         noisy_type_not_confirmed: policies.reduce((n, p) => n + p.dropped.noisy_type_not_confirmed, 0),
       },
     }
-  const atMerged = envs.filter((e) => e.idealVerdict === idealVerdict)
-  const postedReach = atMerged.some((e) => !e.withheld?.length)
+  // A project's verdict on its posted findings alone: none give APPROVE; with a list (its withheld
+  // findings changed its verdict, so its posted ones stop below REQUEST_CHANGES) COMMENT; else its verdict.
+  const postedVerdict = (e: VerdictEnvelope): Verdict => (!e.findings.length ? "APPROVE" : e.withheld?.length ? "COMMENT" : e.verdict)
+  const atMerged = envs.filter((e) => e.verdict === verdict)
+  const postedReach = atMerged.some((e) => postedVerdict(e) === verdict)
   const seen = new Set<string>()
   const withheld = postedReach
     ? []
