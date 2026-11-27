@@ -2483,6 +2483,30 @@ describe("orchestrate", () => {
     }
   })
 
+  test("a computed head output under a name the base exposed raw is reported when it reads a new source", async () => {
+    // Base `email` raw → head `lower(ssn) as email`: the name was exposed, its source is new.
+    const base = "select customer_id,\n  email\nfrom customers"
+    const head = "select customer_id,\n  lower(ssn) as email\nfrom customers"
+    expectReportedPii(await piiRuns(head, base, "-  email\n+  lower(ssn) as email\n", ["email"]), ["email"], "none")
+    // Base `c.ssn` → head `lower(s.ssn) as ssn` from `spouses`.
+    const baseS = "select c.customer_id,\n  c.ssn\nfrom customers c\njoin spouses s on s.customer_id = c.customer_id"
+    const headS = baseS.replace("  c.ssn\n", "  lower(s.ssn) as ssn\n")
+    expectReportedPii(await piiRuns(headS, baseS, "-  c.ssn\n+  lower(s.ssn) as ssn\n", ["ssn"]), ["ssn"], "none")
+    // Control: a function over the same raw column is not new exposure.
+    const lowered = await piiRuns(base.replace("  email", "  lower(email) as email"), base, "-  email\n+  lower(email) as email\n", ["email"])
+    for (const { env } of lowered) expect(env.findings.filter((f) => f.category === "pii_exposure")).toEqual([])
+  })
+
+  test("a changed literal in a masking expression is a different computation", async () => {
+    const from = "regexp_replace(ssn, '\\d', '*') as ssn"
+    const to = "regexp_replace(ssn, '^$', '*') as ssn"
+    const sql = (item: string) => `select customer_id,\n  ${item}\nfrom customers`
+    expectReportedPii(await piiRuns(sql(to), sql(from), `-  ${from}\n+  ${to}\n`, ["ssn"]), ["ssn"], "none")
+    // Control: the same masking expression, unchanged, next to an unrelated edit.
+    const quiet = await piiRuns(sql(from).replace("customer_id,", "customer_id, region,"), sql(from), "-select customer_id,\n+select customer_id, region,\n", ["ssn"])
+    for (const { env } of quiet) expect(env.findings.filter((f) => f.category === "pii_exposure")).toEqual([])
+  })
+
   test("a qualified reference resolves through its own source, not any CTE with that column", async () => {
     // Base reads `home_address` masked from CTE `m`; head reads it raw from `customers c`.
     const base = [

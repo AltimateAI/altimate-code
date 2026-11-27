@@ -221,6 +221,12 @@ export interface SelectItem {
   rawQualifier?: string
   /** Whitespace-normalised item text, for comparing one item across base and head. */
   text: string
+  /** As `text`, with string-literal contents kept: `regexp_replace(ssn, '\\d', '*')`
+   *  and `regexp_replace(ssn, '^$', '*')` differ here. */
+  exact: string
+  /** For an item that is not a raw column, every column reference its expression
+   *  reads (outside `over (…)`, `filter (…)` and `within group (…)`). */
+  reads?: Array<{ qualifier?: string; column: string }>
   /** `ROOT_SCOPE` for the outermost query, the CTE name for a CTE body, `<parent>>sub<n>` for a nested query. */
   scope: string
   /** Which `UNION`/`INTERSECT`/`EXCEPT` branch of its scope (0 for the first select). */
@@ -238,23 +244,58 @@ export interface SelectItem {
  * still map to source lines. One left-to-right pass, so `--` inside a literal or
  * a quote inside a comment is not misread.
  */
-function maskSql(sql: string): string {
+function maskSql(sql: string, keepLiterals = false): string {
   return sql.replace(/\{#[\s\S]*?#\}|\{%[\s\S]*?%\}|\{\{[\s\S]*?\}\}|\/\*[\s\S]*?\*\/|--[^\n]*|'(?:[^']|'')*'/g, (m) => {
     if (m.startsWith("{{")) return m.replace(/[^\n]/g, "_")
-    if (m.startsWith("'")) return `'${m.slice(1, -1).replace(/[^\n]/g, " ")}'`
+    if (m.startsWith("'")) return keepLiterals ? m : `'${m.slice(1, -1).replace(/[^\n]/g, " ")}'`
     return m.replace(/[^\n]/g, " ")
   })
 }
 
 const isWordChar = (c: string | undefined) => !!c && /[\w$."`]/.test(c)
 
-function describeItem(raw: string): Pick<SelectItem, "name" | "rawColumn" | "rawQualifier" | "text"> {
-  const text = raw
+const normalizeItem = (raw: string) =>
+  raw
     .replace(/\s+/g, " ")
     .replace(/\(\s+/g, "(")
     .replace(/\s+([),])/g, "$1")
     .replace(/\s*\.\s*/g, ".")
     .trim()
+
+// Words in an expression that are syntax, never a column.
+const EXPR_KEYWORDS = new Set(
+  "and or not is null true false case when then else end as in like ilike rlike regexp similar escape between distinct all any some exists over partition by order asc desc nulls first last rows range groups unbounded preceding following current row filter within group interval from for at time zone collate both leading trailing using separator respect ignore cast try_cast".split(
+    " ",
+  ),
+)
+const COLUMN_TOKEN = new RegExp(String.raw`(?<![\w$."\x60])${COLUMN_REF}(?![\w$"\x60])(\s*\()?`, "gi")
+
+/** The column references an expression reads, from masked SQL: function names,
+ *  keywords, cast/`::` target types and the clauses that only partition, order
+ *  or filter rows (`over (…)`, `filter (…)`, `within group (…)`) are skipped. */
+function columnReads(expr: string): Array<{ qualifier?: string; column: string }> {
+  let e = expr.replace(/'(?:[^']|'')*'/g, " ")
+  // `over (…)` / `filter (…)` / `within group (…)`: cut each clause to its `)`.
+  for (let m = /\b(?:over|filter|within\s+group)\s*\(/i.exec(e); m; m = /\b(?:over|filter|within\s+group)\s*\(/i.exec(e)) {
+    const open = m.index + m[0].length - 1
+    e = e.slice(0, m.index) + " " + e.slice(closingParen(e, open) + 1)
+  }
+  e = e
+    .replace(/::\s*\w+(?:\s*\([\d\s,]*\))?/g, " ")
+    .replace(/\bas\s+\w+(?:\s+\w+)*?(?:\s*\([\d\s,]*\))?\s*(?=\))/gi, " ")
+  const out: Array<{ qualifier?: string; column: string }> = []
+  for (const m of e.matchAll(COLUMN_TOKEN)) {
+    if (m[3]) continue // a function call
+    const column = unquote(m[2])
+    // A bare keyword is syntax; a quoted or qualified one is a column.
+    if (!m[1] && !/^["\x60]/.test(m[2]) && EXPR_KEYWORDS.has(column)) continue
+    out.push(m[1] ? { qualifier: unquote(m[1]), column } : { column })
+  }
+  return out
+}
+
+function describeItem(raw: string): Pick<SelectItem, "name" | "rawColumn" | "rawQualifier" | "text" | "reads"> {
+  const text = normalizeItem(raw)
   let expr = text
   let alias: string | undefined
   const explicit = EXPLICIT_ALIAS.exec(text)
@@ -264,7 +305,8 @@ function describeItem(raw: string): Pick<SelectItem, "name" | "rawColumn" | "raw
   const ref = RAW_COLUMN_EXPRS.map((re) => re.exec(expr)).find(Boolean)
   const rawColumn = ref ? unquote(ref[2]) : undefined
   const rawQualifier = ref?.[1] ? unquote(ref[1]) : undefined
-  return { name: alias ? unquote(alias) : rawColumn, rawColumn, rawQualifier, text }
+  const name = alias ? unquote(alias) : rawColumn
+  return ref ? { name, rawColumn, rawQualifier, text } : { name, text, reads: columnReads(expr) }
 }
 
 // Words that end a FROM clause's table list at its own nesting level.
@@ -302,6 +344,7 @@ function closingParen(s: string, open: number): number {
 
 function parseSelects(sql: string): ParsedSelects {
   const s = maskSql(sql)
+  const withLiterals = maskSql(sql, true)
   const lineStarts = [0]
   for (let i = 0; i < s.length; i++) if (s[i] === "\n") lineStarts.push(i + 1)
   const lineOf = (offset: number) => {
@@ -366,7 +409,15 @@ function parseSelects(sql: string): ParsedSelects {
       if (!raw.trim()) return
       const first = itemStart + (raw.length - raw.trimStart().length)
       const last = itemStart + raw.trimEnd().length - 1
-      items.push({ ...describeItem(raw), scope, branch, position: position++, startLine: lineOf(first), endLine: lineOf(last) })
+      items.push({
+        ...describeItem(raw),
+        exact: normalizeItem(withLiterals.slice(itemStart, stop)),
+        scope,
+        branch,
+        position: position++,
+        startLine: lineOf(first),
+        endLine: lineOf(last),
+      })
     }
     for (let j = start; j <= s.length; j++) {
       const d = s[j]
@@ -464,10 +515,14 @@ export interface FinalOutputs {
   names: Set<string>
   /** The final projection has a plain `*`, so it also passes through unnamed columns. */
   passthrough: boolean
-  /** Per output name, a signature of how it is computed: the item text plus the
-   *  full text of every CTE or subquery its select reads. Equal signatures on two
-   *  sides mean the name is computed the same way. */
+  /** Per output name, a signature of how it is computed: the item text (string
+   *  literals included) plus the full text of every CTE or subquery its select
+   *  reads. Equal signatures on two sides mean the name is computed the same way. */
   signatures: Map<string, Set<string>>
+  /** Per output name, every `source.column` ref its value is computed from, raw
+   *  or not, resolved like `raw` (`lower(s.ssn) as email` with `spouses s` →
+   *  `email: {spouses.ssn}`; through a CTE, what that CTE's column reads). */
+  reads: Map<string, Set<string>>
 }
 
 interface ScopeOutputs extends Omit<FinalOutputs, "passthrough"> {
@@ -520,15 +575,24 @@ export function finalOutputs(sql: string): FinalOutputs {
   const memo = new Map<string, ScopeOutputs>()
   const isDerived = (src: Source, scope: string, seen: Set<string>) =>
     src.name !== scope && byScope.has(src.name) && !seen.has(src.name)
-  // The `source.column` refs a column read in `scope#branch` resolves to.
-  const resolveRef = (scope: string, branch: number, qualifier: string | undefined, col: string, seen: Set<string>) => {
+  // The `source.column` refs a column read in `scope#branch` resolves to: those
+  // it exposes raw (`key: "raw"`; a column a CTE computes is none), or every one
+  // its value is computed from (`key: "reads"`).
+  const resolveRef = (
+    scope: string,
+    branch: number,
+    qualifier: string | undefined,
+    col: string,
+    seen: Set<string>,
+    key: "raw" | "reads" = "raw",
+  ): Set<string> => {
     const srcs = sources.get(`${scope}#${branch}`) ?? []
     const inner = new Set([...seen, scope])
     const fromSource = (src: Source): Set<string> => {
       if (!isDerived(src, scope, seen)) return byScope.has(src.name) ? unresolved(col) : new Set([`${src.name}.${col}`])
       const out = resolve(src.name, inner)
-      if (out.names.has(col)) return out.raw.get(col) ?? new Set()
-      if (out.stars.length) return union(out.stars.map((st) => resolveRef(src.name, st.branch, st.qualifier, col, inner)))
+      if (out.names.has(col)) return out[key].get(col) ?? new Set()
+      if (out.stars.length) return union(out.stars.map((st) => resolveRef(src.name, st.branch, st.qualifier, col, inner, key)))
       return unresolved(col)
     }
     if (qualifier) {
@@ -554,6 +618,7 @@ export function finalOutputs(sql: string): FinalOutputs {
     const raw = new Map<string, Set<string>>()
     const names = new Set<string>()
     const signatures = new Map<string, Set<string>>()
+    const reads = new Map<string, Set<string>>()
     const stars: ScopeOutputs["stars"] = []
     const addTo = (map: Map<string, Set<string>>, name: string, values: Iterable<string>) => {
       const set = map.get(name) ?? new Set<string>()
@@ -577,23 +642,30 @@ export function finalOutputs(sql: string): FinalOutputs {
           for (const n of out.names) names.add(n)
           for (const [n, cols] of out.raw) addTo(raw, n, cols)
           for (const [n, sigs] of out.signatures) addTo(signatures, n, [...sigs].map((sig) => `*${sig}`))
+          for (const [n, cols] of out.reads) addTo(reads, n, cols)
         }
         continue
       }
       const name = item.branch === 0 ? item.name : firstNames.get(item.position)
       if (!name) continue
       names.add(name)
-      addTo(signatures, name, [`${item.text.toLowerCase()}\u0001${bodies.join("\u0002")}`])
-      if (item.rawColumn) addTo(raw, name, resolveRef(scope, item.branch, item.rawQualifier, item.rawColumn, seen))
+      addTo(signatures, name, [`${item.exact.toLowerCase()}\u0001${bodies.join("\u0002")}`])
+      if (item.rawColumn) {
+        addTo(raw, name, resolveRef(scope, item.branch, item.rawQualifier, item.rawColumn, seen))
+        addTo(reads, name, resolveRef(scope, item.branch, item.rawQualifier, item.rawColumn, seen, "reads"))
+      } else {
+        reads.set(name, reads.get(name) ?? new Set())
+        for (const r of item.reads ?? []) addTo(reads, name, resolveRef(scope, item.branch, r.qualifier, r.column, seen, "reads"))
+      }
     }
     for (const [n, cols] of raw) if (!cols.size) raw.delete(n)
-    const body = [scopeItems.map((i) => i.text.toLowerCase()).join(","), ...[...readBodies].sort()].join("\u0003")
-    const result = { raw, names, signatures, stars, body }
+    const body = [scopeItems.map((i) => i.exact.toLowerCase()).join(","), ...[...readBodies].sort()].join("\u0003")
+    const result = { raw, names, signatures, reads, stars, body }
     memo.set(scope, result)
     return result
   }
-  const { raw, names, signatures, stars } = resolve(ROOT_SCOPE, new Set())
-  return { raw, names, signatures, passthrough: stars.length > 0 }
+  const { raw, names, signatures, reads, stars } = resolve(ROOT_SCOPE, new Set())
+  return { raw, names, signatures, reads, passthrough: stars.length > 0 }
 }
 
 /** A diff line with comments and whitespace normalised (and a leading/trailing

@@ -1263,9 +1263,11 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // A head PII output name the base already exposed. When the head selects a
   // column raw under it, the base must expose that same source column raw (base
   // `md5(home_address) as home_address` → head `home_address` is new). A head
-  // output that is not a raw column is base-exposed when the base exposed that
-  // name raw, or computes it the same way (same item text, same CTEs/subqueries
-  // read): `md5(x) as x` → `lower(x) as x` unmasks. A name the head's final select doesn't resolve
+  // output that is not a raw column is base-exposed when every source column its
+  // value is computed from is one a base PII output exposed raw, or when the base
+  // computes the name the same way (same item text with its literals, same
+  // CTEs/subqueries read): `md5(x) as x` → `lower(x) as x` unmasks, and base raw
+  // `email` → `lower(ssn) as email` reads `ssn`. A name the head's final select doesn't resolve
   // counts as base-exposed only when the head passes it through a plain `*` (from
   // a table) and the base exposed it raw, or passed it through a `*` as well.
   const isBaseExposedOutput = (file: string, name: string, basePii: Set<string>) => {
@@ -1278,7 +1280,9 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     if (!basePii.has(name)) return false
     const base = outputs(file, "old")
     if (head.names.has(name)) {
-      if (base.raw.has(name)) return true
+      const exposed = baseRawPii(file)
+      const reads = head.reads.get(name)
+      if (reads && [...reads].every((ref) => exposed.has(ref))) return true
       const baseSigs = base.signatures.get(name)
       return !!baseSigs && [...(head.signatures.get(name) ?? [])].every((sig) => baseSigs.has(sig))
     }

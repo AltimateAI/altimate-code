@@ -136,6 +136,24 @@ describe("rawColumnExposures", () => {
     expect(asObject(rawColumnExposures(outer))).toEqual({ id: ["customers.id"] })
     expect([...finalOutputs(outer).names].sort()).toEqual(["email_hash", "id"])
   })
+  test("`reads` lists the source columns a computed output is built from", () => {
+    const sql = [
+      "with k as (select customer_id, sha2(ssn) as ssn from customers)",
+      "select lower(s.ssn) as a,",
+      "  case when c.active is not null then cast(c.email as varchar(20)) else 'n/a' end as b,",
+      "  first_value(c.phone) over (partition by c.customer_id order by c.updated_at) as d,",
+      "  upper(k.ssn) as e, 'x' as f",
+      "from customers c join spouses s on true join k on true",
+    ].join("\n")
+    const reads = Object.fromEntries([...finalOutputs(sql).reads].map(([k, v]) => [k, [...v].sort()]))
+    expect(reads).toEqual({
+      a: ["spouses.ssn"],
+      b: ["customers.active", "customers.email"],
+      d: ["customers.phone"],
+      e: ["customers.ssn"],
+      f: [],
+    })
+  })
   test("ignores commas and keywords inside literals and comments", () => {
     const sql = "select ssn as a, -- , email as a\n  'x, from y' as b, email as c from t"
     expect(asObject(rawColumnExposures(sql))).toEqual({ a: ["t.ssn"], c: ["t.email"] })
