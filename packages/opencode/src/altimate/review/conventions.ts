@@ -498,6 +498,13 @@ export interface ConventionRecord {
   chars: number
 }
 
+/** The loaded conventions' text by path (entries of one file, such as `.coderabbit.yaml`, joined). */
+export function conventionTexts(all: Convention[]): Map<string, string> {
+  const out = new Map<string, string>()
+  for (const c of all) out.set(c.path, out.has(c.path) ? `${out.get(c.path)}\n\n${c.text}` : c.text)
+  return out
+}
+
 export function conventionRecords(all: Convention[]): ConventionRecord[] {
   return all.map((c) => ({ path: c.path, source: c.source, scope: c.scope, ...(c.globs ? { globs: c.globs } : {}), chars: c.text.length }))
 }

@@ -68,7 +68,7 @@ import { ruleTier } from "./rule-tiers"
 import { type AiSwitches, switchOn } from "./ai-switches"
 import { isAiOtherFile } from "./ai-other-files"
 import { AI_PYTHON_KIND, isAiPythonFile } from "./ai-python-files"
-import type { Convention } from "./conventions"
+import { type Convention, conventionTexts } from "./conventions"
 import { type AiVerifyEvidence, numberedSlice } from "./ai-verify"
 import { holdsCredentials, isCredentialPath } from "./credentials"
 import type { ColumnReach } from "../native/dbt/column-reach"
@@ -2778,6 +2778,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
           prBody: input.prBody,
           grepProject,
           prFiles,
+          ...(input.conventions?.length ? { conventions: conventionTexts(input.conventions) } : {}),
           readFile: async (p, side, start, end) => {
             if (refused(p, side)) return REFUSED
             const text = await getContent?.(p, side)

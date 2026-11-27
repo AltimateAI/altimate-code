@@ -898,3 +898,37 @@ describe("loadConventions hardening (round 2)", () => {
   })
 })
 
+describe("convention evidence for the verifier and the multi-project merge", () => {
+  test("read_file serves a convention file's base text, even when the PR does not change it", async () => {
+    const { verifierTools } = await import("../../src/altimate/review/ai-verify")
+    const read: string[] = []
+    const defs = verifierTools({
+      dialect: "duckdb",
+      files: [],
+      runner: {} as ReviewRunner,
+      addedLines: new Map(),
+      prFiles: ["models/a.sql"],
+      conventions: new Map([["models/CLAUDE.md", "Base rule.\nSecond line."]]),
+      readFile: async (p: string) => (read.push(p), "head text"),
+      compiledSql: async () => undefined,
+    } as any)
+    const out = await defs.read_file.run({ path: "models/CLAUDE.md", side: "new" })
+    expect(out).toContain("Base rule.")
+    expect(out).not.toContain("head text")
+    expect(read).toEqual([])
+  })
+
+  test("mergeProjectEnvelopes unions ai.conventions across projects", async () => {
+    const { mergeProjectEnvelopes } = await import("../../src/altimate/review/multi-project")
+    const { buildEnvelope, signEnvelope } = await import("../../src/altimate/review/verdict")
+    const rec = (p: string, scope: string) => ({ path: p, source: "claude_md", scope, chars: 5 })
+    const env = (conventions?: ReturnType<typeof rec>[]) =>
+      signEnvelope(buildEnvelope({ findings: [], tier: "full", mode: "comment", ai: { state: "ok", calls: 1, ...(conventions ? { conventions } : {}) } as any }))
+    const merged = mergeProjectEnvelopes([
+      { root: "a", paths: [], env: env([rec("CLAUDE.md", ""), rec("a/CLAUDE.md", "a")]) },
+      { root: "b", paths: [], env: env([rec("CLAUDE.md", ""), rec("b/CLAUDE.md", "b")]) },
+      { root: "c", paths: [], env: env() },
+    ])
+    expect(merged.ai?.conventions?.map((c) => c.path)).toEqual(["CLAUDE.md", "a/CLAUDE.md", "b/CLAUDE.md"])
+  })
+})

@@ -51,6 +51,9 @@ export interface AiVerifyEvidence {
   addedLines: Map<string, Set<number>>
   /** Every file the PR changes, repo-relative, including tests and CI outside the dbt project. */
   prFiles?: string[]
+  /** The team conventions the finder was given, by path: their base-commit text. `read_file`
+   *  serves this text for a convention path, so a PR's edit cannot refute a base convention. */
+  conventions?: Map<string, string>
 }
 
 export type Decision = "keep" | "discard" | "summary"
@@ -824,6 +827,7 @@ export function verifierTools(
       ...graph.parents.map((p) => p.path),
       ...graph.downstream.map((d) => d.path),
       ...(ev.prFiles ?? []),
+      ...(ev.conventions?.keys() ?? []),
     ]),
   ].filter((p) => !isCredentialPath(p))
   /** A requested path inside the review scope, as the repo-relative path to read; a project-relative path resolves too. */
@@ -843,7 +847,7 @@ export function verifierTools(
 
   return {
     read_file: {
-      description: "Up to 200 numbered lines of any file the PR changes (tests and CI included), a dbt parent or direct child.",
+      description: "Up to 200 numbered lines of a changed file (tests, CI too), a dbt parent or child, or a team convention (base text).",
       input: z.object({
         path: z.string(),
         side,
@@ -853,6 +857,9 @@ export function verifierTools(
       async run({ path, side, start, end }) {
         const p = resolve(path)
         if (!p) return scope
+        const convention = ev.conventions?.get(p)
+        if (convention !== undefined)
+          return `(team convention, base-branch text)\n${numberedSlice(convention, start as number, end as number) ?? ""}`
         return (
           (await ev.readFile(p, (side as "old" | "new") ?? "new", start as number, end as number)) ??
           NA(`${p} does not exist on that side`)
