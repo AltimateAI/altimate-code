@@ -819,6 +819,43 @@ describe("folded findings in the PR comment", () => {
     expect(comments[0].body).not.toContain("The same applies to")
   })
 
+  test("a summary bullet does not repeat the lead's stored same-applies sentence", async () => {
+    const { renderSummary } = await import("../../src/altimate/review/format")
+    const grouped = groupConventionFindings([mk("models/a.sql", 1), mk("models/b.sql", 1)], conv)
+    expect(grouped.find((x) => !x.groupedInto)!.body).toContain("The same applies to")
+    // Without inline comments every finding has its own bullet; with the member dropped (severity
+    // threshold, dedupe) the lead's bullet must not name it either.
+    for (const findings of [grouped, grouped.filter((x) => !x.groupedInto)]) {
+      const summary = renderSummary(envelopeOf(findings), { maxChars: Infinity, inline: false })
+      expect(summary).not.toContain("The same applies to")
+      expect(summary).toContain("`models/a.sql:1`")
+    }
+  })
+
+  test("a folded finding the verifier demoted or that is pre-existing is not folded; it keeps its summary entry", async () => {
+    const { inlineComments, renderSummary, postedFindingIds } = await import("../../src/altimate/review/format")
+    const grouped = groupConventionFindings([mk("models/a.sql", 1), mk("models/b.sql", 1), mk("models/c.sql", 1)], conv)
+    const lead = grouped.find((x) => !x.groupedInto)!
+    const demoted = grouped.find((x) => x.file === "models/b.sql")!
+    const old = grouped.find((x) => x.file === "models/c.sql")!
+    const env = envelopeOf(grouped)
+    env.findings = env.findings.map((x) =>
+      x.id === demoted.id
+        ? { ...x, evidence: { tool: "ai-review", result: { verification: { decision: "summary" } } } }
+        : x.id === old.id
+          ? { ...x, preExisting: true }
+          : x,
+    )
+    const { comments } = inlineComments(env)
+    expect(comments.map((c) => c.path)).toEqual(["models/a.sql"])
+    expect(comments[0].body).not.toContain("models/b.sql")
+    expect(comments[0].body).not.toContain("models/c.sql")
+    expect(postedFindingIds([comments[0].body])).toEqual(new Set([lead.id]))
+    const summary = renderSummary(env, { maxChars: Infinity })
+    expect(summary).toContain("`models/b.sql:1`")
+    expect(summary).toContain("models/c.sql")
+  })
+
   test("summary without inline comments, lead body over the clamp: each folded finding is still listed", async () => {
     const { renderSummary, BODY_MAX_CHARS } = await import("../../src/altimate/review/format")
     const long = (file: string) => ({ ...mk(file, 1), body: "Per models/CLAUDE.md. " + "x".repeat(BODY_MAX_CHARS + 100) })

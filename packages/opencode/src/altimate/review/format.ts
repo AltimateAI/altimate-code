@@ -203,6 +203,10 @@ export function renderSummary(env: VerdictEnvelope, opts: RenderOptions = {}): s
   return [...lines, ...tail].join("\n")
 }
 
+/** A finding's body without the grouping's "same applies" sentence: a summary bullet lists each
+ *  finding it shows, and the sentence may name findings dropped later. */
+const shownBody = (f: Finding) => f.body.replace(SAME_APPLIES_RE, "")
+
 /** Render findings of one severity as bullets. With `group`, findings that say
  *  the same thing (same category, title and body once names are blanked) on
  *  GROUP_MIN_MODELS or more distinct models collapse into one bullet. */
@@ -226,7 +230,8 @@ function bulletsFor(items: Finding[], group: boolean): Array<{ text: string; cou
       const more = names.length > 8 ? ` (+${names.length - 8} more)` : ""
       // Show a body verbatim only when every member says exactly that;
       // otherwise its names belong to one model, so show the blanked form.
-      const body = oneLine(clampBody(g.every((f) => f.body === g[0].body) ? g[0].body : blankNames(g[0].body)))
+      const lead = shownBody(g[0])
+      const body = oneLine(clampBody(g.every((f) => f.body === g[0].body) ? lead : blankNames(lead)))
       const unverified = g.some((f) => f.degraded) ? " · _unverified_" : ""
       out.push({
         text:
@@ -242,7 +247,7 @@ function bulletsFor(items: Finding[], group: boolean): Array<{ text: string; cou
         text:
           `- **${f.title}**  \n` +
           (f.evidenceLine ? `  ${evidenceText(f)}  \n` : "") +
-          `  ${oneLine(clampBody(f.body))}  \n  <sub>\`${loc}\`${f.degraded ? " · _unverified_" : ""} · ${f.category}</sub>`,
+          `  ${oneLine(clampBody(shownBody(f)))}  \n  <sub>\`${loc}\`${f.degraded ? " · _unverified_" : ""} · ${f.category}</sub>`,
         count: 1,
       })
     }
@@ -492,9 +497,18 @@ function inlinePlan(
   // Folded into a lead that may go inline; settled below against the budget.
   // A finding already on the PR (listed by an earlier lead's comment) is not folded again, so a
   // lead picked anew on a later push neither re-lists it nor re-emits its marker.
+  // Grouping ignores the verifier's demotions and runs before findings are marked pre-existing,
+  // so a finding is folded only when it could go inline itself (tier, verifier, pre-existing,
+  // severity floor); otherwise it keeps its own summary entry.
   const foldable = env.findings.filter((f) => {
     const lead = f.groupedInto ? leads.get(f.groupedInto) : undefined
-    return !!lead && !alreadyPosted.has(f.id) && !alreadyPosted.has(lead.id) && inlineEligible(lead, posting, commentable)
+    return (
+      !!lead &&
+      !alreadyPosted.has(f.id) &&
+      !alreadyPosted.has(lead.id) &&
+      inlineEligible(lead, posting, commentable) &&
+      inlineEligible(f, posting)
+    )
   })
   const foldableIds = new Set(foldable.map((f) => f.id))
   const fresh = env.findings
