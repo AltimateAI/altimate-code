@@ -254,6 +254,13 @@ dropped on the next run. `--post` targets **GitHub** PRs (it reads `GITHUB_TOKEN
 run with `--json`/`--output` and post the verdict using that platform's own API —
 native GitLab posting is not yet built in.
 
+The summary comment is updated in place only if the token's own account posted it.
+For a personal access token, the account is the `/user` login. For Actions' own
+`GITHUB_TOKEN`, it is `github-actions[bot]`. A GitHub App installation token cannot
+read `/user`, so set `ALTIMATE_REVIEW_BOT_LOGIN` to the app's bot login (for example
+`my-app[bot]`). Without it, outside Actions, each run posts a new summary comment
+rather than risk editing another bot's comment.
+
 ## Configuration — `.altimate/review.yml`
 
 Per-repo configuration, the analogue of an `AGENTS.md`. Tune the rubric, choose

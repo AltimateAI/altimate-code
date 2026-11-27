@@ -671,6 +671,8 @@ describe("postGitHubReview", () => {
       self?: string
       /** Statuses `/user` fails with first, one per call, before answering as above. */
       selfErrors?: number[]
+      /** Comment ids `updateComment` refuses with 403; any other comment is edited. */
+      refuse?: number[]
       createReview?: (call: number) => unknown
     } = {},
   ) {
@@ -703,13 +705,14 @@ describe("postGitHubReview", () => {
             summaryCalls.push("create")
             return { data: { id: 1, user: { login: opts.self ?? BOT } } }
           },
-          // GitHub returns the comment's original author, not the token's account,
-          // and refuses (403) to edit a comment another account posted.
+          // Returns the comment's original author, not the token's account. A token
+          // with write access can edit another account's comment, so only the
+          // listed ids are refused.
           updateComment: async (p: { comment_id: number }) => {
             summaryCalls.push(`update ${p.comment_id}`)
-            const author = opts.issueComments?.find((c) => c.id === p.comment_id)?.user ?? { login: BOT }
-            if (author.login !== (opts.self ?? BOT))
+            if (opts.refuse?.includes(p.comment_id))
               throw Object.assign(new Error("Resource not accessible by integration"), { status: 403 })
+            const author = opts.issueComments?.find((c) => c.id === p.comment_id)?.user ?? { login: BOT }
             return { data: { id: p.comment_id, user: author } }
           },
         },
@@ -758,7 +761,7 @@ describe("postGitHubReview", () => {
         { filename: "models/late.sql", patch: PATCH },
       ],
     })
-    const r = await postGitHubReview(env, target, octo)
+    const r = await postGitHubReview(env, { ...target, actions: true }, octo)
     expect(summaryCalls).toEqual(["update 42"])
     expect(r.inlineSkippedAsPosted).toBe(1)
     expect(reviewCalls[0].comments.map((c: { path: string; line: number }) => `${c.path}:${c.line}`)).toEqual(["models/late.sql:5"])
@@ -927,22 +930,45 @@ describe("postGitHubReview", () => {
     expect(twice.reviewCalls).toEqual([])
   })
 
-  test("another Bot account's summary marker is not adopted by an app token", async () => {
+  test("another account's summary marker is never edited, even when the token could edit it", async () => {
     const env = buildEnvelope({ findings: [finding({ startLine: 3, title: "m: a" })], tier: "lite", mode: "comment" })
     const [first] = inlineComments(env, new Set(), undefined)
     const other = { id: 5, body: `${REVIEW_MARKER}\nother bot`, user: { login: "other-app[bot]", type: "Bot" } }
-    // Only the other bot's marker: its comment cannot be edited, so a new summary
-    // is created, and its finding markers do not suppress this bot's inline comment.
+    const mine = { id: 6, body: `${REVIEW_MARKER}\nmine`, user: { login: BOT, type: "Bot" } }
+    const actions = { ...target, actions: true }
+    // Actions token (`/user` 403s, so the account is `github-actions[bot]`): the
+    // other bot's marker is left alone, and its finding markers suppress nothing.
     const alone = fakeOcto({ issueComments: [other], reviewComments: [{ body: first.body, user: { login: "other-app[bot]" } }] })
-    const r = await postGitHubReview(env, target, alone.octo)
-    expect(alone.summaryCalls).toEqual(["update 5", "create"])
-    expect(r.summaryCommentId).toBe(1)
+    const r = await postGitHubReview(env, actions, alone.octo)
+    expect(alone.summaryCalls).toEqual(["create"])
     expect(r.inlineSkippedAsPosted).toBe(0)
     expect(alone.reviewCalls[0].comments.map((c: { line: number }) => c.line)).toEqual([3])
-    // The other bot's marker first, this bot's own after it: this bot's is updated.
-    const both = fakeOcto({ issueComments: [other, { id: 6, body: `${REVIEW_MARKER}\nmine`, user: { login: BOT, type: "Bot" } }] })
-    expect((await postGitHubReview(env, target, both.octo)).summaryCommentId).toBe(6)
-    expect(both.summaryCalls).toEqual(["update 5", "update 6"])
+    // The other bot's marker first, this bot's own after it: only this bot's is updated.
+    const both = fakeOcto({ issueComments: [other, mine] })
+    expect((await postGitHubReview(env, actions, both.octo)).summaryCommentId).toBe(6)
+    expect(both.summaryCalls).toEqual(["update 6"])
+    // An app token outside Actions without `ALTIMATE_REVIEW_BOT_LOGIN`: the account
+    // is unknown, so no marker is adopted and a new summary is created.
+    const unknown = fakeOcto({ issueComments: [other, mine] })
+    await postGitHubReview(env, target, unknown.octo)
+    expect(unknown.summaryCalls).toEqual(["create"])
+    // With the account set explicitly, its marker is updated and `/user` is not read.
+    const app = fakeOcto({ issueComments: [mine, { ...other, id: 7 }] })
+    await postGitHubReview(env, { ...target, botLogin: "other-app[bot]" }, app.octo)
+    expect(app.summaryCalls).toEqual(["update 7"])
+    expect(app.selfCalls.count).toBe(0)
+  })
+
+  test("a summary comment the token is refused to edit falls back to the next one, then a new summary", async () => {
+    const env = buildEnvelope({ findings: [finding({ startLine: 3, title: "m: a" })], tier: "lite", mode: "comment" })
+    const marker = (id: number) => ({ id, body: `${REVIEW_MARKER}\n${id}`, user: { login: BOT, type: "Bot" } })
+    const actions = { ...target, actions: true }
+    const next = fakeOcto({ issueComments: [marker(5), marker(6)], refuse: [5] })
+    expect((await postGitHubReview(env, actions, next.octo)).summaryCommentId).toBe(6)
+    expect(next.summaryCalls).toEqual(["update 5", "update 6"])
+    const none = fakeOcto({ issueComments: [marker(5)], refuse: [5] })
+    expect((await postGitHubReview(env, actions, none.octo)).summaryCommentId).toBe(1)
+    expect(none.summaryCalls).toEqual(["update 5", "create"])
   })
 
   test("without a summary marker on the PR, `/user` is not read and its failure cannot lose the review", async () => {

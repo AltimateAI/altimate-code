@@ -28,6 +28,11 @@ export interface GitHubTarget {
   owner: string
   repo: string
   prNumber: number
+  /** The account the token posts as, when set explicitly (`ALTIMATE_REVIEW_BOT_LOGIN`,
+   *  e.g. `my-app[bot]` for a GitHub App installation token). */
+  botLogin?: string
+  /** Running in GitHub Actions (`GITHUB_ACTIONS=true`). */
+  actions?: boolean
 }
 
 /** Resolve owner/repo/prNumber from the GitHub Actions environment. */
@@ -51,7 +56,8 @@ export async function resolveGitHubTarget(): Promise<GitHubTarget | undefined> {
   const fromEnv = process.env["ALTIMATE_PR_NUMBER"]
   if (!prNumber && fromEnv) prNumber = Number(fromEnv)
   if (!prNumber) return undefined
-  return { token, owner, repo, prNumber }
+  const botLogin = process.env["ALTIMATE_REVIEW_BOT_LOGIN"]?.trim() || undefined
+  return { token, owner, repo, prNumber, botLogin, actions: process.env["GITHUB_ACTIONS"] === "true" }
 }
 
 export interface PostResult {
@@ -94,6 +100,9 @@ const statusOf = (e: any): number | undefined => e?.status ?? e?.response?.statu
 /** Wait before retrying a transient `/user` failure, so a 429 or a brief 5xx can clear. */
 const SELF_RETRY_DELAY_MS = 1000
 
+/** The account Actions' own `GITHUB_TOKEN` posts as. */
+const ACTIONS_BOT_LOGIN = "github-actions[bot]"
+
 /** The token's own login, or `undefined` for a token that cannot read `/user`
  *  (an app or Actions token). A transient failure is retried once, then thrown. */
 async function authenticatedLogin(octo: Octokit): Promise<string | undefined> {
@@ -128,25 +137,28 @@ export async function postGitHubReview(
     per_page: 100,
   })
   // Only a summary this token's own account posted is ours to update: anyone
-  // with edit rights can post the marker, and `updateComment` returns the
-  // comment's original author. The account is the authenticated user (a PAT);
-  // an app/Actions token cannot read `/user` (401/403/404), and then only a Bot
-  // account's comment counts (a person's account is never type `Bot`). Any
-  // other `/user` failure is retried once, then fails the post: guessing would
-  // create a duplicate summary. With no marker comment at all there is nothing
-  // to decide, so `/user` is not read and a transient failure there cannot
-  // lose the review.
+  // can post the marker, and a token with write access may be able to edit a
+  // comment another account posted, so the account is decided before writing:
+  // `ALTIMATE_REVIEW_BOT_LOGIN` when set, else the `/user` login (a PAT), else
+  // `github-actions[bot]` for a token in Actions that cannot read `/user`. A
+  // transient `/user` failure is retried once, then fails the post. With no
+  // known account (an app token outside Actions without the override) no
+  // marker comment is adopted and a new summary is created each run: a
+  // duplicate summary is recoverable, overwriting another bot's comment and
+  // taking its finding markers as ours is not. With no marker comment at all
+  // there is nothing to decide, so `/user` is not read.
   const markers = existing.filter((c) => c.body?.includes(REVIEW_MARKER))
-  const selfLogin = markers.length ? await authenticatedLogin(octo) : undefined
-  const candidates = markers.filter((c) => (selfLogin ? c.user?.login === selfLogin : c.user?.type === "Bot"))
+  let selfLogin = target.botLogin
+  if (!selfLogin && markers.length) selfLogin = (await authenticatedLogin(octo)) ?? (target.actions ? ACTIONS_BOT_LOGIN : undefined)
+  const candidates = selfLogin ? markers.filter((c) => c.user?.login === selfLogin) : []
   let upserted: { data: { id: number; user?: { login?: string } | null } } | undefined
   for (const c of candidates) {
     try {
       upserted = await octo.rest.issues.updateComment({ owner, repo, comment_id: c.id, body: summary })
       break
     } catch (e: any) {
-      // Another Bot account's comment (403) or one deleted meanwhile (404) is
-      // not ours: try the next candidate, else create a new summary.
+      // A comment this token may not edit after all (403) or one deleted
+      // meanwhile (404): try the next candidate, else create a new summary.
       const status = statusOf(e)
       if (status !== 403 && status !== 404) throw e
     }
@@ -154,7 +166,7 @@ export async function postGitHubReview(
   upserted ??= await octo.rest.issues.createComment({ owner, repo, issue_number: prNumber, body: summary })
   result.summaryCommentId = upserted.data.id
   // The account this token posts as: the summary comment's author.
-  const botLogin = selfLogin ?? upserted.data.user?.login
+  const botLogin = upserted.data.user?.login ?? selfLogin
 
   // 2. Post a review. `env.verdict` arrives already mode-gated from
   //    buildEnvelope (comment mode softened REQUEST_CHANGES → COMMENT upstream);
