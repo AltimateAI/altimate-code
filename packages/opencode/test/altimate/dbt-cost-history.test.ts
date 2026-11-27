@@ -416,10 +416,10 @@ describe("run boundary", () => {
   const at = (min: number) => new Date(C + min * MIN).toISOString()
   const boundary = (...stmts: { user: string | null; start: number; end: number; tmp?: boolean }[]) => ({ cutoff: C, stmts })
 
-  test("a boundary that could not be read drops runs starting within the boundary span (72 h 10 min) of the cutoff and keeps later ones", () => {
+  test("a boundary that could not be read drops runs starting within the boundary span (96 h 10 min) of the cutoff and keeps later ones", () => {
     const rows = [
       { ...bq("near", 0, TIB), creation_time: at(60), end_time: at(61) },
-      { ...bq("far", 0, 2 * TIB), creation_time: at(4 * 24 * 60), end_time: at(4 * 24 * 60 + 1) },
+      { ...bq("far", 0, 2 * TIB), creation_time: at(5 * 24 * 60), end_time: at(5 * 24 * 60 + 1) },
     ]
     const { cost } = priceBigquery(rows, undefined, "model.s.m", {}, { cutoff: C })
     expect(cost.runs).toBe(1)
@@ -606,7 +606,7 @@ describe("boundary SQL", () => {
     expect(sql).toContain(`strpos(query, '"node_id": "model.shop.orders"') > 0`)
   })
 
-  test("one boundary read: finished jobs from the 72-hour-10-minute lookback, or jobs still going from no further back, going first", () => {
+  test("one boundary read: finished jobs from the 96-hour-10-minute lookback, or jobs still going from no further back, going first", () => {
     const sql = bigqueryBoundarySql({ project: "p", needle, window: boundaryWindow(CUT) })
     const going = "(upper(state) in ('PENDING','RUNNING') or end_time is null)"
     // A job still going cannot be older than the longest job span either, so it is not read from the window's start.
@@ -615,10 +615,10 @@ describe("boundary SQL", () => {
     expect(sql).toContain(`order by ${going} desc, creation_time desc limit 500`)
     expect(sql).toContain("end_time, state, statement_type")
     expect(sql).not.toContain("liveStart")
-    // 24 hours of batch queue plus the 48-hour CREATE MODEL timeout.
-    expect(MAX_JOB_SPAN_MS).toBe(72 * 3_600_000)
+    // The largest configurable queue timeout (48 hours) plus the 48-hour CREATE MODEL timeout.
+    expect(MAX_JOB_SPAN_MS).toBe(96 * 3_600_000)
     // The longest a job can be in flight plus the longest join gap (a temporary CTAS to its final build, ten minutes).
-    expect(BOUNDARY_SPAN_MS).toBe(72 * 3_600_000 + 10 * 60_000)
+    expect(BOUNDARY_SPAN_MS).toBe(96 * 3_600_000 + 10 * 60_000)
   })
 
   test("the boundary query reads the invocation label; the invocations' own jobs are a read of their own, back to the 180 days JOBS keeps", () => {
@@ -628,7 +628,7 @@ describe("boundary SQL", () => {
     const sql = bigqueryInvocationSql({ project: "p", location: "EU", needle: "n", view: "JOBS_BY_USER", window: boundaryWindow(CUT), invocations: ["i-1", "i'2", "i-1"] })
     expect(sql).toContain("select /* invocation jobs */ /* altimate_cost_read */ job_id")
     expect(sql).toContain("`p`.`region-eu`.INFORMATION_SCHEMA.JOBS_BY_USER")
-    // An invocation has no span limit: its jobs are read as far back as JOBS keeps them, not the 72-hour lookback.
+    // An invocation has no span limit: its jobs are read as far back as JOBS keeps them, not the 96-hour lookback.
     expect(sql).toContain(`creation_time < timestamp_millis(${CUT + 1}) and creation_time > timestamp_millis(${CUT - 180 * 86_400_000})`)
     expect(sql).toContain("(upper(state) = 'DONE' and error_result is null) or upper(state) in ('PENDING','RUNNING')")
     expect(sql).toContain("(select value from unnest(labels) where key = 'dbt_invocation_id') in ('i-1','i\\'2')")
@@ -911,25 +911,25 @@ describe("review follow-ups: read-only hooks, boundary identity and unfinished r
     const price = (rows: Row[], boundary: Parameters<typeof priceBigquery>[4]) => priceBigquery(rows, undefined, "model.s.m", {}, boundary).cost
     const live = (user = A, startMin = -1) => ({ user, start: C3 + startMin * MIN })
     // The boundary read was full (no statements), so only the fallback applies besides the live evidence: a pending job a
-    // minute before the cutoff and A's build 75 hours after it. The build is past the fallback's 72 hours 10 minutes, yet still left out.
-    const late = [job("m", 75 * 60, 1, TIB, "MERGE")]
+    // minute before the cutoff and A's build 100 hours after it. The build is past the fallback's 96 hours 10 minutes, yet still left out.
+    const late = [job("m", 100 * 60, 1, TIB, "MERGE")]
     const full = price(late, { cutoff: C3, live: [live()] })
     expect(full.basis).toBe("none")
     expect(full.notes).toContain("A run still in progress was left out.")
-    // The same build with no live job is kept (it is beyond the fallback's 72 hours 10 minutes).
+    // The same build with no live job is kept (it is beyond the fallback's 96 hours 10 minutes).
     expect(price(late, { cutoff: C3 }).runs).toBe(1)
     // Another user's live job leaves it alone; a run that ended long before the live job began is not chained to it.
     expect(price(late, { cutoff: C3, live: [live("b@x.com")] }).runs).toBe(1)
-    expect(price(late, { cutoff: C3, live: [live(A, 80 * 60)] }).runs).toBe(1)
+    expect(price(late, { cutoff: C3, live: [live(A, 105 * 60)] }).runs).toBe(1)
     // A run that ended within a minute before the live job began is chained to it.
-    expect(price(late, { cutoff: C3, live: [live(A, 75 * 60 + 1.5)] }).basis).toBe("none")
+    expect(price(late, { cutoff: C3, live: [live(A, 100 * 60 + 1.5)] }).basis).toBe("none")
     // A finished unread job only makes the run uncertain.
     expect(price([job("m", 5, 1, TIB, "MERGE")], { cutoff: C3, stmts: [{ user: A, start: C3 - 30 * MIN, end: C3 + 4.5 * MIN }] }).notes.join(" ")).toContain("may have started before")
   })
 
   test("when the boundary read is full, every run by the users with a job still going is left out", () => {
-    const rows = [job("a1", 75 * 60, 1, TIB, "MERGE"), job("b1", 75 * 60, 1, TIB, "MERGE", { user_email: "b@x.com" })]
-    const cost = priceBigquery(rows, undefined, "model.s.m", {}, { cutoff: C3, live: [{ user: "a@x.com", start: C3 + 5000 * MIN }], liveFullUsers: ["a@x.com"] }).cost
+    const rows = [job("a1", 100 * 60, 1, TIB, "MERGE"), job("b1", 100 * 60, 1, TIB, "MERGE", { user_email: "b@x.com" })]
+    const cost = priceBigquery(rows, undefined, "model.s.m", {}, { cutoff: C3, live: [{ user: "a@x.com", start: C3 + 7000 * MIN }], liveFullUsers: ["a@x.com"] }).cost
     // The live jobs began long after a1 ended, so only the full read's rule leaves it out; b's run stays.
     expect(cost.runs).toBe(1)
     expect(cost.lastRun).toBe(6.25)

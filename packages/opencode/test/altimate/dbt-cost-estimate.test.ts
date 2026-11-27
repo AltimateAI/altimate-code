@@ -1205,15 +1205,15 @@ describe("dbt_cost_estimate cost", () => {
     })
 
     // 500 statements are returned, so the cutoff is the oldest one's start, five days before the instant read; user a's
-    // later build starts 3.5 days after it, beyond the 72 hours 10 minutes the full boundary read falls back to.
+    // later build starts 4.1 days after it, beyond the 96 hours 10 minutes the full boundary read falls back to.
     const T0 = asOf - 5 * day
     const step = 864_000
     const fullRows = () => [
       row("old", T0, T0 + 60_000, "MERGE", TIB),
       ...Array.from({ length: 499 }, (_, i) => {
         const at = T0 + (i + 1) * step
-        const r = row(`f${i}`, at, at + 60_000, "MERGE", i === 349 ? 100 * TIB : TIB)
-        r[1] = i === 349 ? "a@x.com" : `u${i}@x.com`
+        const r = row(`f${i}`, at, at + 60_000, "MERGE", i === 410 ? 100 * TIB : TIB)
+        r[1] = i === 410 ? "a@x.com" : `u${i}@x.com`
         return r
       }),
     ]
@@ -1224,7 +1224,7 @@ describe("dbt_cost_estimate cost", () => {
     const goingRow = (end: string | null, state: string, created = T0 - 60_000, user = "a@x.com") => ["q", user, iso(created), end, state, "MERGE", null, null]
     const boundaryQueries = () => historyLog.filter((q) => q.includes("run boundary"))
 
-    test("a pending job a minute before the cutoff leaves out user a's build 3.5 days later, though the boundary read was full", async () => {
+    test("a pending job a minute before the cutoff leaves out user a's build 4.1 days later, though the boundary read was full", async () => {
       await withNow(async () => {
         useAdapter(calls, { ...answer(fullRows()), boundary: fullBoundaryWith([goingRow(null, "PENDING")]) })
         const cost = await ask()
@@ -1234,12 +1234,12 @@ describe("dbt_cost_estimate cost", () => {
         // One boundary read, and no other query for jobs still going.
         expect(boundaryQueries()).toHaveLength(1)
         // Jobs still going are read from no further back than the longest job span before the cutoff.
-        expect(boundaryQueries()[0]).toContain(`creation_time > timestamp_millis(${T0 - 72 * HOUR - 10 * 60_000}))`)
+        expect(boundaryQueries()[0]).toContain(`creation_time > timestamp_millis(${T0 - 96 * HOUR - 10 * 60_000}))`)
         expect(historyLog.some((q) => q.includes("end_time, state\n"))).toBe(false)
       })
     })
 
-    test("a DONE job with no end time before the cutoff is read as going and leaves out the same user's build 3.5 days later", async () => {
+    test("a DONE job with no end time before the cutoff is read as going and leaves out the same user's build 4.1 days later", async () => {
       await withNow(async () => {
         useAdapter(calls, {
           ...answer(fullRows()),
@@ -1273,25 +1273,25 @@ describe("dbt_cost_estimate cost", () => {
     }
     const HOUR = 3_600_000
 
-    test("a full boundary read leaves out a run starting 25 hours after the cutoff: a job can be in flight for 72 hours", async () => {
+    test("a full boundary read leaves out a run starting 25 hours after the cutoff: a job can be in flight for 96 hours", async () => {
       await withNow(async () => {
         useAdapter(calls, { ...answer(rowsWithMerge(25 * HOUR)), boundary: fullBoundaryWith([]) })
         expect((await ask()).highest).toBeLessThanOrEqual(6.25 + 1e-9)
       })
     })
 
-    test("a full boundary read leaves out a run 72 hours 1 minute after the cutoff, within the longest job span plus the join gap", async () => {
+    test("a full boundary read leaves out a run 96 hours 1 minute after the cutoff, within the longest job span plus the join gap", async () => {
       await withNow(async () => {
-        useAdapter(calls, { ...answer(rowsWithMerge(72 * HOUR + 60_000)), boundary: fullBoundaryWith([]) })
+        useAdapter(calls, { ...answer(rowsWithMerge(96 * HOUR + 60_000)), boundary: fullBoundaryWith([]) })
         expect((await ask()).highest).toBeLessThanOrEqual(6.25 + 1e-9)
       })
     })
 
-    test("a CTAS created 72 hours 5 minutes before the cutoff that finished 7 minutes before it joins a merge a minute after it: the run is left out", async () => {
+    test("a CTAS created 96 hours 5 minutes before the cutoff that finished 7 minutes before it joins a merge a minute after it: the run is left out", async () => {
       await withNow(async () => {
         const edge = asOf - 30 * day
         const lit = (jinja: string, pattern: RegExp) => Number(pattern.exec(jinja)![1])
-        const created = edge - 72 * HOUR - 5 * 60_000
+        const created = edge - 96 * HOUR - 5 * 60_000
         useAdapter(calls, {
           ...answer([row("m", edge + 60_000, edge + 120_000, "MERGE", TIB, "DONE", "d")]),
           // An adapter consistent with the SQL: the finished CTAS is returned iff it was created after the lookback's start.
@@ -1324,10 +1324,29 @@ describe("dbt_cost_estimate cost", () => {
       })
     })
 
-    test("a full boundary read keeps the finished jobs it returned: a CTAS that finished 72 hours 13 minutes after the cutoff chains into a merge past the boundary span", async () => {
+    test("a CREATE MODEL hook created 80 hours before the cutoff, queued 36 hours and finished 30 s before it, joins a merge 10 s after it: the run is left out", async () => {
       await withNow(async () => {
-        const merge = 72 * HOUR + 20 * 60_000
-        const ctas = ["t", "a@x.com", iso(T0 - 60_000), iso(T0 + 72 * HOUR + 13 * 60_000), "DONE", "CREATE_TABLE_AS_SELECT", "orders__dbt_tmp", "d"]
+        const edge = asOf - 30 * day
+        const lit = (jinja: string, pattern: RegExp) => Number(pattern.exec(jinja)![1])
+        const created = edge - 80 * HOUR
+        useAdapter(calls, {
+          ...answer([row("m", edge + 10_000, edge + 70_000, "MERGE", TIB, "DONE", "d")]),
+          // An adapter consistent with the SQL: the finished hook is returned iff it was created after the lookback's start.
+          boundary: async (jinja) => {
+            const after = lit(jinja, /creation_time > timestamp_millis\((\d+)\) and upper\(state\) = \\?'DONE/)
+            return table(BOUNDARY_COLS, created > after ? [["h", "a@x.com", iso(created), iso(edge - 30_000), "DONE", "CREATE_MODEL", null, null]] : [])
+          },
+        })
+        const cost = await ask()
+        expect(cost.runs).toBeUndefined()
+        expect(cost.notes.join(" ")).toContain("1 run that may have started before the period read was left out.")
+      })
+    })
+
+    test("a full boundary read keeps the finished jobs it returned: a CTAS that finished 96 hours 13 minutes after the cutoff chains into a merge past the boundary span", async () => {
+      await withNow(async () => {
+        const merge = 96 * HOUR + 20 * 60_000
+        const ctas = ["t", "a@x.com", iso(T0 - 60_000), iso(T0 + 96 * HOUR + 13 * 60_000), "DONE", "CREATE_TABLE_AS_SELECT", "orders__dbt_tmp", "d"]
         const boundary = async () =>
           table(BOUNDARY_COLS, [ctas, ...Array.from({ length: 499 }, (_, i) => [`b${i}`, `x${i}@x.com`, iso(T0 - 60_000), iso(T0 - 30_000), "DONE", "MERGE", null, null])])
         useAdapter(calls, { ...answer(rowsWithMerge(merge)), boundary })
@@ -1340,7 +1359,7 @@ describe("dbt_cost_estimate cost", () => {
     })
 
     test("jobs labelled with their dbt invocation id are grouped by it: two invocations within a minute are two runs", async () => {
-      // Inside the history window and past the first 72 hours of it, where a labelled run could have unread jobs before it.
+      // Inside the history window.
       const at = (offsetMs: number) => new Date(Date.now() - 10 * day + offsetMs).toISOString()
       const labelled = (id: string, invocation: string, start: string, end: string, tib: number) => [...job(id, start, end, tib * TIB), invocation]
       const columns = [...JOB_COLUMNS, "dbt_invocation_id"]
@@ -1416,7 +1435,7 @@ describe("dbt_cost_estimate cost", () => {
     test("a job still running that carries another invocation's id does not leave the run out", async () => {
       await withNow(async () => {
         const edge = asOf - 30 * day
-        // Past the first 72 hours of the window, where a labelled run could still have unread jobs before it.
+        // Well inside the window.
         const run = ["m", "a@x.com", iso(edge + 80 * 3_600_000), iso(edge + 80 * 3_600_000 + 60_000), "MERGE", null, null, String(TIB), "0", null, "False", "DONE", "i1"]
         const columns = [...JOB_COLUMNS, "state", "dbt_invocation_id"]
         const live = (id: string) => ["q", "a@x.com", iso(edge - 200_000), null, "RUNNING", "MERGE", null, null, id]

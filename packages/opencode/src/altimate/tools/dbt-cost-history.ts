@@ -218,14 +218,16 @@ where creation_time > timestamp_millis(${windowStartMs(input.asOfMs, 7)}) and cr
  * The boundary reads the matching statements that started before the period the history read covers (`cutoffMs`, or the
  * start of the window when the read did not hit its limit) and could join a run the history saw only the end of.
  *
- * The longest a job can plausibly be in flight, from BigQuery's documented limits (quotas page and query queues page): a
- * query that has not started times out in the queue after 6 hours (interactive) or 24 hours (batch); once running, a query
- * or script may run up to 6 hours per attempt with up to three attempts (18 hours), and a CREATE MODEL statement times out
- * at 24 hours by default, but at 48 hours for time series, AutoML and hyperparameter tuning models. The longest is the
- * batch queue plus the 48-hour CREATE MODEL: 24 + 48 = 72 hours. A job in flight longer than that (a queue timeout
- * raised in the project's settings) is not covered, and neither is a job still going that was created longer ago than that.
+ * The longest a job can plausibly be in flight, from BigQuery's documented limits: a query that has not started times out
+ * in the queue after 6 hours (interactive) or 24 hours (batch) by default (query queues page), and the queue timeout is
+ * configurable up to 48 hours (default configuration page: default_interactive_query_queue_timeout_ms and
+ * default_batch_query_queue_timeout_ms); once running (quotas page), a query or script may run up to 6 hours per attempt
+ * with up to three attempts (18 hours), and a CREATE MODEL statement times out at 24 hours by default, but at 48 hours for
+ * time series, AutoML and hyperparameter tuning models. The longest is the largest queue timeout plus the 48-hour CREATE
+ * MODEL: 48 + 48 = 96 hours. A job in flight longer than that is not covered, and neither is a job still going that was
+ * created longer ago than that.
  */
-const BQ_QUEUE_MAX_MS = 24 * 3_600_000
+const BQ_QUEUE_MAX_MS = 48 * 3_600_000
 const BQ_RUN_MAX_MS = 48 * 3_600_000
 export const MAX_JOB_SPAN_MS = BQ_QUEUE_MAX_MS + BQ_RUN_MAX_MS
 
