@@ -1,9 +1,20 @@
 import { describe, test, expect, spyOn, afterEach } from "bun:test"
 import path from "node:path"
-import { promises as fs } from "node:fs"
+import os from "node:os"
+import { promises as fs, existsSync, mkdtempSync, rmSync } from "node:fs"
 import { finderSystemPrompt } from "../../src/altimate/review/ai-review"
 import { Dispatcher } from "../../src/altimate/native"
 import { tmpdir } from "../fixture/fixture"
+
+// Whether the temp directory's file system ignores case: a probe directory is found under its upper-case name.
+const caseSensitiveTmp = (() => {
+  const probe = mkdtempSync(path.join(os.tmpdir(), "case-probe-"))
+  try {
+    return !existsSync(path.join(path.dirname(probe), path.basename(probe).toUpperCase()))
+  } finally {
+    rmSync(probe, { recursive: true, force: true })
+  }
+})()
 
 describe("ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE", () => {
   let spy: ReturnType<typeof spyOn> | undefined
@@ -114,13 +125,13 @@ describe("ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE", () => {
     expect(await finderSystemPrompt({ ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE: path.join(targetDir, "p.md") }, repo.path)).toBe("RUNNER FILE")
   })
 
-  test("a work tree spelled in another case (case-insensitive file systems) is still found", async () => {
+  // Only a case-insensitive file system (macOS, Windows) resolves the other spelling; elsewhere the test is skipped.
+  test.skipIf(caseSensitiveTmp)("a work tree spelled in another case (case-insensitive file systems) is still found", async () => {
     await using repo = await tmpdir({ git: true })
     await using outside = await tmpdir()
     const variant = path.join(path.dirname(repo.path), path.basename(repo.path).toUpperCase())
-    // Only a case-insensitive file system (macOS, Windows) resolves the other spelling.
-    const insensitive = variant !== repo.path && (await fs.stat(variant).then(() => true, () => false))
-    if (!insensitive) return
+    expect(variant).not.toBe(repo.path)
+    expect(await fs.stat(variant).then(() => true, () => false)).toBe(true)
     const targetDir = path.join(outside.path, "d2")
     await fs.mkdir(targetDir)
     await fs.writeFile(path.join(targetDir, "f"), "RUNNER FILE")
