@@ -246,6 +246,22 @@ describe("rawColumnExposures", () => {
     const scopes = selectItems(sql).filter((i) => i.scope !== ROOT_SCOPE).map((i) => i.scope)
     expect(new Set(scopes).size).toBe(scopes.length)
   })
+  test("`null` / `true` / `false` items are constants, not raw columns", () => {
+    const out = finalOutputs("select null as ssn, cast(null as varchar) as email, true as flag, c.id from customers c")
+    expect(Object.fromEntries([...out.raw].map(([k, v]) => [k, [...v]]))).toEqual({ id: ["customers.id"] })
+    expect([...out.reads.get("ssn")!]).toEqual([])
+    expect([...out.reads.get("email")!]).toEqual([])
+  })
+  test("`within group (…)` does not end the select list", () => {
+    const sql = "select listagg(c.ssn, ',') within group (order by c.id) as ssns, c.email from customers c"
+    const out = finalOutputs(sql)
+    expect([...out.names].sort()).toEqual(["email", "ssns"])
+    expect(asObject(out.raw)).toEqual({ email: ["customers.email"] })
+    expect([...out.reads.get("ssns")!]).toEqual(["customers.ssn"])
+    expect(selectItemColumns("listagg(ssn, ',') within group (order by id) as ssns", /\b(ssn)\b/i)).toEqual([
+      { column: "ssn", alias: "ssns", line: "listagg(ssn, ',') within group (order by id) as ssns" },
+    ])
+  })
   test("ignores commas and keywords inside literals and comments", () => {
     const sql = "select ssn as a, -- , email as a\n  'x, from y' as b, email as c from t"
     expect(asObject(rawColumnExposures(sql))).toEqual({ a: ["t.ssn"], c: ["t.email"] })

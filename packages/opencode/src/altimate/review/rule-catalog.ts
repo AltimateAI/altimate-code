@@ -204,6 +204,10 @@ const NOT_AN_ALIAS = new Set(
 const SELECT_LIST_END =
   /^(from|where|group|order|limit|qualify|having|union|intersect|except|minus|window|into|fetch|offset)\b/i
 
+/** The `group` at `at` is the `within group (…)` of an ordered-set aggregate. */
+const withinGroup = (sql: string, at: number) =>
+  /^group\s*\(/i.test(sql.slice(at, at + 20)) && /\bwithin\s+$/i.test(sql.slice(Math.max(0, at - 20), at))
+
 /** `line` with everything outside a select list blanked: from a clause keyword
  *  (`from`, `where`, …) at a query's own level up to the next `select`. A
  *  keyword inside a call (`extract(day from d)`) does not count. */
@@ -224,7 +228,7 @@ function selectListText(line: string): string {
       if (outer) ({ query, listing } = outer)
     } else if (query && !isWordChar(line[i - 1])) {
       if (/^select\b/i.test(line.slice(i, i + 7))) listing = true
-      else if (SELECT_LIST_END.test(line.slice(i, i + 10))) listing = false
+      else if (SELECT_LIST_END.test(line.slice(i, i + 10)) && !withinGroup(line, i)) listing = false
     }
     out += listing || c === "(" || c === ")" ? c : c === "\n" ? c : " "
   }
@@ -358,7 +362,9 @@ function describeItem(
 ): Pick<SelectItem, "name" | "rawColumn" | "rawQualifier" | "text" | "reads" | "constant"> {
   const text = normalizeItem(raw)
   const { expr, alias } = splitAlias(text)
-  const ref = RAW_COLUMN_EXPRS.map((re) => re.exec(expr)).find(Boolean)
+  const matched = RAW_COLUMN_EXPRS.map((re) => re.exec(expr)).find(Boolean)
+  // A bare `null` / `true` / `false` (or a cast of one) is a constant, not a column.
+  const ref = matched && !matched[1] && /^(?:null|true|false)$/i.test(matched[2]) ? undefined : matched
   const rawColumn = ref ? unquote(ref[2]) : undefined
   const rawQualifier = ref?.[1] ? unquote(ref[1]) : undefined
   const name = alias ? unquote(alias) : rawColumn
@@ -522,6 +528,8 @@ function parseSelects(sql: string): ParsedSelects {
         depth === 0 &&
         !isWordChar(s[j - 1]) &&
         SELECT_LIST_END.test(s.slice(j, j + 10)) &&
+        // `listagg(x, ',') within group (order by y)` is part of the item.
+        !withinGroup(s, j) &&
         // `* except (…)` (BigQuery) is one item, not a set operation.
         !(/^except\b/i.test(s.slice(j, j + 7)) && /\*\s*$/.test(s.slice(itemStart, j)))
       ) {
