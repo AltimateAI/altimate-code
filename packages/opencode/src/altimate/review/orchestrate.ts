@@ -1231,11 +1231,12 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   const all: Finding[][] = []
   // Files where the diff-scoped PII classifier completed (looked at the change),
   // those where it actually emitted a finding, and — per file — the lowercased
-  // columns it classified. These drive column-aware dedup of the coarse regex
-  // PII twins in the merge step below.
+  // columns it classified and those it flagged. These drive column-aware dedup
+  // of the coarse regex PII twins in the merge step below.
   const diffScopedPiiCompletedFiles = new Set<string>()
   const diffScopedPiiFindingFiles = new Set<string>()
   const classifiedPiiColumnsByFile = new Map<string, Set<string>>()
+  const flaggedPiiColumnsByFile = new Map<string, Set<string>>()
   // Per file: PII columns the compiled base already exposed. Neither the broad
   // fallback nor the regex twins report these (this PR did not expose them).
   const basePiiColumnsByFile = new Map<string, Set<string>>()
@@ -1384,6 +1385,10 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
           classifiedPiiColumnsByFile.set(currentCtx.file.path, diffScopedPii.classifiedColumns)
         }
         if (diffScopedPii.findings.length) diffScopedPiiFindingFiles.add(currentCtx.file.path)
+        flaggedPiiColumnsByFile.set(
+          currentCtx.file.path,
+          new Set(diffScopedPii.findings.map((f) => String((f.evidence?.result as any)?.column ?? "").toLowerCase())),
+        )
         const findings = [...diffScopedPii.findings]
         let basePii = new Set<string>()
         if (hasOldSide(currentCtx.file) && currentCtx.engineOldSql) {
@@ -1568,6 +1573,17 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     const items = headItemsOnLine(file, line)
     return items.length > 0 && items.every((i) => r.base.has(itemKey(i)))
   }
+  // Without a compiled base every other PII lane is undecided (an unknown-
+  // confidence warning). A regex twin whose source columns the raw base cannot
+  // expose (`rawBaseLacks`) is proven new, so those undecided findings must not
+  // stand in for it: it survives their dedup and keeps its severity below.
+  const provenNewTwin = (f: Finding) => {
+    const ctx = ctxByPath.get(f.file)
+    if (!ctx || !hasOldSide(ctx.file) || ctx.engineOldSql) return false
+    const result = (f.evidence?.result ?? {}) as { column?: string; alias?: string; items?: SelectItemColumn[] }
+    const names = [result.column, result.alias, ...(result.items ?? []).flatMap((it) => [it.column, it.alias])]
+    return rawBaseLacks(ctx.oldSql, names.filter((n): n is string => !!n))
+  }
   const merged = flat.filter((f) => {
     const tool = f.evidence?.tool
     const fallbackRule = String((f.evidence?.result as any)?.rule ?? "").replace(/_/g, "-")
@@ -1581,8 +1597,9 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
       f.category === "pii_exposure" &&
       (fallbackRule === "pii-into-mart" || fallbackRule === "select-pii-columns")
     ) {
+      const proven = provenNewTwin(f)
       // The broad `schema.detect_pii` lane already flagged this file → redundant.
-      if (schemaPiiFiles.has(f.file)) return false
+      if (schemaPiiFiles.has(f.file) && !proven) return false
       const result = (f.evidence?.result ?? {}) as {
         line?: string
         column?: string
@@ -1596,8 +1613,12 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
         if (!result.column) return !diffScopedPiiCompletedFiles.has(f.file)
         // Suppress when core's classifier actually CONSIDERED that column (flagged
         // or deliberately muted). A column core never classified falls through.
+        // A proven-new twin is dropped only when core muted the column, not when
+        // core flagged it as an undecided warning.
         const classified = classifiedPiiColumnsByFile.get(f.file)
-        if (classified?.has(result.column) || (result.alias && classified?.has(result.alias))) return false
+        const flagged = flaggedPiiColumnsByFile.get(f.file)
+        const considered = (c?: string) => !!c && !!classified?.has(c) && !(proven && flagged?.has(c))
+        if (considered(result.column) || considered(result.alias)) return false
         // A column the base already exposed is not newly exposed by this PR.
         return !isBaseExposed(f.file, result.column, result.alias, result.line)
       }
@@ -1608,7 +1629,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
       // Otherwise suppress only when a precise detector actually EMITTED a PII
       // finding for the file (so the exposure is reported by the better source,
       // not silently dropped).
-      if (diffScopedPiiFindingFiles.has(f.file)) return false
+      if (diffScopedPiiFindingFiles.has(f.file) && !proven) return false
       return true
     }
     if (!coreRanFiles.has(f.file)) return true
@@ -1640,12 +1661,10 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // Unless the raw base proves the column new (`rawBaseLacks`): then the twin
   // keeps its severity.
   for (const [i, f] of merged.entries()) {
-    const result = (f.evidence?.result ?? {}) as { rule?: string; column?: string; alias?: string; items?: SelectItemColumn[] }
-    if (f.category !== "pii_exposure" || (result.rule !== "pii_into_mart" && result.rule !== "select-pii-columns")) continue
+    const rule = (f.evidence?.result as { rule?: string } | undefined)?.rule
+    if (f.category !== "pii_exposure" || (rule !== "pii_into_mart" && rule !== "select-pii-columns")) continue
     const ctx = ctxByPath.get(f.file)
-    if (!ctx || !hasOldSide(ctx.file) || ctx.engineOldSql) continue
-    const names = [result.column, result.alias, ...(result.items ?? []).flatMap((it) => [it.column, it.alias])]
-    if (rawBaseLacks(ctx.oldSql, names.filter((n): n is string => !!n))) continue
+    if (!ctx || !hasOldSide(ctx.file) || ctx.engineOldSql || provenNewTwin(f)) continue
     merged[i] = { ...f, severity: f.severity === "critical" ? "warning" : f.severity, confidence: "unknown" }
   }
 

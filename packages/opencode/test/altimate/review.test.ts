@@ -2167,8 +2167,10 @@ describe("orchestrate", () => {
   })
 
   test("PII warnings without a compiled base never add up to a block", async () => {
-    // Three head PII columns, base not compilable: each is a warning of undecided
-    // exposure and must not count toward the warning-pattern threshold.
+    // Three head PII columns, base not compilable and its raw `*` may already
+    // expose them: each is a warning of undecided exposure and must not count
+    // toward the warning-pattern threshold. (A raw base that cannot expose them
+    // proves them new: see "a proven-new `c.ssn` still blocks past the undecided PII lanes".)
     const files: ChangedFile[] = [
       { path: "models/marts/dim_customers.sql", status: "modified", diff: "+    email,\n+    ssn,\n+    phone_number\n" },
     ]
@@ -2195,7 +2197,7 @@ describe("orchestrate", () => {
       runner,
       getContent: content(
         "select customer_id, email, ssn, phone_number from customers",
-        "select customer_id from {{ ref('customers') }}",
+        "select * from {{ ref('customers') }}",
       ),
     })
     const pii = env.findings.filter((f) => f.category === "pii_exposure")
@@ -3198,6 +3200,47 @@ describe("orchestrate", () => {
       })
       expect({ reviewers, verdict: env.verdict }).toEqual({ reviewers, verdict: "REQUEST_CHANGES" })
     }
+  })
+
+  test("with a compiled head and no compiled base, a proven-new `c.ssn` still blocks past the undecided PII lanes", async () => {
+    // Only the head compiles, so the broad `schema.detect_pii` lane (and the
+    // classifier, when it flags the column) report an unknown-confidence warning.
+    // Those must not swallow the regex twin the raw base proves new.
+    const classifiers: ReviewRunner["classifyPii"][] = [
+      async () => [],
+      async (columns) => columns.filter((c) => c === "ssn").map((column) => ({ column, classification: "SSN", confidence: 0.95 })),
+    ]
+    for (const reviewers of [[], ["dbt_patterns"]]) {
+      for (const [k, classify] of classifiers.entries()) {
+        const env = await runReview({
+          changedFiles: MARTS.map((path) => ({ path, status: "modified" as const, diff: "-select c.customer_id\n+select c.customer_id,\n+  c.ssn\n" })),
+          config: { ...DEFAULT_REVIEW_CONFIG, reviewers },
+          rubric: DEFAULT_RUBRIC,
+          mode: "gate",
+          runner: piiRunner(["ssn"], classify),
+          getContent: content(
+            "select c.customer_id,\n  c.ssn\nfrom {{ ref('customers') }} c",
+            "select c.customer_id\nfrom {{ ref('customers') }} c",
+          ),
+          getCompiled: async (_f, side) =>
+            side === "new" ? "select c.customer_id,\n  c.ssn\nfrom analytics.customers c" : undefined,
+        })
+        const critical = env.findings.some((f) => f.category === "pii_exposure" && f.severity === "critical")
+        expect({ reviewers, k, critical, verdict: env.verdict }).toEqual({ reviewers, k, critical: true, verdict: "REQUEST_CHANGES" })
+      }
+    }
+    // A raw base that could expose the column stays undecided on the same path.
+    const env = await runReview({
+      changedFiles: MARTS.map((path) => ({ path, status: "modified" as const, diff: "+  c.ssn\n" })),
+      config: { ...DEFAULT_REVIEW_CONFIG },
+      rubric: DEFAULT_RUBRIC,
+      mode: "gate",
+      runner: piiRunner(["ssn"]),
+      getContent: content("select c.customer_id,\n  c.ssn\nfrom {{ ref('customers') }} c", "select *\nfrom {{ ref('customers') }} c"),
+      getCompiled: async (_f, side) => (side === "new" ? "select c.customer_id,\n  c.ssn\nfrom analytics.customers c" : undefined),
+    })
+    expect(env.findings.filter((f) => f.category === "pii_exposure").every((f) => f.severity !== "critical")).toBe(true)
+    expect(env.verdict).not.toBe("REQUEST_CHANGES")
   })
 
   test("the broad PII fallback without a compiled base is an unknown-confidence warning", async () => {
