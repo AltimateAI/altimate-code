@@ -1186,6 +1186,63 @@ describe("dbt_cost_estimate cost", () => {
       })
     })
 
+    test("jobs labelled with their dbt invocation id are grouped by it: two invocations within a minute are two runs", async () => {
+      const labelled = (id: string, invocation: string, start: string, end: string, tib: number) => [...job(id, start, end, tib * TIB), invocation]
+      const columns = [...JOB_COLUMNS, "dbt_invocation_id"]
+      const rows = [
+        labelled("a", "i1", "2026-05-02 10:00:00+00:00", "2026-05-02 10:01:00+00:00", 1),
+        labelled("b", "i2", "2026-05-02 10:00:30+00:00", "2026-05-02 10:01:30+00:00", 2),
+      ]
+      useAdapter(calls, { history: async (jinja) => (jinja.includes("countif(reservation_id") ? table(["jobs", "reserved"], [["10", "0"]]) : table(columns, rows)) })
+      const cost = await ask()
+      expect(cost.runs).toBe(2)
+      expect(cost.highest).toBeCloseTo(12.5, 10)
+      expect(historyLog.find((q) => q.includes("total_bytes_billed"))).toContain("dbt_invocation_id")
+    })
+
+    test("a job of a run's invocation that ended hours before the cutoff leaves the run out, and one of another invocation does not", async () => {
+      await withNow(async () => {
+        const edge = asOf - 30 * day
+        const invocation = (id: string) => ["m", "a@x.com", iso(edge + 300_000), iso(edge + 360_000), "MERGE", null, null, String(TIB), "0", null, "False", "DONE", id]
+        const columns = [...JOB_COLUMNS, "state", "dbt_invocation_id"]
+        const earlier = (id: string) => ["x", "a@x.com", iso(edge - 6 * HOUR), iso(edge - 5 * HOUR), "DONE", "MERGE", null, null, id]
+        const ask1 = async (runId: string, earlierId: string) => {
+          resetDbtAdapter()
+          useAdapter(calls, {
+            history: async (jinja) => (jinja.includes("countif(reservation_id") ? table(["jobs", "reserved"], [["10", "0"]]) : table(columns, [invocation(runId)])),
+            // An adapter consistent with the SQL: the earlier job is returned iff the query asks for its invocation id.
+            boundary: async (jinja) =>
+              table([...BOUNDARY_COLS, "dbt_invocation_id"], jinja.includes(`\\'${earlierId}\\'`) ? [[...earlier(earlierId).slice(0, 4), "DONE", "MERGE", null, null, earlierId]] : []),
+          })
+          return ask()
+        }
+        const same = await ask1("i1", "i1")
+        expect(same.runs).toBeUndefined()
+        expect(same.notes.join(" ")).toContain("1 run that may have started before the period read was left out.")
+        const other = await ask1("i1", "i2")
+        expect(other.runs).toBe(1)
+      })
+    })
+
+    test("a job still running that carries another invocation's id does not leave the run out", async () => {
+      await withNow(async () => {
+        const edge = asOf - 30 * day
+        const run = ["m", "a@x.com", iso(edge + 300_000), iso(edge + 360_000), "MERGE", null, null, String(TIB), "0", null, "False", "DONE", "i1"]
+        const columns = [...JOB_COLUMNS, "state", "dbt_invocation_id"]
+        const live = (id: string) => ["q", "a@x.com", iso(edge + 200_000), null, "RUNNING", "MERGE", null, null, id]
+        const ask1 = async (id: string) => {
+          resetDbtAdapter()
+          useAdapter(calls, {
+            history: async (jinja) => (jinja.includes("countif(reservation_id") ? table(["jobs", "reserved"], [["10", "0"]]) : table(columns, [run])),
+            boundary: async () => table([...BOUNDARY_COLS, "dbt_invocation_id"], [live(id)]),
+          })
+          return ask()
+        }
+        expect((await ask1("i2")).runs).toBe(1)
+        expect((await ask1("i1")).notes).toContain("A run still in progress was left out.")
+      })
+    })
+
     test("without a job still going the same build is priced", async () => {
       await withNow(async () => {
         useAdapter(calls, { ...answer(fullRows()), boundary: fullBoundaryWith([]) })

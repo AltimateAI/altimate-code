@@ -70,6 +70,8 @@ describe("history SQL builders", () => {
     expect(sql).not.toContain("statement_type) in")
     expect(sql).toContain("strpos(query, 'altimate_cost_read') = 0")
     expect(sql).toContain("select /* altimate_cost_read */ job_id")
+    // The dbt invocation label of each job, which makes the jobs of one invocation one run.
+    expect(sql).toContain("(select value from unnest(labels) where key = 'dbt_invocation_id') as dbt_invocation_id")
     // The state is read, so a job still queued or running is known as such.
     expect(sql).toContain("end_time, state, statement_type")
     // Finished jobs, and those still queued or running, whose run is not complete.
@@ -643,6 +645,14 @@ describe("boundary SQL", () => {
     expect(BOUNDARY_SPAN_MS).toBe(72 * 3_600_000 + 10 * 60_000)
   })
 
+  test("the boundary query reads the invocation label, and takes any finished job of the invocations of the runs read", () => {
+    const plain = bigqueryBoundarySql({ project: "p", needle: "n", window: w })
+    expect(plain).toContain("as dbt_invocation_id")
+    expect(plain).not.toContain("unnest(labels) where key = 'dbt_invocation_id') in")
+    const sql = bigqueryBoundarySql({ project: "p", needle: "n", window: w, invocations: ["i-1", "i'2", "i-1"] })
+    expect(sql).toContain("or (select value from unnest(labels) where key = 'dbt_invocation_id') in ('i-1','i\\'2')")
+  })
+
   test("the boundary query returns the id of each statement, so the ones already read can be excluded", () => {
     expect(bigqueryBoundarySql({ project: "p", needle: "n", window: boundaryWindow(1) })).toContain("select /* run boundary */ /* altimate_cost_read */ job_id")
   })
@@ -712,12 +722,26 @@ describe("review follow-ups: BigQuery temporary relation pairing", () => {
     expect(cost.lastRun).toBeCloseTo(2 * 6.25, 10)
   })
 
-  test("interleaved prod and dev invocations by one user overlap in time, so they are reported as one run of both costs", () => {
-    // Grouping is by user and time, not by dataset: the report says so rather than splitting overlapping work.
+  test("interleaved prod and dev invocations by one user with no invocation label overlap in time, so they are reported as one run of both costs", () => {
+    // Without the label, grouping is by user and time, not by dataset.
     const rows = [ds(tmp("tp", 0, 100 * TIB), "prod"), ds(tmp("td", 1, TIB), "dev"), ds(bq("md", 3, TIB), "dev"), ds(bq("mp", 6, 100 * TIB), "prod")]
     const { cost } = priceBigquery(rows, undefined, "model.s.m", {})
     expect(cost.runs).toBe(1)
     expect(cost.lastRun).toBeCloseTo(202 * 6.25, 10)
+  })
+
+  test("the same interleaved jobs labelled with their own invocation ids are two runs, each with its own cost", () => {
+    const inv = (row: Row, id: string): Row => ({ ...row, dbt_invocation_id: id })
+    const rows = [
+      inv(ds(tmp("tp", 0, 100 * TIB), "prod"), "prod-1"),
+      inv(ds(tmp("td", 1, TIB), "dev"), "dev-1"),
+      inv(ds(bq("md", 3, TIB), "dev"), "dev-1"),
+      inv(ds(bq("mp", 6, 100 * TIB), "prod"), "prod-1"),
+    ]
+    const { cost } = priceBigquery(rows, undefined, "model.s.m", {})
+    expect(cost.runs).toBe(2)
+    expect(cost.highest).toBeCloseTo(200 * 6.25, 10)
+    expect(cost.typical).toBeCloseTo(((200 + 2) / 2) * 6.25, 10)
   })
 
   test("each temporary CTAS takes its own final build, so two invocations whose merges are minutes apart stay one run", () => {
@@ -962,6 +986,67 @@ describe("review follow-ups: read-only hooks, boundary identity and unfinished r
     // A temporary CTAS a final build took does not hold the run open.
     const paired = [tmp("t", 0, "d"), { ...job("m", 2, 1, TIB, "MERGE"), destination_dataset_id: "d" }]
     expect(priceBigquery(paired, undefined, "model.s.m", {}, undefined, { asOfMs: C3 + 5 * MIN }).cost.runs).toBe(1)
+  })
+
+  describe("invocation labels", () => {
+    const inv = (row: Row, id: string): Row => ({ ...row, dbt_invocation_id: id })
+    const price = (rows: Row[], boundary?: Parameters<typeof priceBigquery>[4]) => priceBigquery(rows, undefined, "model.s.m", {}, boundary).cost
+
+    test("one invocation whose jobs are minutes apart (a slow hook) is one run", () => {
+      const rows = [inv(job("m", 0, 1, TIB, "MERGE"), "i1"), inv(job("h", 6, 1, TIB, "INSERT"), "i1")]
+      const cost = price(rows)
+      expect(cost.runs).toBe(1)
+      expect(cost.lastRun).toBe(12.5)
+      // The same jobs without the label are two runs, by the user-and-time rule.
+      expect(price(rows.map((r) => ({ ...r, dbt_invocation_id: null }))).runs).toBe(2)
+    })
+
+    test("two invocations by one user within a minute of each other are two runs, and a labelled job never joins an unlabelled one", () => {
+      const two = price([inv(job("a", 0, 1, TIB, "MERGE"), "i1"), inv(job("b", 1, 1, 2 * TIB, "MERGE"), "i2")])
+      expect(two.runs).toBe(2)
+      expect(two.highest).toBe(12.5)
+      const mixed = price([inv(job("a", 0, 1, TIB, "MERGE"), "i1"), job("b", 1, 1, TIB, "MERGE")])
+      expect(mixed.runs).toBe(2)
+    })
+
+    test("an unread job of the same invocation leaves the run out, however long before it ended; another invocation's does not", () => {
+      const rows = [inv(job("m", 5, 1, TIB, "MERGE"), "i1")]
+      const stmt = (id: string) => ({ user: "a@x.com", start: C3 - 600 * MIN, end: C3 - 500 * MIN, inv: id })
+      const left = price(rows, { cutoff: C3, stmts: [stmt("i1")] })
+      expect(left.basis).toBe("none")
+      expect(left.notes.join(" ")).toContain("may have started before")
+      expect(price(rows, { cutoff: C3, stmts: [stmt("i2")] }).runs).toBe(1)
+      // Even a job that ended seconds before the run began, by the same user, is not of the run when its id differs.
+      expect(price(rows, { cutoff: C3, stmts: [{ user: "a@x.com", start: C3 - 3 * MIN, end: C3 + 4.5 * MIN, inv: "i2" }] }).runs).toBe(1)
+      // An unlabelled unread job keeps the user-and-time rule against a labelled run.
+      expect(price(rows, { cutoff: C3, stmts: [{ user: "a@x.com", start: C3 - 3 * MIN, end: C3 + 4.5 * MIN }] }).basis).toBe("none")
+    })
+
+    test("a job still running with the run's invocation id leaves it in progress; another id does not", () => {
+      const rows = [inv(job("m", 75 * 60, 1, TIB, "MERGE"), "i1")]
+      const running = (id: string, start: number) => ({ cutoff: C3, live: [{ user: "a@x.com", start: C3 + start * MIN, inv: id }] })
+      // The same invocation began long before; no time rule is needed.
+      const same = price(rows, running("i1", -3000))
+      expect(same.notes).toContain("A run still in progress was left out.")
+      // Another invocation's live job, which started before the run ended, is not part of it.
+      expect(price(rows, running("i2", 75 * 60 - 1)).runs).toBe(1)
+    })
+
+    test("a script is grouped by its own row's label, its children carrying none", () => {
+      const script = inv(job("s", 0, 1, null, "SCRIPT"), "i1")
+      const kid: Row = { job_id: "k", parent_job_id: "s", creation_time: at(0.2), statement_type: "MERGE", total_bytes_billed: String(2 * TIB), total_slot_ms: "0", reservation_id: null, cache_hit: "False" }
+      const hook = inv(job("h", 6, 1, TIB, "INSERT"), "i1")
+      const cost = priceBigquery([script, hook], [kid], "model.s.m", {}).cost
+      expect(cost.runs).toBe(1)
+      expect(cost.lastRun).toBeCloseTo(18.75, 10)
+    })
+
+    test("an invocation with a temporary CTAS and no final build yet is still held open for ten minutes", () => {
+      const rows = [inv(tmp("t", 0, "d"), "i1"), inv(job("s", 1.1, 0.4, TIB, "SELECT"), "i1")]
+      const at = (minutes: number) => priceBigquery(rows, undefined, "model.s.m", {}, undefined, { asOfMs: C3 + minutes * MIN }).cost
+      expect(at(3).notes).toContain("A run still in progress was left out.")
+      expect(at(12).runs).toBe(1)
+    })
   })
 
   test("two runs in progress are counted in one note", () => {

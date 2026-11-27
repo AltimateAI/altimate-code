@@ -138,6 +138,9 @@ const BQ_BUILD_TYPES = ["CREATE_TABLE_AS_SELECT", "CREATE_TABLE", "CREATE_VIEW",
 /** Marks the history tool's own queries, whose text carries the model's needle and which the reads must not match. */
 const OWN_MARK = "altimate_cost_read"
 const notOwn = `strpos(query, '${OWN_MARK}') = 0`
+/** dbt-bigquery labels every job it runs with the id of the dbt invocation (`dbt_invocation_id`); the jobs of one invocation are one run. */
+export const INVOCATION_LABEL = "dbt_invocation_id"
+const invocationColumn = `(select value from unnest(labels) where key = '${INVOCATION_LABEL}') as dbt_invocation_id`
 /** A job that finished successfully, or one that is still queued or running (its run is not complete). */
 const LIVE_OR_DONE = "((upper(state) = 'DONE' and error_result is null) or upper(state) in ('PENDING','RUNNING'))"
 /** The statement that ends a run: dbt builds an incremental model's temporary relation, then merges or inserts from it. */
@@ -160,7 +163,7 @@ function bqJobs(project: string, location: unknown, view: JobsView): string {
 
 /** The history and capacity queries (and the boundary, from its cutoff) read the same instant, `asOfMs`, as a literal: a window that slid between queries would not describe one period. */
 export function bigqueryHistorySql(input: { project: string; location?: unknown; needle: string; view?: JobsView; asOfMs: number }): string {
-  return `select /* ${OWN_MARK} */ job_id, user_email, creation_time, end_time, state, statement_type, destination_table.table_id as destination_table_id, destination_table.dataset_id as destination_dataset_id, total_bytes_billed, total_slot_ms, reservation_id, cache_hit
+  return `select /* ${OWN_MARK} */ job_id, user_email, creation_time, end_time, state, statement_type, destination_table.table_id as destination_table_id, destination_table.dataset_id as destination_dataset_id, ${invocationColumn}, total_bytes_billed, total_slot_ms, reservation_id, cache_hit
 from ${bqJobs(input.project, input.location, input.view ?? "JOBS")}
 where creation_time > timestamp_millis(${windowStartMs(input.asOfMs)}) and creation_time <= timestamp_millis(${input.asOfMs})
   and upper(job_type) = 'QUERY' and ${LIVE_OR_DONE}
@@ -241,7 +244,15 @@ export function boundaryWindow(cutoffMs: number, windowStart = cutoffMs - HISTOR
   }
 }
 
-export function bigqueryBoundarySql(input: { project: string; location?: unknown; needle: string; view?: JobsView; window: BoundaryWindow }): string {
+export function bigqueryBoundarySql(input: {
+  project: string
+  location?: unknown
+  needle: string
+  view?: JobsView
+  window: BoundaryWindow
+  /** Invocation ids of the runs read: an earlier job of one of them belongs to it however long before it ended. */
+  invocations?: string[]
+}): string {
   const at = (ms: number) => `timestamp_millis(${ms})`
   const w = input.window
   // One read, so no job can change state between two: what can join a run that starts after the cutoff is a finished job
@@ -249,7 +260,10 @@ export function bigqueryBoundarySql(input: { project: string; location?: unknown
   // its final build) and was created in the lookback, or a job still going (not done, or with no end time yet) created
   // anywhere in the history window. Jobs still going come first, so finished ones cannot crowd them out of the limit.
   const going = `(upper(state) in ('PENDING','RUNNING') or end_time is null)`
-  return `select /* run boundary */ /* ${OWN_MARK} */ job_id, user_email, creation_time, end_time, state, statement_type, destination_table.table_id as destination_table_id, destination_table.dataset_id as destination_dataset_id
+  // An earlier job of a run's own invocation belongs to it however long before the cutoff it ended.
+  const ids = [...new Set(input.invocations ?? [])]
+  const sameInvocation = ids.length ? `\n      or (select value from unnest(labels) where key = '${INVOCATION_LABEL}') in (${ids.map(sqlString).join(",")})` : ""
+  return `select /* run boundary */ /* ${OWN_MARK} */ job_id, user_email, creation_time, end_time, state, statement_type, destination_table.table_id as destination_table_id, destination_table.dataset_id as destination_dataset_id, ${invocationColumn}
 from ${bqJobs(input.project, input.location, input.view ?? "JOBS")}
 where creation_time < ${at(w.startBeforeMs)}
   and upper(job_type) = 'QUERY'
@@ -259,7 +273,7 @@ where creation_time < ${at(w.startBeforeMs)}
     or (creation_time > ${at(w.startAfterMs)} and upper(state) = 'DONE' and error_result is null and (
       end_time >= ${at(w.joinEndAtLeastMs)}
       or (upper(statement_type) = 'CREATE_TABLE_AS_SELECT' and ends_with(destination_table.table_id, '${DBT_TMP_SUFFIX}')
-          and end_time >= ${at(w.tmpEndAtLeastMs)})
+          and end_time >= ${at(w.tmpEndAtLeastMs)})${sameInvocation}
     ))
   )
   and ${notOwn}
@@ -335,9 +349,9 @@ export function parseTime(value: string | null | undefined): number {
  */
 export type Boundary = {
   cutoff: number
-  stmts?: { user: string | null; start: number; end: number; tmp?: boolean; dataset?: string | null }[]
+  stmts?: { user: string | null; start: number; end: number; tmp?: boolean; dataset?: string | null; inv?: string }[]
   /** Jobs still going (queued, running, or with no end time) in the window, each lasting to the instant read. They leave out any run they could chain into. */
-  live?: { user: string | null; start: number }[]
+  live?: { user: string | null; start: number; inv?: string }[]
   /** The boundary read was full: it cannot say what it left out, so runs near the cutoff are not trusted besides. */
   full?: boolean
   /** The boundary read was full: every run by these users, who have a job still going, is left out. */
@@ -417,6 +431,8 @@ type BqUnit = {
   user: string
   start: number
   end: number
+  /** The dbt invocation id the job is labelled with, or "" when it has none. */
+  inv: string
   /** The destination dataset, when the job names one. */
   dataset: string
   /** A CREATE TABLE AS SELECT into dbt's temporary relation. */
@@ -459,6 +475,7 @@ function bqJob(r: Row, cfg: CostConfig, asOfMs?: number): BqUnit {
     end: pending ? (asOfMs ?? Number.POSITIVE_INFINITY) : parseTime(r.end_time),
     build: BQ_BUILD_TYPES.includes(stmtType(r)),
     pending,
+    inv: r.dbt_invocation_id ?? "",
     dataset: r.destination_dataset_id ?? "",
     tmp: stmtType(r) === "CREATE_TABLE_AS_SELECT" && (r.destination_table_id ?? "").endsWith(DBT_TMP_SUFFIX),
     final: BQ_FINAL_TYPES.includes(stmtType(r)),
@@ -478,10 +495,11 @@ const stmtType = (r: Row) => (r.statement_type ?? "").toUpperCase()
 /** A row that names a state other than DONE, or a null end time, is a job still queued or running; one that names neither is done. */
 const isPending = (r: Row) => (!!r.state && r.state.toUpperCase() !== "DONE") || r.end_time === null
 
-const sumUnits = (start: number, units: BqUnit[], over: { user: string; final: boolean; dataset: string }): BqUnit => ({
+const sumUnits = (start: number, units: BqUnit[], over: { user: string; final: boolean; dataset: string; inv?: string }): BqUnit => ({
   cause: units.find((u) => !u.known)?.cause,
   user: over.user,
   end: Math.max(...units.map((u) => u.end)),
+  inv: over.inv ?? "",
   dataset: over.dataset,
   tmp: false,
   final: over.final,
@@ -500,7 +518,8 @@ const sumUnits = (start: number, units: BqUnit[], over: { user: string; final: b
 const sameDataset = (a: BqUnit, b: BqUnit) => !a.dataset || !b.dataset || a.dataset === b.dataset
 
 /**
- * BigQuery runs, grouped by user and time (the invocation id is not available): the model's matched top-level jobs by one user form a run
+ * BigQuery runs. dbt-bigquery labels every job with its invocation id, and jobs with the same id are one run, however far apart.
+ * Jobs without the label are grouped by user and time: the model's matched top-level jobs by one user form a run
  * while each job starts within a minute after the previous job of the run ended (a pre- or post-hook, a delete or
  * update, each batch of a microbatch model); a script counts as one job, priced from its children. dbt builds an
  * incremental model's temporary relation with a CREATE TABLE AS SELECT into `<model>__dbt_tmp` in the same dataset and
@@ -515,6 +534,13 @@ export function bigqueryRuns(
   boundary?: Boundary,
   asOfMs?: number,
 ): { runs: BqUnit[]; skipped: number; dropped: number; inProgress: number; causes: Causes } {
+  // Jobs labelled with a dbt invocation id are grouped by it: one invocation is one run, whatever the gaps between its jobs.
+  // Jobs without the label (an older adapter, a custom job) are grouped by user and time below.
+  const byInvocation = new Map<string, BqUnit[]>()
+  for (const u of units.filter((x) => x.inv)) byInvocation.set(u.inv, [...(byInvocation.get(u.inv) ?? []), u])
+  // A temporary CTAS of an invocation that has no final build yet is waiting for it.
+  for (const g of byInvocation.values()) if (!g.some((u) => u.final)) for (const u of g) if (u.tmp) u.unpaired = true
+  units = units.filter((x) => !x.inv)
   const heads = units.filter((u) => !u.tmp).sort((a, b) => a.start - b.start)
   const atoms = new Map<BqUnit, BqUnit[]>(heads.map((b) => [b, [b]]))
   const loose: BqUnit[][] = []
@@ -537,7 +563,7 @@ export function bigqueryRuns(
   for (const atom of [...atoms.values(), ...loose]) byUser.set(atom[0].user, [...(byUser.get(atom[0].user) ?? []), atom])
   const startOf = (atom: BqUnit[]) => Math.min(...atom.map((u) => u.start))
   const endOf = (atom: BqUnit[]) => Math.max(...atom.map((u) => u.end))
-  const grouped: BqUnit[][] = []
+  const grouped: BqUnit[][] = [...byInvocation.values()]
   for (const list of byUser.values()) {
     let current: BqUnit[] = []
     let currentEnd = Number.NaN
@@ -556,15 +582,18 @@ export function bigqueryRuns(
   const all = grouped.map((g) => {
     const head = g.find((u) => !u.tmp) ?? g[0]
     const finals = g.filter((u) => u.final)
-    const unit = sumUnits(Math.min(...g.map((u) => u.start)), g, { user: head.user, final: finals.length > 0, dataset: head.dataset })
+    const unit = sumUnits(Math.min(...g.map((u) => u.start)), g, { user: head.user, final: finals.length > 0, dataset: head.dataset, inv: head.inv })
     // An unpaired temporary CTAS can still be joined by its final build for ten minutes, whatever ran after it.
     const unpairedTmpEnd = Math.max(Number.NEGATIVE_INFINITY, ...g.filter((u) => u.unpaired).map((u) => u.end))
     return { ...unit, finals: finals.map((u) => ({ start: u.start, dataset: u.dataset })), unpairedTmpEnd }
   })
   // Only a group with a build job is a run; a group of reads (`dbt show`) is not priced.
   const candidates = all.filter((r) => r.build)
+  // Whether an unread job could belong to a run: the same invocation id when both carry one, else the user-and-time rule.
   const joins = (b: NonNullable<Boundary["stmts"]>[number], r: BqUnit) =>
-    (b.user ?? "") === r.user &&
+    b.inv && r.inv
+      ? b.inv === r.inv
+      : (b.user ?? "") === r.user &&
     (b.end >= r.start - BQ_CHAIN_MS ||
       (!!b.tmp &&
         (r.finals ?? []).some((f) => b.end <= f.start && b.end >= f.start - BQ_TMP_JOIN_MS && (!b.dataset || !f.dataset || b.dataset === f.dataset))))
@@ -572,7 +601,7 @@ export function bigqueryRuns(
   const liveBefore = (r: BqUnit) =>
     !!boundary &&
     (boundary.liveFullUsers?.includes(r.user) ||
-      !!boundary.live?.some((b) => (b.user ?? "") === r.user && r.end >= b.start - BQ_CHAIN_MS))
+      !!boundary.live?.some((b) => (b.inv && r.inv ? b.inv === r.inv : (b.user ?? "") === r.user && r.end >= b.start - BQ_CHAIN_MS)))
   const live = candidates.filter((r) => !(r.pending || (asOfMs !== undefined && (r.end >= asOfMs - BQ_CHAIN_MS || (r.unpairedTmpEnd ?? Number.NEGATIVE_INFINITY) >= asOfMs - BQ_TMP_JOIN_MS)) || liveBefore(r)))
   // Unread statements before the cutoff that would have joined a run, whatever the run now pairs with: a job by the
   // run's user that ended at or after a minute before the run's start, or a temporary-relation CTAS by the same user,
@@ -618,7 +647,7 @@ export function priceBigquery(
     // The children carry no end time: the script ended when its own row says.
     const pending = isPending(r)
     const unit = {
-      ...sumUnits(start, kids, { user: r.user_email ?? "", final: true, dataset: r.destination_dataset_id ?? "" }),
+      ...sumUnits(start, kids, { user: r.user_email ?? "", final: true, dataset: r.destination_dataset_id ?? "", inv: r.dbt_invocation_id ?? "" }),
       end: pending ? (opts.asOfMs ?? Number.POSITIVE_INFINITY) : parseTime(r.end_time),
       build: true,
       pending,
@@ -866,7 +895,7 @@ export async function loadHistory(input: {
       // The cutoff's millisecond also returns statements the history already read: only unread ones are evidence.
       const readIds = new Set(read.map((r) => r.job_id))
       const unread = found.filter((r) => !readIds.has(r.job_id))
-      const live = unread.filter(going).map((r) => ({ user: r.user_email ?? null, start: parseTime(r.creation_time) }))
+      const live = unread.filter(going).map((r) => ({ user: r.user_email ?? null, start: parseTime(r.creation_time), inv: r.dbt_invocation_id ?? "" }))
       // Full: the read cannot say what it left out, so the fallback applies besides all the evidence it did return, and
       // every run by a user with a job still going is left out.
       const full = found.length >= HISTORY_LIMIT
@@ -882,6 +911,7 @@ export async function loadHistory(input: {
             end: parseTime(r.end_time),
             tmp: stmtType(r) === "CREATE_TABLE_AS_SELECT" && (r.destination_table_id ?? "").endsWith(DBT_TMP_SUFFIX),
             dataset: r.destination_dataset_id ?? null,
+            inv: r.dbt_invocation_id ?? "",
           })),
       }
     } catch (e) {
@@ -946,7 +976,14 @@ export async function loadHistory(input: {
       let boundary: Boundary | undefined
       try {
         boundary = await boundaryFor(history.rows, (window) =>
-          bigqueryBoundarySql({ project, location, needle: needleFor(id), view: history.view, window }),
+          bigqueryBoundarySql({
+          project,
+          location,
+          needle: needleFor(id),
+          view: history.view,
+          window,
+          invocations: history.rows.map((r) => r.dbt_invocation_id ?? "").filter(Boolean),
+        }),
         )
       } catch (e) {
         if (!(e instanceof BoundaryUnreadable)) throw e
