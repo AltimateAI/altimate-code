@@ -2559,6 +2559,12 @@ describe("orchestrate", () => {
       expect({ reviewers, pii: env.findings.filter((f) => f.category === "pii_exposure") }).toEqual({ reviewers, pii: [] })
   })
 
+  test("the same table name in another schema is a different source", async () => {
+    const base = "select customer_id,\n  ssn\nfrom restricted.customers"
+    const head = "select customer_id,\n  ssn\nfrom public.customers"
+    expectReportedPii(await piiRuns(head, base, "-from restricted.customers\n+from public.customers\n", ["ssn"]), ["ssn"], "none")
+  })
+
   test("a qualified reference resolves through its own source, not any CTE with that column", async () => {
     // Base reads `home_address` masked from CTE `m`; head reads it raw from `customers c`.
     const base = [

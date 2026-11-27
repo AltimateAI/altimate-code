@@ -92,7 +92,15 @@ describe("rawColumnExposures", () => {
     expect(asObject(rawColumnExposures(sql))).toEqual({
       ssn: ["customers.ssn"],
       spouse_ssn: ["spouses.ssn"],
-      email: ["employees.email"],
+      email: ["schema1.employees.email"],
+    })
+  })
+  test("keeps the database and schema in the source identity", () => {
+    expect(asObject(rawColumnExposures("select ssn from restricted.customers"))).toEqual({ ssn: ["restricted.customers.ssn"] })
+    expect(asObject(rawColumnExposures("select ssn from public.customers"))).toEqual({ ssn: ["public.customers.ssn"] })
+    expect(asObject(rawColumnExposures('select c.ssn, customers.email from "DB"."Public"."Customers" c, raw.customers'))).toEqual({
+      ssn: ["db.public.customers.ssn"],
+      email: ["raw.customers.email"],
     })
   })
   test("resolves a qualifier through its own source only", () => {

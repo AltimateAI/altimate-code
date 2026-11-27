@@ -320,10 +320,13 @@ const NOT_A_SOURCE_ALIAS = new Set(
   ),
 )
 
-/** One FROM/JOIN source of a select: a table (last name segment), a CTE, or a
- *  FROM subquery (named by its scope), with the alias it is read under. */
+/** One FROM/JOIN source of a select: a table (its full relation name, every
+ *  segment unquoted and lowercased), a CTE, or a FROM subquery (named by its
+ *  scope), with the alias it is read under. */
 interface Source {
   name: string
+  /** A schema-qualified table's last segment, which a column qualifier names it by. */
+  short?: string
   alias?: string
 }
 
@@ -474,6 +477,7 @@ function parseSelects(sql: string): ParsedSelects {
   // `from`, `join`, or a `,` inside a FROM list, with its alias, up to the end of
   // the select (`)`, `;`, a set operator).
   const aliasRe = new RegExp(String.raw`^\s+(?:as\s+)?(${SEGMENT})`, "i")
+  const segmentRe = new RegExp(SEGMENT, "g")
   for (const { scope, branch, end } of selects) {
     const read: Source[] = []
     let inFrom = false
@@ -489,8 +493,9 @@ function parseSelects(sql: string): ParsedSelects {
       const kw = boundary ? /^(from|join)\b/i.exec(s.slice(j, j + 5)) : null
       if (kw || (inFrom && d === ",")) {
         const after = j + (kw ? kw[0].length : 1)
-        const lead = after + (/^\s*/.exec(s.slice(after))?.[0].length ?? 0)
+        const lead = after + (/^\s*/.exec(s.slice(after, after + 200))?.[0].length ?? 0)
         let name: string | undefined
+        let short: string | undefined
         let rest = lead
         if (s[lead] === "(") {
           // A FROM subquery is a source under its alias; any other parenthesis
@@ -500,16 +505,22 @@ function parseSelects(sql: string): ParsedSelects {
         } else {
           const ref = tableRef.exec(s.slice(after, after + 300))
           if (ref) {
-            const last = ref[1].split(".").pop()!.trim()
+            const segments = [...ref[1].matchAll(segmentRe)].map((m) => m[0])
+            const last = segments[segments.length - 1]
             const at = after + ref[0].length - last.length
             // A Jinja `{{ ref('x') }}` is masked to underscores: name it by its source text.
-            name = /^_+$/.test(last) ? sql.slice(at, at + last.length).replace(/\s+/g, "").toLowerCase() : unquote(last)
+            short = /^_+$/.test(last) ? sql.slice(at, at + last.length).replace(/\s+/g, "").toLowerCase() : unquote(last)
+            // Database and schema stay part of the identity: `restricted.customers`
+            // and `public.customers` are different tables.
+            name = [...segments.slice(0, -1).map(unquote), short].join(".")
             rest = after + ref[0].length
           }
         }
         if (name) {
           const alias = aliasRe.exec(s.slice(rest, rest + 200))?.[1]
-          read.push(alias && !NOT_A_SOURCE_ALIAS.has(unquote(alias)) ? { name, alias: unquote(alias) } : { name })
+          const src: Source = short && short !== name ? { name, short } : { name }
+          if (alias && !NOT_A_SOURCE_ALIAS.has(unquote(alias))) src.alias = unquote(alias)
+          read.push(src)
         }
         inFrom = true
         j = after - 1
@@ -564,10 +575,11 @@ interface ScopeOutputs extends Omit<FinalOutputs, "passthrough"> {
 /**
  * Per output name of the model (its FINAL projection, never a CTE's or a
  * nested query's own aliases), the source columns it exposes RAW under that
- * name, each as `source.column` where the source is the table (last name
- * segment) the column is read from: `c.ssn as tax_ref` with `customers c` →
- * `tax_ref: {customers.ssn}`, so the same column name from another table
- * (`s.ssn` with `spouses s`) is a different exposure. A qualifier resolves
+ * name, each as `source.column` where the source is the table (its full
+ * relation name as written) the column is read from: `c.ssn as tax_ref` with
+ * `customers c` → `tax_ref: {customers.ssn}`, so the same column name from
+ * another table (`s.ssn` with `spouses s`, or `restricted.customers` vs
+ * `public.customers`) is a different exposure. A qualifier resolves
  * through its own FROM/JOIN source only; a column read from a CTE or a FROM
  * subquery takes that scope's exposure for it (masked there → nothing raw), and
  * `*` over them takes all of theirs. An unqualified column resolves through the
@@ -649,10 +661,10 @@ export function finalOutputs(sql: string): FinalOutputs {
       return unresolved(col)
     }
     if (qualifier) {
+      // A qualifier names its source by alias, else by the table's last segment.
+      const named = (x: Source) => x.name === qualifier || x.short === qualifier
       const src =
-        srcs.find((x) => x.alias === qualifier) ??
-        srcs.find((x) => !x.alias && x.name === qualifier) ??
-        srcs.find((x) => x.name === qualifier)
+        srcs.find((x) => x.alias === qualifier) ?? srcs.find((x) => !x.alias && named(x)) ?? srcs.find(named)
       return src ? fromSource(src) : unresolved(col)
     }
     const named = srcs.filter((x) => isDerived(x, scope, seen) && resolve(x.name, inner).names.has(col))
