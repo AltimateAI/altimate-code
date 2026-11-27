@@ -439,8 +439,9 @@ export const VerdictEnvelope = z.object({
       }),
     })
     .optional(),
-  /** Rule findings the rule-noise steps did not post that still count toward a REQUEST_CHANGES
-   *  verdict (listed so the block is explainable); only when the verdict blocks. */
+  /** Rule findings the rule-noise steps did not post that the verdict still counts, with why:
+   *  those toward a REQUEST_CHANGES block, or every one when they alone keep the verdict from
+   *  APPROVE. Absent when they do not change the verdict. */
   withheld: z
     .array(
       z.object({
@@ -592,8 +593,8 @@ export function buildEnvelope(input: BuildEnvelopeInput): VerdictEnvelope {
     rulesOff: input.rulesOff,
     rulesRefuted: input.rulesRefuted,
     rulePolicy: input.rulePolicy,
-    // Listed only when the verdict blocks: then a withheld finding may be part of the reason.
-    withheld: ideal === "REQUEST_CHANGES" && input.withheld?.length ? input.withheld : undefined,
+    // The orchestrator lists them only when they change the verdict.
+    withheld: input.withheld?.length ? input.withheld : undefined,
     policy: input.policy,
     engineErrors: input.engineErrors,
     generatedAt: input.generatedAt,

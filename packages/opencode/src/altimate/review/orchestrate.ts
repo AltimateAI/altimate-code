@@ -39,6 +39,7 @@ import {
   errorReason,
   isOutsideProjectReason,
   signEnvelope,
+  computeIdealVerdict,
   verdictEligible,
 } from "./verdict"
 import { detectMacroPatterns, detectModelPatterns, detectSchemaYmlPatterns, splitDiff } from "./dbt-patterns"
@@ -2938,30 +2939,45 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
       rulePolicy = { applied: true, dropped: postedDropped }
     } else rulePolicy = { applied: false, dropped: { unverifiable_high_sev: 0, noisy_type_not_confirmed: 0 } }
   }
-  // The verdict counts the rule findings these steps did not post. Those that can block (a
-  // confident engine warning toward the ≥3-warning pattern) are listed with why they were
-  // withheld; the envelope keeps the list only when the verdict blocks.
-  const withheld: NonNullable<VerdictEnvelope["withheld"]> = []
+  // The verdict counts the rule findings these steps did not post. When they change it — toward
+  // REQUEST_CHANGES (a confident engine warning toward the ≥3-warning pattern), or away from APPROVE
+  // with nothing else to show — they are listed with why they were withheld, so every verdict is
+  // explainable from the comment.
+  type Withheld = NonNullable<VerdictEnvelope["withheld"]>[number]
+  const withheldAll: Array<{ f: Finding; reason: Withheld["reason"] }> = []
   {
-    const blocking = (f: Finding) => f.severity === "warning" && f.confidence !== "unknown" && verdictEligible(f, input.rubric)
-    const note = (f: Finding, reason: NonNullable<VerdictEnvelope["withheld"]>[number]["reason"]) => {
-      if (blocking(f))
-        withheld.push({ id: f.id, title: f.title, file: f.file, ...(f.startLine ? { startLine: f.startLine } : {}), severity: f.severity, reason })
-    }
     let rest = verdictFindings
     const offKept = new Set(ruleStep(rest, (list) => offStep(list).kept))
-    for (const f of rest) if (!offKept.has(f)) note(f, "rule_type_off")
+    for (const f of rest) if (!offKept.has(f)) withheldAll.push({ f, reason: "rule_type_off" })
     rest = rest.filter((f) => offKept.has(f))
     if (aiLaneRan && ruleVerdicts.size) {
-      for (const f of rest) if (refuted(f)) note(f, "refuted")
+      for (const f of rest) if (refuted(f)) withheldAll.push({ f, reason: "refuted" })
       rest = rest.filter((f) => !refuted(f))
     }
     if (rulePolicy?.applied && input.rulePolicy)
       for (const f of rest) {
         const why = inMixed(f) ? undefined : rulePolicyDrop(f, verdictOf(f) ?? null, input.rulePolicy)
-        if (why) note(f, why)
+        if (why) withheldAll.push({ f, reason: why })
       }
   }
+  const withheldIds = new Set(withheldAll.map((w) => w.f))
+  const idealAll = computeIdealVerdict(verdictFindings, input.rubric)
+  const idealPosted = computeIdealVerdict(verdictFindings.filter((f) => !withheldIds.has(f)), input.rubric)
+  const blocking = (f: Finding) => f.severity === "warning" && f.confidence !== "unknown" && verdictEligible(f, input.rubric)
+  const listed =
+    idealAll === "REQUEST_CHANGES"
+      ? withheldAll.filter((w) => blocking(w.f))
+      : idealAll !== "APPROVE" && idealPosted === "APPROVE"
+        ? withheldAll
+        : []
+  const withheld: Withheld[] = listed.map(({ f, reason }) => ({
+    id: f.id,
+    title: f.title,
+    file: f.file,
+    ...(f.startLine ? { startLine: f.startLine } : {}),
+    severity: f.severity,
+    reason,
+  }))
 
   // Lint-only means no changed model resolved against a manifest. A single
   // undecidable finding does not make the whole run lint-only; those findings

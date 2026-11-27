@@ -93,6 +93,8 @@ export function renderSummary(env: VerdictEnvelope, opts: RenderOptions = {}): s
     lines.push(
       `### Withheld rule findings that count toward this verdict (${env.withheld.length})`,
       "",
+      "Not posted as comments, but the verdict counts them:",
+      "",
       ...env.withheld.map((w) => `- \`${w.file}${w.startLine ? `:${w.startLine}` : ""}\` — ${w.title} (${WITHHELD_REASON[w.reason]})`),
       "",
     )

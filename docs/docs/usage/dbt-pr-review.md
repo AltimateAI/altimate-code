@@ -686,16 +686,19 @@ across 12 dialects all plan; anything still unrecognized stays *undecidable*, ne
    before any lane runs; rule ids match in either spelling, `dbt_patterns:self_join`
    or `dbt-patterns:self-join`). With the verifier on (`ai.verify`), the rule
    findings that would be posted are verified too (critical ones are never
-   dropped, so they are not sent), up to 40 per PR, warnings first (`ALTIMATE_REVIEW_AI_VERIFY_RULES_MAX_FINDINGS`), in a second verifier run
-   with its own token budget, and refuted ones are dropped (`ai.verifyRules: false`
+   dropped, so they are not sent; rule types off are sent too on files the AI lane
+   does not review, where they are posted), up to 40 per PR, warnings and the noisy
+   types first (`ALTIMATE_REVIEW_AI_VERIFY_RULES_MAX_FINDINGS`); findings over the
+   ceiling are posted unverified. The rule run is a second verifier run with its own
+   token budget; on the default budget most of its batches answer without tools
+   (forced at the budget), and those verdicts count. Refuted ones are dropped (`ai.verifyRules: false`
    or `ALTIMATE_REVIEW_AI_VERIFY_RULES=off`; `ai.verify: false` turns it off too).
    Then a rule finding is not posted when the verifier answered that it could not
    check it and it is a warning, or when its type is one of 7 noisy types and the
    verifier did not confirm it (`ai.rulePolicy: false` or
    `ALTIMATE_REVIEW_RULE_POLICY=0`). A rule finding that got no verdict (its batch
-   failed, or it was over the ceiling) is posted, and so is one whose verdict came
-   from a batch that stopped on its budget or timeout (a forced answer without the
-   verifier's tools counts as no verdict, refuted included). Critical rule
+   failed, or it was over the ceiling) is posted, and so is one whose batch timed
+   out (its verdict counts as no verdict). Critical rule
    findings are never dropped by any of these steps, nor is a repeat-merged comment
    that includes an AI finding. When the AI lane is skipped or fails (no model, dry
    run, provider error, timeout), the rule verifier does not run, none of the steps
@@ -712,9 +715,10 @@ across 12 dialects all plan; anything still unrecognized stays *undecidable*, ne
    engine warning that is refuted, turned off or dropped by the policy is not
    posted but still counts toward the ≥3 warnings (the summary counts it too), so
    neither the verifier nor text it reads, such as the PR description, can unblock
-   a gate. When the verdict is `REQUEST_CHANGES`, the summary lists the withheld
-   engine warnings that count toward it (file and line, title, and why each was not
-   posted), and the envelope records them under `withheld`. In `comment` mode, `REQUEST_CHANGES` is posted as comments rather than
+   a gate. When withheld findings change the verdict, the summary lists them (file
+   and line, title, and why each was not posted) and the envelope records them under
+   `withheld`: the engine warnings that count toward a `REQUEST_CHANGES`, or every
+   withheld finding when they alone keep the verdict from `APPROVE`. In `comment` mode, `REQUEST_CHANGES` is posted as comments rather than
    blocking.
 5. **Signed envelope.** The verdict is HMAC-signed (`ALTIMATE_REVIEW_SIGNING_KEY`)
    and includes the manifest hash, so it is replayable and tamper-evident.

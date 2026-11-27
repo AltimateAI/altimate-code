@@ -407,4 +407,15 @@ describe("round 3: rules-off, verification and explainable verdicts", () => {
     expect((seen[0].verifyRulesAfter ?? []).some((f) => f.file === "config/extra.yml")).toBe(true)
   })
 
+  test("nothing posted but the verdict is COMMENT: the withheld findings are listed", async () => {
+    const { renderSummary } = await import("../../src/altimate/review/format")
+    const base = await run([model], undefined)
+    const rules = new Set(base.findings.map((f) => f.rule!))
+    const env = await run([model], rules)
+    expect(env.findings).toEqual([])
+    expect(env.verdict).toBe("COMMENT")
+    expect(env.withheld?.length).toBeGreaterThan(0)
+    expect(env.withheld!.every((w) => w.reason === "rule_type_off")).toBe(true)
+    expect(renderSummary(env, { maxChars: Infinity })).toContain("### Withheld rule findings that count toward this verdict")
+  })
 })
