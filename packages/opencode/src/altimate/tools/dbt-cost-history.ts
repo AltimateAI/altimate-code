@@ -156,6 +156,8 @@ const BQ_BUILD_TYPES = ["CREATE_TABLE_AS_SELECT", "CREATE_TABLE", "CREATE_VIEW",
 /** Marks the history tool's own queries, whose text carries the model's needle and which the reads must not match. */
 const OWN_MARK = "altimate_cost_read"
 const notOwn = `strpos(query, '${OWN_MARK}') = 0`
+/** A continuous query runs for as long as it is left running and is not a dbt run (dbt submits none): JOBS marks it with the documented `continuous` column. */
+const notContinuous = `coalesce(continuous, false) = false`
 /** dbt-bigquery labels every job it runs with the id of the dbt invocation (`dbt_invocation_id`); the jobs of one invocation are one run. */
 export const INVOCATION_LABEL = "dbt_invocation_id"
 /** The dbt target the job ran as, from the JSON in dbt's default query comment. */
@@ -191,6 +193,7 @@ where creation_time > timestamp_millis(${windowStartMs(input.asOfMs)}) and creat
   and upper(job_type) = 'QUERY' and ${LIVE_OR_DONE}
   and parent_job_id is null
   and ${notOwn}
+  and ${notContinuous}
   and strpos(query, ${sqlString(input.needle)}) > 0
 order by creation_time desc limit ${HISTORY_LIMIT}`
 }
@@ -300,6 +303,7 @@ where creation_time < ${at(w.startBeforeMs)}
     ))
   )
   and ${notOwn}
+  and ${notContinuous}
   and strpos(query, ${sqlString(input.needle)}) > 0
 order by ${going} desc, creation_time desc limit ${HISTORY_LIMIT}`
 }
@@ -319,6 +323,7 @@ where creation_time < ${at(w.startBeforeMs)} and creation_time > ${at(w.invocati
   and upper(job_type) = 'QUERY' and ${LIVE_OR_DONE}
   and parent_job_id is null
   and ${notOwn}
+  and ${notContinuous}
   and strpos(query, ${sqlString(input.needle)}) > 0
   and (select value from unnest(labels) where key = '${INVOCATION_LABEL}') in (${ids.map(sqlString).join(",")})
 order by creation_time desc limit ${HISTORY_LIMIT}`
@@ -668,7 +673,9 @@ export function bigqueryRuns(
   // A job before the cutoff that is still running and could join the run makes it a run in progress, not just an uncertain one.
   const liveBefore = (r: BqUnit) =>
     !!boundary &&
-    ((!!boundary.liveFullUsers?.includes(r.user) && !!boundary.live?.some((b) => (b.user ?? "") === r.user && (b.target ?? "") === r.target)) ||
+    // A full read cannot say which jobs it left out, so every unlabelled run by a user seen live is left out; a labelled run is
+    // judged by its own invocation (the same id live below, else the invocation read) and is not overridden by the user.
+    ((!r.inv && !!boundary.liveFullUsers?.includes(r.user) && !!boundary.live?.some((b) => (b.user ?? "") === r.user && (b.target ?? "") === r.target)) ||
       !!boundary.live?.some(
         (b) =>
           (b.target ?? "") === r.target &&
@@ -790,7 +797,7 @@ export function priceBigquery(
   const notes: string[] = truncated ? [LIMIT_NOTE] : []
   if (dropped) notes.push(boundaryNote(dropped))
   if (skipped) notes.push(`${plural(skipped, "run")} left out: ${causeList(causes)}.`)
-  if (boundary?.liveFullUsers?.length) notes.push("The read of jobs before the period was full, so every run by a user with a job still running was left out.")
+  if (boundary?.liveFullUsers?.length) notes.push("The read of jobs before the period was full, so every unlabelled run by a user with a job still running was left out.")
   if (inProgress) notes.push(inProgress === 1 ? "A run still in progress was left out." : `${inProgress} runs still in progress were left out.`)
   if (!runs.length && elsewhere.length)
     return {

@@ -1234,6 +1234,33 @@ describe("checklist review: BigQuery ML, window edge, labelled pairing, target s
     expect(note).toContain("bytes billed at 5 USD/TiB, your config and attributed slot time at 0.06 USD/slot-hour, default")
   })
 
+  test("on a full read, a user seen live leaves out only that user's unlabelled runs: a labelled run is judged by its own invocation", () => {
+    const A = "a@x.com"
+    const labelled = (id: string) => inv(j("m", 60, 1, TIB, "MERGE"), id)
+    // The full read saw A's job iX still running, started long after the runs below.
+    const price = (rows: Row[], liveInv?: string) =>
+      priceBigquery(rows, undefined, "model.s.m", {}, { cutoff: C4, stmts: [], full: true, liveFullUsers: [A], live: [{ user: A, start: C4 + 2000 * MIN, ...(liveInv && { inv: liveInv }) }] }).cost
+    // Past the fallback's span, so only the live rules apply.
+    const at = (m: number) => ({ ...j("x", m, 1, TIB, "MERGE") })
+    expect(price([{ ...at(110 * 60), dbt_invocation_id: "i1" }], "iX").runs).toBe(1)
+    expect(price([{ ...at(110 * 60), dbt_invocation_id: "i1" }], "i1").notes).toContain("A run still in progress was left out.")
+    // An unlabelled run by the same user is left out by the user rule.
+    expect(price([at(110 * 60)]).notes).toContain("A run still in progress was left out.")
+    // A job with no label (what the full read saw) does not leave out a labelled run either.
+    expect(price([labelled("i1")]).runs).toBe(1)
+  })
+
+  test("a continuous query is not a dbt run: the history, boundary and invocation reads leave it out", () => {
+    const needle = needleFor("model.shop.orders")
+    const w = boundaryWindow(C4)
+    for (const sql of [
+      bigqueryHistorySql({ project: "p", needle, asOfMs: ASOF }),
+      bigqueryBoundarySql({ project: "p", needle, window: w }),
+      bigqueryInvocationSql({ project: "p", needle, window: w, invocations: ["i1"] }),
+    ])
+      expect(sql).toContain("and coalesce(continuous, false) = false")
+  })
+
   test("a full read of the invocations' own jobs leaves out every labelled run, whatever the unlabelled boundary read found", () => {
     const labelled = [inv(j("m", 60, 1, TIB, "MERGE"), "i1")]
     const unlabelled = [j("u", 20 * 60, 1, TIB, "MERGE")]
