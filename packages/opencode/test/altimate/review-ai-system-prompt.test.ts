@@ -114,6 +114,26 @@ describe("ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE", () => {
     expect(await finderSystemPrompt({ ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE: path.join(targetDir, "p.md") }, repo.path)).toBe("RUNNER FILE")
   })
 
+  test("a work tree spelled in another case (case-insensitive file systems) is still found", async () => {
+    await using repo = await tmpdir({ git: true })
+    await using outside = await tmpdir()
+    const variant = path.join(path.dirname(repo.path), path.basename(repo.path).toUpperCase())
+    // Only a case-insensitive file system (macOS, Windows) resolves the other spelling.
+    const insensitive = variant !== repo.path && (await fs.stat(variant).then(() => true, () => false))
+    if (!insensitive) return
+    const targetDir = path.join(outside.path, "d2")
+    await fs.mkdir(targetDir)
+    await fs.writeFile(path.join(targetDir, "f"), "RUNNER FILE")
+    await fs.symlink(targetDir, path.join(repo.path, "link"))
+    // The in-tree link named through the other spelling of the work tree...
+    const direct = path.join(variant, "link", "f")
+    // ...and an outside alias whose target is written in the other spelling.
+    const alias = path.join(outside.path, "aliasCase")
+    await fs.symlink(path.join(variant, "link"), alias)
+    for (const file of [direct, path.join(alias, "f")])
+      await expect(finderSystemPrompt({ ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE: file }, repo.path)).rejects.toThrow("inside the git work tree")
+  })
+
   test("a symlink loop is refused", async () => {
     await using repo = await tmpdir({ git: true })
     await using outside = await tmpdir()

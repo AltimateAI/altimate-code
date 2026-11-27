@@ -56,6 +56,8 @@ export function trustedFilePath(name: string, file: string, reviewDirs: Array<st
     const code = (e as NodeJS.ErrnoException)?.code
     throw new Error(`${name}: cannot follow the file's symlinks (${code ?? "error"}); refusing it`)
   }
+  // The walk must end where the realpath does; otherwise it missed something, so refuse.
+  if (spots[spots.length - 1] !== real) throw new Error(`${name}: the file's symlinks resolve inconsistently; refusing it`)
   // Names the work tree (not the file), so a tree the operator did not expect (a home directory
   // kept in git) is visible.
   const tree = trees.find((t) => spots.some((p) => isInsideDir(p, t)))
@@ -68,7 +70,8 @@ const MAX_SYMLINK_HOPS = 40
 
 /**
  * Every path visited while resolving the absolute path `file` one component at a time: each
- * component's location, and through every symlink, each component of its target. A link inside a
+ * component's location under the canonical (realpath) parent, the canonical path of each
+ * directory, and through every symlink, each component of its target. A link inside a
  * work tree is on this list even when an outside alias leads to it and its target leads back out.
  * Throws when a component is missing or the links loop.
  */
@@ -86,10 +89,13 @@ export function resolutionChain(file: string): string[] {
       cur = path.dirname(cur)
       continue
     }
+    // `cur` is canonical (realpath), so a component typed in another case on a case-insensitive
+    // file system still lands under the work tree's canonical root.
     const next = path.join(cur, part)
     visited.push(next)
     if (!lstatSync(next).isSymbolicLink()) {
-      cur = next
+      cur = realpathSync(next)
+      visited.push(cur)
       continue
     }
     if (++hops > MAX_SYMLINK_HOPS) throw Object.assign(new Error("too many symlinks"), { code: "ELOOP" })
