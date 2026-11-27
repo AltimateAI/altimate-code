@@ -957,6 +957,69 @@ describe("dbt_cost_estimate cost", () => {
     }
   })
 
+  describe("unfinished runs and boundary identity through the tool", () => {
+    const asOf = Date.UTC(2026, 5, 1, 20, 0, 0)
+    const iso = (ms: number) => new Date(ms).toISOString()
+    const COLS = [...JOB_COLUMNS, "state", "destination_dataset_id"]
+    const row = (id: string, start: number, end: number, type: string, billed: number, state = "DONE", dataset: string | null = null, dest: string | null = null) => [
+      id, "a@x.com", iso(start), iso(end), type, dest, String(billed), "0", null, "False", state, dataset,
+    ]
+    const withNow = async (run: () => Promise<void>) => {
+      costHistoryInternals.now = () => asOf
+      try {
+        await run()
+      } finally {
+        costHistoryInternals.now = defaultNow
+      }
+    }
+    const ask = async () => (await (await initTool(DbtCostEstimateTool)).execute({ model: "orders", history: true }, ctx)).metadata.cost
+    const answer = (rows: (string | null)[][], boundary?: (string | null)[][]) => ({
+      history: async (jinja: string) => {
+        if (jinja.includes("countif(reservation_id")) return table(["jobs", "reserved"], [["10", "0"]])
+        return table(COLS, rows)
+      },
+      boundary: async () => table(["job_id", "user_email", "creation_time", "end_time", "statement_type", "destination_table_id", "destination_dataset_id"], boundary ?? []),
+    })
+    const day = 86_400_000
+
+    test("a run whose last job ended 30 s before the instant read is left out, the instant being the one the call read as of", async () => {
+      await withNow(async () => {
+        useAdapter(calls, answer([row("m", asOf - 100_000, asOf - 30_000, "MERGE", TIB), row("old", asOf - 2 * day, asOf - 2 * day + 60_000, "MERGE", TIB)]))
+        const cost = await ask()
+        expect(cost.runs).toBe(1)
+        expect(cost.notes).toContain("A run still in progress was left out.")
+      })
+    })
+
+    test("a job still running is read with its state, so a finished CTAS beside it is not priced as a whole run", async () => {
+      await withNow(async () => {
+        const start = asOf - 3 * day
+        useAdapter(calls, answer([
+          row("t", start, start + 60_000, "CREATE_TABLE_AS_SELECT", TIB, "DONE", "d", "orders__dbt_tmp"),
+          row("m", start + 120_000, start + 120_000, "MERGE", 0, "RUNNING", "d"),
+        ]))
+        const cost = await ask()
+        expect(historyLog.find((q) => q.includes("strpos") && !q.includes("run boundary"))).toContain("PENDING")
+        expect(cost.runs).toBeUndefined()
+        expect(cost.notes.join(" ")).toContain("A run still in progress was left out.")
+      })
+    })
+
+    test("an unread temporary CTAS into another dataset does not drop a complete run, one into its dataset does", async () => {
+      await withNow(async () => {
+        // The window is not full, so the boundary starts at the window's edge; place the unread CTAS just before it.
+        const edge = asOf - 30 * day
+        const rowsAtEdge = [row("m", edge + 300_000, edge + 360_000, "MERGE", TIB, "DONE", "dev")]
+        const unread = (dataset: string) => [["u", "a@x.com", iso(edge - 300_000), iso(edge - 60_000), "CREATE_TABLE_AS_SELECT", "orders__dbt_tmp", dataset]]
+        useAdapter(calls, answer(rowsAtEdge, unread("prod")))
+        expect((await ask()).runs).toBe(1)
+        resetDbtAdapter()
+        useAdapter(calls, answer(rowsAtEdge, unread("dev")))
+        expect((await ask()).basis).toBe("dry_run")
+      })
+    })
+  })
+
   const DBX_COLUMNS = ["statement_id", "session_id", "start_time", "end_time", "statement_type", "warehouse_id", "total_task_duration_ms", "dbus", "usd", "missing_hours"]
 
 })

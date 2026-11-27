@@ -64,7 +64,14 @@ describe("history SQL builders", () => {
     expect(sql).toContain(`creation_time > timestamp_millis(${WINDOW}) and creation_time <= timestamp_millis(${ASOF})`)
     expect(sql).toContain("parent_job_id is null")
     expect(sql).toContain("error_result is null")
-    expect(sql).toContain("upper(statement_type) in ('CREATE_TABLE_AS_SELECT','CREATE_TABLE','CREATE_VIEW','INSERT','MERGE','SCRIPT','DELETE','UPDATE')")
+    // No statement-type filter: a SELECT hook is billed and part of the invocation. The tool's own reads are excluded by their marker.
+    expect(sql).not.toContain("statement_type) in")
+    expect(sql).toContain("strpos(query, 'altimate_cost_read') = 0")
+    expect(sql).toContain("select /* altimate_cost_read */ job_id")
+    // The state is read, so a job still queued or running is known as such.
+    expect(sql).toContain("end_time, state, statement_type")
+    // Finished jobs, and those still queued or running, whose run is not complete.
+    expect(sql).toContain("(upper(state) = 'DONE' and error_result is null) or upper(state) in ('PENDING','RUNNING')")
     expect(sql).toContain(`strpos(query, '"node_id": "model.shop.orders"') > 0`)
     expect(sql).not.toMatch(/\blike\b/i)
     expect(sql).toContain("order by creation_time desc limit 500")
@@ -324,8 +331,10 @@ describe("BigQuery pricing", () => {
     const attached = priceBigquery([bq("d", 0, TIB, null, 0, "DELETE"), { ...bq("m", 0, TIB), creation_time: new Date(MIN / 2).toISOString() }], undefined, "model.s.m", {})
     expect(attached.cost.runs).toBe(1)
     expect(attached.cost.lastRun).toBe(12.5)
+    // Not within a minute of the build: the delete is not part of its run, and a delete alone is not a run.
     const apart = priceBigquery([bq("d", 0, TIB, null, 0, "UPDATE"), bq("m", 5, TIB)], undefined, "model.s.m", {})
-    expect(apart.cost.runs).toBe(2)
+    expect(apart.cost.runs).toBe(1)
+    expect(apart.cost.lastRun).toBe(6.25)
   })
 
   test("a CTAS and an INSERT post-hook 5 s later are one run, not a $6.25 run and a near-zero one", () => {
@@ -560,9 +569,12 @@ describe("run boundary", () => {
       bq("d", 0, TIB, null, 0, "DELETE", { user_email: "a@x.com" }),
       { ...bq("m", 0, TIB, null, 0, "MERGE", { user_email: "b@x.com" }), creation_time: new Date(20_000).toISOString() },
     ]
-    expect(priceBigquery(rows, undefined, "model.s.m", {}).cost.runs).toBe(2)
+    // The delete is another user's: it does not join the merge's run, and it makes none.
+    const other = priceBigquery(rows, undefined, "model.s.m", {}).cost
+    expect(other.runs).toBe(1)
+    expect(other.lastRun).toBe(6.25)
     const same = [{ ...rows[0], user_email: "b@x.com" }, rows[1]]
-    expect(priceBigquery(same, undefined, "model.s.m", {}).cost.runs).toBe(1)
+    expect(priceBigquery(same, undefined, "model.s.m", {}).cost.lastRun).toBe(12.5)
   })
 
   test("BigQuery: when the boundary alone leaves no run, the message says so rather than blaming bytes billed", () => {
@@ -594,10 +606,12 @@ describe("boundary SQL", () => {
     const sql = bigqueryBoundarySql({ project: "p", location: "EU", needle, view: "JOBS_BY_USER", window: w })
     expect(sql).toContain("`p`.`region-eu`.INFORMATION_SCHEMA.JOBS_BY_USER")
     expect(sql).toContain(`creation_time < timestamp_millis(${CUT + 1})`)
-    // Any matched job that ended within a minute before the cutoff can chain to a later run, by end time.
+    // Any matched job (a read too) that ended within a minute before the cutoff can chain to a later run, by end time.
     expect(sql).toContain(`end_time >= timestamp_millis(${CUT - 60_000})`)
-    expect(sql).toContain("upper(statement_type) in ('CREATE_TABLE_AS_SELECT','CREATE_TABLE','CREATE_VIEW','INSERT','MERGE','SCRIPT','DELETE','UPDATE')")
-    expect(sql).toContain("destination_table.table_id as destination_table_id")
+    expect(sql).not.toContain("statement_type) in")
+    expect(sql).toContain("strpos(query, 'altimate_cost_read') = 0")
+    // The identity the main grouping pairs on: the destination table and dataset.
+    expect(sql).toContain("destination_table.table_id as destination_table_id, destination_table.dataset_id as destination_dataset_id")
     expect(sql).toContain("user_email")
     // And the CTAS into dbt's temporary relation that ended within ten minutes before it.
     expect(sql).toContain("upper(statement_type) = 'CREATE_TABLE_AS_SELECT' and ends_with(destination_table.table_id, '__dbt_tmp')")
@@ -609,11 +623,11 @@ describe("boundary SQL", () => {
   })
 
   test("the boundary query returns the id of each statement, so the ones already read can be excluded", () => {
-    expect(bigqueryBoundarySql({ project: "p", needle: "n", window: boundaryWindow(1) })).toContain("select /* run boundary */ job_id")
+    expect(bigqueryBoundarySql({ project: "p", needle: "n", window: boundaryWindow(1) })).toContain("select /* run boundary */ /* altimate_cost_read */ job_id")
   })
 
   test("the BigQuery history reads the job's user, which a delete must share with the build it joins", () => {
-    expect(bigqueryHistorySql({ project: "p", needle: "n", asOfMs: ASOF })).toContain("select job_id, user_email,")
+    expect(bigqueryHistorySql({ project: "p", needle: "n", asOfMs: ASOF })).toContain("job_id, user_email,")
     expect(bigqueryHistorySql({ project: "p", needle: "n", asOfMs: ASOF })).toContain("destination_table.table_id as destination_table_id")
   })
 
@@ -762,6 +776,109 @@ describe("review follow-ups: rates, location, ephemeral and pricing mode", () =>
     const reverse = priceBigquery([bq("a", 0, null, "res-1", 3_600_000), bq("b", 10, TIB)], undefined, "model.s.m", {})
     expect(reverse.cost.notes.join(" ")).toContain("The newest run was on demand and older ones in a reservation")
     expect(priceBigquery([bq("a", 0, TIB), bq("b", 10, TIB)], undefined, "model.s.m", {}).cost.notes.join(" ")).not.toContain("newest run")
+  })
+})
+
+describe("review follow-ups: read-only hooks, boundary identity and unfinished runs", () => {
+  const C3 = 9_000 * MIN
+  const at = (min: number) => new Date(C3 + min * MIN).toISOString()
+  const job = (id: string, startMin: number, durMin: number, billed: number | null, type: string, extra: Row = {}): Row => ({
+    ...bq(id, 0, billed, null, 0, type, extra),
+    creation_time: at(startMin),
+    end_time: at(startMin + durMin),
+  })
+  const ds = (row: Row, dataset: string): Row => ({ ...row, destination_dataset_id: dataset })
+  const tmp = (id: string, startMin: number, dataset: string) =>
+    ds(job(id, startMin, 1, TIB, "CREATE_TABLE_AS_SELECT", { destination_table_id: "orders__dbt_tmp" }), dataset)
+
+  test("a SELECT hook is billed and part of the invocation: a CTAS and a SELECT 5 s later are one run of both costs", () => {
+    const rows = [
+      job("c", 0, 1, TIB, "CREATE_TABLE_AS_SELECT", { destination_table_id: "orders" }),
+      { ...job("s", 1, 0.1, TIB, "SELECT"), creation_time: new Date(C3 + MIN + 5_000).toISOString(), end_time: new Date(C3 + 2 * MIN).toISOString() },
+    ]
+    const { cost } = priceBigquery(rows, undefined, "model.s.m", {})
+    expect(cost.runs).toBe(1)
+    expect(cost.lastRun).toBeCloseTo(12.5, 10)
+  })
+
+  test("a group of reads only (dbt show) is not a run and is not priced", () => {
+    const { cost } = priceBigquery([job("s1", 0, 1, TIB, "SELECT"), job("s2", 1, 1, TIB, "SELECT")], undefined, "model.s.m", {}, undefined, { location: locationNote("EU") })
+    expect(cost.basis).toBe("none")
+    expect(cost.unknownReason).toContain("only read data")
+    expect(cost.unknownReason).toContain("region-eu")
+    // Beside a build run, reads of another invocation are not counted as one.
+    const mixed = priceBigquery([job("m", 0, 1, TIB, "MERGE"), job("s", 30, 1, 5 * TIB, "SELECT")], undefined, "model.s.m", {}).cost
+    expect(mixed.runs).toBe(1)
+    expect(mixed.lastRun).toBe(6.25)
+  })
+
+  test("an unread job of any type, SELECT included, that ended within a minute before a run may belong to it", () => {
+    const rows = [job("m", 5, 1, TIB, "MERGE")]
+    const stmt = { user: "a@x.com", start: C3 - 3 * MIN, end: C3 + 4.5 * MIN }
+    expect(priceBigquery(rows, undefined, "model.s.m", {}, { cutoff: C3, stmts: [stmt] }).cost.basis).toBe("none")
+  })
+
+  test("a temporary CTAS in the boundary is evidence only for a final build into its own dataset", () => {
+    // The prod CTAS ended a minute before the cutoff; the dev MERGE starts five minutes after it. Same user.
+    const rows = [ds(job("m", 5, 1, TIB, "MERGE"), "dev")]
+    const run = (dataset: string) =>
+      priceBigquery(rows, undefined, "model.s.m", {}, { cutoff: C3, stmts: [{ user: "a@x.com", start: C3 - 5 * MIN, end: C3 - MIN, tmp: true, dataset }] }).cost
+    // Another dataset: it could not have been this MERGE's relation, so the complete run stays.
+    expect(run("prod").runs).toBe(1)
+    expect(run("dev").basis).toBe("none")
+    // A MERGE that names no dataset (a script's) keeps the user-and-time rule.
+    const unnamed = [job("m", 5, 1, TIB, "MERGE")]
+    expect(priceBigquery(unnamed, undefined, "model.s.m", {}, { cutoff: C3, stmts: [{ user: "a@x.com", start: C3 - 5 * MIN, end: C3 - MIN, tmp: true, dataset: "prod" }] }).cost.basis).toBe("none")
+  })
+
+  test("a run with a job still running is left out, and the note says so", () => {
+    const asOf = C3 + 20 * MIN
+    const rows = [
+      tmp("t", 0, "d"),
+      { ...ds(job("m", 3, 1, null, "MERGE"), "d"), state: "RUNNING", end_time: null },
+      job("old", -600, 1, TIB, "MERGE"),
+    ]
+    const { cost } = priceBigquery(rows, undefined, "model.s.m", {}, undefined, { asOfMs: asOf })
+    expect(cost.runs).toBe(1)
+    expect(cost.lastRun).toBe(6.25)
+    expect(cost.notes).toContain("A run still in progress was left out.")
+    // Without the finished CTAS being priced alone as a $6.25 run.
+    expect(cost.highest).toBe(6.25)
+  })
+
+  test("a pending job counts whatever its end time says, and an only-in-progress history is none", () => {
+    const pending = { ...job("m", 0, 1, TIB, "MERGE"), state: "PENDING" }
+    const { cost } = priceBigquery([pending], undefined, "model.s.m", {}, undefined, { asOfMs: C3 + 1000 * MIN })
+    expect(cost.basis).toBe("none")
+    expect(cost.unknownReason).toContain("still in progress")
+    // No instant given (older callers): a pending job still never closes.
+    expect(priceBigquery([pending], undefined, "model.s.m", {}).cost.basis).toBe("none")
+  })
+
+  test("a run whose last job ended within a minute of the instant read may not be over: left out; a minute earlier it is whole", () => {
+    const run = (endAgoMs: number) =>
+      priceBigquery([job("m", 0, 1, TIB, "MERGE")], undefined, "model.s.m", {}, undefined, { asOfMs: C3 + MIN + endAgoMs }).cost
+    expect(run(30_000).basis).toBe("none")
+    expect(run(30_000).notes).toContain("A run still in progress was left out.")
+    expect(run(60_000).basis).toBe("none")
+    expect(run(60_001).runs).toBe(1)
+  })
+
+  test("one run that mixes pricing modes (a script's children) does not claim older runs differ", () => {
+    const script = job("s", 0, 1, null, "SCRIPT")
+    const kid = (id: string, reservation: string | null, slotMs: string): Row => ({ job_id: id, parent_job_id: "s", creation_time: at(0.1), statement_type: "MERGE", total_bytes_billed: String(TIB), total_slot_ms: slotMs, reservation_id: reservation, cache_hit: "False" })
+    const { cost } = priceBigquery([script], [kid("k1", null, "0"), kid("k2", "res", "3600000")], "model.s.m", {})
+    expect(cost.runs).toBe(1)
+    expect(cost.notes.join(" ")).toContain("Some runs ran in a reservation")
+    expect(cost.notes.join(" ")).not.toContain("newest run")
+  })
+
+  test("two runs in progress are counted in one note", () => {
+    const asOf = C3 + 100 * MIN
+    const rows = [job("a", 98, 1, TIB, "MERGE"), { ...job("b", 0, 1, TIB, "MERGE", { user_email: "b@x.com" }), state: "RUNNING" }, job("c", -600, 1, TIB, "MERGE")]
+    const { cost } = priceBigquery(rows, undefined, "model.s.m", {}, undefined, { asOfMs: asOf })
+    expect(cost.runs).toBe(1)
+    expect(cost.notes).toContain("2 runs still in progress were left out.")
   })
 })
 
