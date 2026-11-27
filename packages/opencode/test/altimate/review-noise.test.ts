@@ -351,6 +351,28 @@ describe("summary grouping and budget", () => {
     expect(renderSummary(env, { maxChars: Infinity })).toContain("column_number_299)")
   })
 
+  test("a grouped bullet is no larger than a single one: model list, body and detail are capped together", () => {
+    // Nine long-named models, each with a long title, a long body and its own long values.
+    const fs = Array.from({ length: 9 }, (_, i) => {
+      const model = `model_${i}_${"m".repeat(60)}`
+      return finding({
+        severity: "critical",
+        category: "pii_exposure",
+        model,
+        file: `models/marts/${model}.sql`,
+        title: `${model}: exposes PII columns (${Array.from({ length: 40 }, (_, k) => `col_${k}`).join(", ")})`,
+        body: ["a", "b", "c"].map((x) => `\`${x}_${i}_${"y".repeat(40)}\``).join(", ") + " are exposed. " + "Confirm masking. ".repeat(60),
+      })
+    })
+    const md = renderSummary(buildEnvelope({ findings: fs, tier: "full", mode: "gate" }))
+    const start = md.indexOf("- **")
+    const bullet = md.slice(start, md.indexOf("</sub>", start) + "</sub>".length)
+    expect(bullet).toContain("9 findings across 9 model(s)")
+    expect(bullet.length).toBeLessThanOrEqual(1200)
+    expect((bullet.match(/`/g) ?? []).length % 2).toBe(0)
+    expect(md.length).toBeLessThanOrEqual(SUMMARY_BUDGET_CHARS)
+  })
+
   test("a critical that does not fit stops the listing: no later, shorter finding jumps ahead of it", () => {
     // Twelve criticals with long bodies (each clipped, still ~700 chars) cannot
     // all fit; the short suggestions after them must not be listed instead.

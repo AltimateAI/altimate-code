@@ -226,6 +226,9 @@ const BULLET_BODY_MAX = 600
 // As for the title (a wide model's PII title lists every column), so a single
 // bullet always fits the room the capped notes leave.
 const BULLET_TITLE_MAX = 200
+// A grouped bullet's model list; its body and per-model detail share
+// BULLET_BODY_MAX, so a grouped bullet is no larger than a single one.
+const BULLET_NAMES_MAX = 200
 
 /** `clip`, never ending inside a code span: an unpaired backtick is cut back. */
 function clipTitle(text: string, max: number): string {
@@ -258,27 +261,32 @@ function bulletsFor(items: Finding[], group: boolean): Array<{ text: string; cou
     // (e.g. two different columns) are distinct issues and stay separate bullets.
     const names = [...new Set(g.map((f) => f.model ?? f.file))]
     if (group && names.length >= GROUP_MIN_MODELS) {
-      const shown = names.slice(0, 8).map((n) => `\`${n}\``).join(", ")
-      const more = names.length > 8 ? ` (+${names.length - 8} more)` : ""
-      // Show a body verbatim only when every member says exactly that;
-      // otherwise its names belong to one model, so show the blanked form.
-      const same = g.every((f) => f.body === g[0].body)
-      const body = bodyOf(same ? oneLine(g[0].body) : blankNames(oneLine(g[0].body)))
+      const listed = takeWhole(
+        names.slice(0, 8).map((n) => `\`${n}\``),
+        BULLET_NAMES_MAX,
+        ", ",
+      )
+      const shown = listed.join(", ")
+      const more = names.length > listed.length ? `${listed.length ? " " : ""}(+${names.length - listed.length} more)` : ""
       // Members that differ by more than their model (another function, a second
       // column on one model): list each member's own values.
       const values = g.map((f) => ({ f, v: distinguishingValues(f) }))
       const differ = values.some(({ v }) => v.join("\u0000") !== values[0].v.join("\u0000"))
-      // Whole entries that fit the body budget, so a cut never lands inside a
-      // code span or drops the count of the rest.
+      const hasDetail = differ && values.some(({ v }) => v.length)
+      // Show a body verbatim only when every member says exactly that;
+      // otherwise its names belong to one model, so show the blanked form. With
+      // a per-model detail the body takes half the budget and the detail the rest.
+      const same = g.every((f) => f.body === g[0].body)
+      const bodyText = same ? oneLine(g[0].body) : blankNames(oneLine(g[0].body))
+      const body = hasDetail ? clip(bodyText, BULLET_BODY_MAX / 2) : bodyOf(bodyText)
+      // Whole entries that fit, so a cut never lands inside a code span or drops
+      // the count of the rest.
       const entries = values
         .slice(0, 8)
         .map(({ f, v }) => `\`${f.model ?? f.file}\`: ${v.map((x) => `\`${x}\``).join(", ") || "—"}`)
-      const kept = takeWhole(entries, BULLET_BODY_MAX, " · ")
+      const kept = takeWhole(entries, BULLET_BODY_MAX - body.length, " · ")
       const rest = values.length - kept.length
-      const detail =
-        differ && values.some(({ v }) => v.length)
-          ? `  ${kept.join(" · ")}${rest ? `${kept.length ? " " : ""}(+${rest} more)` : ""}  \n`
-          : ""
+      const detail = hasDetail ? `  ${kept.join(" · ")}${rest ? `${kept.length ? " " : ""}(+${rest} more)` : ""}  \n` : ""
       const unverified = g.some((f) => f.degraded) ? " · _unverified_" : ""
       out.push({
         text:
