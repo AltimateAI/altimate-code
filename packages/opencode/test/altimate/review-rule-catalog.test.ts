@@ -5,6 +5,7 @@ import {
   inputFromExample,
   finalOutputs,
   rawColumnExposures,
+  refCovered,
   selectItemColumns,
 } from "../../src/altimate/review/rule-catalog"
 
@@ -153,6 +154,20 @@ describe("rawColumnExposures", () => {
       e: ["customers.ssn"],
       f: [],
     })
+  })
+  test("`starRaw` resolves a column a plain `*` passes through", () => {
+    expect([...finalOutputs("select * from customers").starRaw("ssn")]).toEqual(["customers.ssn"])
+    expect([...finalOutputs("select c.* from customers c join orders o on true").starRaw("ssn")]).toEqual(["customers.ssn"])
+    // A CTE that masks it exposes nothing raw through `*`.
+    const masked = "with m as (select customer_id, sha2(ssn) as ssn from customers) select * from m"
+    expect([...finalOutputs(masked).starRaw("ssn")]).toEqual([])
+  })
+  test("`refCovered` matches an unqualified column over a join to its single-table ref", () => {
+    expect(refCovered("customers|orders.email", new Set(["customers.email"]))).toBe(true)
+    expect(refCovered("customers.email", new Set(["customers|orders.email"]))).toBe(true)
+    expect(refCovered("customers|orders.email", new Set(["spouses.email"]))).toBe(false)
+    expect(refCovered("customers|orders.email", new Set(["customers.ssn"]))).toBe(false)
+    expect(refCovered("a|b.email", new Set(["b|c.email"]))).toBe(false)
   })
   test("ignores commas and keywords inside literals and comments", () => {
     const sql = "select ssn as a, -- , email as a\n  'x, from y' as b, email as c from t"

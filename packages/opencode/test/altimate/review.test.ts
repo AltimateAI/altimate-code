@@ -2507,6 +2507,51 @@ describe("orchestrate", () => {
     for (const { env } of quiet) expect(env.findings.filter((f) => f.category === "pii_exposure")).toEqual([])
   })
 
+  test("expanding a base `select *` into explicit columns is not new exposure", async () => {
+    // detectPii sees the table's columns through `*`, as the real engine does with a schema.
+    const PII = ["email", "ssn"]
+    const runner: ReviewRunner = {
+      ...piiRunner(PII),
+      async detectPii(sql: string) {
+        return { columns: PII.filter((c) => sql.includes(c) || /select\s+\*\s+from\s+customers/i.test(sql)) }
+      },
+    }
+    const base = "select * from customers"
+    const run = (head: string, reviewers: string[]) =>
+      runReview({
+        changedFiles: MARTS.map((path) => ({
+          path,
+          status: "modified" as const,
+          diff: `-${base}\n${head
+            .split("\n")
+            .map((l) => `+${l}`)
+            .join("\n")}\n`,
+        })),
+        config: { ...DEFAULT_REVIEW_CONFIG, reviewers },
+        rubric: DEFAULT_RUBRIC,
+        mode: "gate",
+        runner,
+        getContent: content(head, base),
+      })
+    const expanded = "select customer_id,\n  email,\n  ssn\nfrom customers"
+    for (const reviewers of [["pii_exposure"], [], ["dbt_patterns"]]) {
+      const env = await run(expanded, reviewers)
+      expect({ reviewers, pii: env.findings.filter((f) => f.category === "pii_exposure") }).toEqual({ reviewers, pii: [] })
+      expect(env.verdict).not.toBe("REQUEST_CHANGES")
+    }
+    // Control: the same columns read from a different table are new.
+    const env = await run("select customer_id,\n  email,\n  ssn\nfrom spouses", ["pii_exposure"])
+    const broad = env.findings.filter((f) => f.evidence?.tool === "schema.detect_pii")
+    expect(broad.map((f) => (f.evidence?.result as any)?.columns)).toEqual([["email", "ssn"], ["email", "ssn"], ["email", "ssn"]])
+  })
+
+  test("adding a join does not make an unqualified PII column look new", async () => {
+    const base = "select customer_id,\n  email\nfrom customers"
+    const head = "select customer_id,\n  email\nfrom customers\njoin orders using (customer_id)"
+    for (const { reviewers, env } of await piiRuns(head, base, "+join orders using (customer_id)\n", ["email"]))
+      expect({ reviewers, pii: env.findings.filter((f) => f.category === "pii_exposure") }).toEqual({ reviewers, pii: [] })
+  })
+
   test("a qualified reference resolves through its own source, not any CTE with that column", async () => {
     // Base reads `home_address` masked from CTE `m`; head reads it raw from `customers c`.
     const base = [

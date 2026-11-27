@@ -515,6 +515,10 @@ export interface FinalOutputs {
   names: Set<string>
   /** The final projection has a plain `*`, so it also passes through unnamed columns. */
   passthrough: boolean
+  /** The `source.column` refs the final projection's plain `*` items expose raw
+   *  for a column they pass through unnamed (`select * from customers` →
+   *  `ssn: {customers.ssn}`; a CTE that masks it → none). */
+  starRaw: (column: string) => Set<string>
   /** Per output name, a signature of how it is computed: the item text (string
    *  literals included) plus the full text of every CTE or subquery its select
    *  reads. Equal signatures on two sides mean the name is computed the same way. */
@@ -554,6 +558,30 @@ export function rawColumnExposures(sql: string): Map<string, Set<string>> {
 }
 
 let unresolvedRefs = 0
+
+const splitRef = (ref: string) => {
+  const dot = ref.lastIndexOf(".")
+  return { tables: ref.slice(0, dot).split("|"), column: ref.slice(dot + 1) }
+}
+
+/**
+ * `ref` is one of the `exposed` source columns. An unqualified column read over
+ * several tables (`customers|orders.email`, see `rawColumnExposures`) comes from
+ * exactly one of them (the query would be ambiguous otherwise), so it matches a
+ * single-table ref to one of its members, and the reverse. Two combined refs
+ * match only when equal.
+ */
+export function refCovered(ref: string, exposed: Set<string>): boolean {
+  if (exposed.has(ref)) return true
+  const r = splitRef(ref)
+  for (const e of exposed) {
+    const x = splitRef(e)
+    if (x.column !== r.column) continue
+    if (r.tables.length > 1 && x.tables.length === 1 && r.tables.includes(x.tables[0])) return true
+    if (r.tables.length === 1 && x.tables.length > 1 && x.tables.includes(r.tables[0])) return true
+  }
+  return false
+}
 
 /** The model's final output: every name it resolves, the source columns each
  *  exposes raw (as `rawColumnExposures`), and how each is computed. */
@@ -665,7 +693,9 @@ export function finalOutputs(sql: string): FinalOutputs {
     return result
   }
   const { raw, names, signatures, reads, stars } = resolve(ROOT_SCOPE, new Set())
-  return { raw, names, signatures, reads, passthrough: stars.length > 0 }
+  const starRaw = (column: string) =>
+    union(stars.map((st) => resolveRef(ROOT_SCOPE, st.branch, st.qualifier, column, new Set())))
+  return { raw, names, signatures, reads, passthrough: stars.length > 0, starRaw }
 }
 
 /** A diff line with comments and whitespace normalised (and a leading/trailing

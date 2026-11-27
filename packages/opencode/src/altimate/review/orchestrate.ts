@@ -19,6 +19,7 @@ import {
   type SelectItem,
   type SelectItemColumn,
   finalOutputs,
+  refCovered,
   normalizeSelectLine,
   selectItems,
 } from "./rule-catalog"
@@ -1237,13 +1238,22 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     }
     return parsed
   }
-  // `source.column` refs the base exposed raw under a name its PII detection reported.
+  // `source.column` refs the base exposed raw under a name its PII detection
+  // reported: named in its final select, or passed through its plain `*`
+  // (`select * from customers` exposes `customers.ssn` when `ssn` is base PII).
+  const baseRawPiiByFile = new Map<string, Set<string>>()
   const baseRawPii = (file: string) => {
+    const cached = baseRawPiiByFile.get(file)
+    if (cached) return cached
     const basePii = basePiiColumnsByFile.get(file)
     const refs = new Set<string>()
     if (!basePii) return refs
-    const raw = outputs(file, "old").raw
-    for (const name of basePii) for (const ref of raw.get(name) ?? []) refs.add(ref)
+    const base = outputs(file, "old")
+    for (const name of basePii) {
+      for (const ref of base.raw.get(name) ?? []) refs.add(ref)
+      if (!base.names.has(name) && base.passthrough) for (const ref of base.starRaw(name)) refs.add(ref)
+    }
+    baseRawPiiByFile.set(file, refs)
     return refs
   }
   // A regex twin's SOURCE column (`ssn`, with its output alias when it has one) is
@@ -1258,7 +1268,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     const refs = [...(outputs(file, "new").raw.get(alias ?? column) ?? [])].filter((r) => r.endsWith(`.${column}`))
     if (!refs.length) return false
     const exposed = baseRawPii(file)
-    return refs.every((r) => exposed.has(r))
+    return refs.every((r) => refCovered(r, exposed))
   }
   // A head PII output name the base already exposed. When the head selects a
   // column raw under it, the base must expose that same source column raw (base
@@ -1275,14 +1285,14 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     const rawColumns = head.raw.get(name)
     if (rawColumns?.size) {
       const exposed = baseRawPii(file)
-      return [...rawColumns].every((ref) => exposed.has(ref))
+      return [...rawColumns].every((ref) => refCovered(ref, exposed))
     }
     if (!basePii.has(name)) return false
     const base = outputs(file, "old")
     if (head.names.has(name)) {
       const exposed = baseRawPii(file)
       const reads = head.reads.get(name)
-      if (reads && [...reads].every((ref) => exposed.has(ref))) return true
+      if (reads && [...reads].every((ref) => refCovered(ref, exposed))) return true
       const baseSigs = base.signatures.get(name)
       return !!baseSigs && [...(head.signatures.get(name) ?? [])].every((sig) => baseSigs.has(sig))
     }
