@@ -969,6 +969,25 @@ describe("dbt_cost_estimate cost", () => {
     }
   })
 
+  test.each([
+    ["an error", async () => { throw new Error("Encountered an error:\nbackend error: quota exceeded") }],
+    ["a timeout", () => new Promise<string>(() => {})],
+  ])("when the boundary read fails (%s), no run is priced and the scan figure stays", async (name, boundary) => {
+    if (name === "a timeout") costHistoryInternals.historyTimeoutMs = 200
+    useAdapter(calls, {
+      history: bigqueryHistory([job("a", "2026-05-02 10:00:00+00:00", "2026-05-02 10:01:00+00:00", TIB)]),
+      boundary,
+    })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders", history: true }, ctx)
+    const cost = result.metadata.cost
+    expect(result.metadata).toMatchObject({ success: true, bytes: Math.round(4.2 * TIB), display: "4.2 TiB" })
+    expect(cost.runs).toBeUndefined()
+    expect(cost.lastRun).toBeUndefined()
+    // The reason is the unknownReason, or a note when the dry run could still be priced.
+    expect([cost.unknownReason, ...cost.notes].join(" ")).toContain("could not check for runs still in progress: ")
+    expect(result.output).not.toContain("Cost from")
+  })
+
   describe("unfinished runs and boundary identity through the tool", () => {
     const asOf = Date.UTC(2026, 5, 1, 20, 0, 0)
     const iso = (ms: number) => new Date(ms).toISOString()

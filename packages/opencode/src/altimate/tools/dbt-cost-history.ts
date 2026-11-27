@@ -749,6 +749,9 @@ export function costText(c: CostInfo, shown = "the bytes it reports"): string {
 
 // ---- Reading the history ----
 
+/** The boundary read failed: runs still in progress or cut by the period's start cannot be told apart from whole ones. */
+class BoundaryUnreadable extends Error {}
+
 /** Test seams. */
 export const costHistoryInternals = {
   /** How long the history queries together wait for the warehouse; a slower one is no history, and the scan figure stands. */
@@ -855,8 +858,8 @@ export async function loadHistory(input: {
           })),
       }
     } catch (e) {
-      if (signal.aborted) throw e
-      return { cutoff }
+      // Not knowing which runs are still going or were cut, no run can be vouched for: the history is unknown.
+      throw signal.aborted ? e : new BoundaryUnreadable(message(e))
     }
   }
   try {
@@ -913,9 +916,18 @@ export async function loadHistory(input: {
         ? (await read((view) => bigqueryChildrenSql({ project, location, parents, sinceMs, view }))).rows
         : undefined
       // The boundary is read from the view the history came from.
-      const boundary = await boundaryFor(history.rows, (window) =>
-        bigqueryBoundarySql({ project, location, needle: needleFor(id), view: history.view, window }),
-      )
+      let boundary: Boundary | undefined
+      try {
+        boundary = await boundaryFor(history.rows, (window) =>
+          bigqueryBoundarySql({ project, location, needle: needleFor(id), view: history.view, window }),
+        )
+      } catch (e) {
+        if (!(e instanceof BoundaryUnreadable)) throw e
+        return {
+          cost: none(`could not check for runs still in progress: ${errorDetail(e.message)}.`),
+          capacity: history.rows.some((r) => r.reservation_id) ? true : pricing,
+        }
+      }
       ;({ cost, reserved } = priceBigquery(history.rows, children, uniqueId, cfg, boundary, { materialized, location: where, asOfMs }))
       if (history.own) cost.notes.push("Only your own runs were read: the role cannot list every user's jobs.")
       if (cost.basis === "history" && reserved && pricing === false)
