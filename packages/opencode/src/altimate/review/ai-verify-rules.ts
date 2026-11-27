@@ -15,6 +15,11 @@ const log = Log.create({ service: "ai-verify-rules" })
 
 export const NO_RULE_FINDINGS_REASON = "nothing to verify: the PR has no rule findings"
 
+/** Rule findings verified per PR at most (`ALTIMATE_REVIEW_AI_VERIFY_RULES_MAX_FINDINGS`): the run
+ *  has its own verifier budget and each batch of 8 makes at least one call, so this bounds its
+ *  calls. Findings past it, most severe first, get no verdict and are posted unchanged. */
+export const RULE_VERIFY_MAX_FINDINGS = 40
+
 /** A verifier record for a run that made no model call: its `findings` are all kept, unreviewed (fail-open). */
 export function skippedVerifier(reason: string, findings = 0): VerifierStatus {
   return {
@@ -54,10 +59,18 @@ export async function runRuleVerify(
   } catch (err) {
     return skip(`no usable model: ${safeReason(err)}`)
   }
-  log.info("verifying rule findings", { findings: rules.length })
+  const max = Number(env.ALTIMATE_REVIEW_AI_VERIFY_RULES_MAX_FINDINGS)
+  const cap = Number.isInteger(max) && max > 0 ? max : RULE_VERIFY_MAX_FINDINGS
+  // Most severe first, so the warnings the policy acts on are verified before suggestions.
+  const order = { critical: 2, warning: 1, suggestion: 0 } as const
+  const sent = [...rules].sort((a, b) => order[b.severity] - order[a.severity]).slice(0, cap)
+  log.info("verifying rule findings", { findings: sent.length, total: rules.length })
   const v = await runAiVerify(
-    { findings: rules, grounding: input.grounding, evidence: input.evidence, model, rulesOnly: true },
+    { findings: sent, grounding: input.grounding, evidence: input.evidence, model, rulesOnly: true },
     { env, ...(deps.llm ? { llm: deps.llm } : {}) },
   )
-  return done({ state: "ok", model: `${model.providerID}/${model.id}`, verifier: v.status })
+  const over = rules.length - sent.length
+  const note = `${over} of ${rules.length} rule findings over the per-PR ceiling of ${cap} were not verified`
+  const verifier = over ? { ...v.status, reason: v.status.reason ? `${v.status.reason}; ${note}` : note } : v.status
+  return done({ state: "ok", model: `${model.providerID}/${model.id}`, verifier })
 }

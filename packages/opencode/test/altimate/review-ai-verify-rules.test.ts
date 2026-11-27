@@ -530,7 +530,16 @@ describe("round 2: the rule verifier runs only after a finder that answered, und
     expect(llm).not.toHaveBeenCalled()
   })
 
-
+  test("at most 40 rule findings are verified per PR (env override); the rest keep no verdict", async () => {
+    scriptModels([], /x/)
+    const rules = Array.from({ length: 50 }, (_, i) => ruleFinding(i))
+    const capped = await runRuleVerify({ files: [FILE], grounding: [], evidence: evidence() }, rules)
+    expect(capped.status.verifier?.ruleVerdicts).toHaveLength(40)
+    expect(capped.status.verifier?.reason).toContain("10 of 50")
+    const env = { ALTIMATE_REVIEW_AI_VERIFY_RULES_MAX_FINDINGS: "8" }
+    const small = await runRuleVerify({ files: [FILE], grounding: [], evidence: evidence() }, rules, { env })
+    expect(small.status.verifier?.ruleVerdicts).toHaveLength(8)
+  })
 })
 
 describe("round 2: credential-like paths", () => {
