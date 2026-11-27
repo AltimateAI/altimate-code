@@ -79,10 +79,15 @@ export function stripAggFilter(sql: string): string {
  */
 export function stripSql(sql: string): string {
   // A quoted name ("a--b", `c/*d`, [e--f]) is kept whole, so comment marks inside it start no comment.
+  // Postgres's escape string (E'it\'s') ends at an unescaped quote, not at a backslash-escaped one.
   return sql.replace(
-    /"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[(?:[^\]]|\]\])*\]|'(?:[^']|'')*'|\$([A-Za-z_]\w*)?\$[\s\S]*?\$\1\$|--[^\r\n]*|\/\*[\s\S]*?\*\//g,
+    /"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[(?:[^\]]|\]\])*\]|(?<![\w$])[eE]'(?:[^'\\]|\\[\s\S]|'')*'|'(?:[^']|'')*'|\$([A-Za-z_]\w*)?\$[\s\S]*?\$\1\$|--[^\r\n]*|\/\*[\s\S]*?\*\//g,
     (match) =>
-      match.startsWith('"') || match.startsWith("`") || match.startsWith("[") ? match : match.startsWith("'") || match.startsWith("$") ? "''" : " ",
+      match.startsWith('"') || match.startsWith("`") || match.startsWith("[")
+        ? match
+        : /^(?:[eE]?'|\$)/.test(match)
+          ? "''"
+          : " ",
   )
 }
 
@@ -92,7 +97,7 @@ export function hasNestedWith(sql: string): boolean {
 }
 
 const ENGINE_NAME = /^_(?:col_)?\d+$/i
-const COLUMNS_CALL = /(?<![\w$])columns\s*\(/i
+const COLUMNS_CALL = /(?<![\p{L}\p{N}_$])columns\s*\(/iu
 
 /**
  * The engine's own name for an unaliased expression in a SELECT list (`_1`, `_col_1`): not the warehouse's
@@ -112,8 +117,16 @@ function namesItsOutputs(outputs: string[]): boolean {
   return names.length > 0 && new Set(names).size === names.length
 }
 
-const QUOTED = '"(?:[^"]|"")*"|`[^`]*`|\\[[^\\]]*\\]'
-const unquoteName = (name: string) => name.replace(/^["`[]|["`\]]$/g, "").toLowerCase()
+const QUOTED = '"(?:[^"]|"")*"|`(?:[^`]|``)*`|\\[(?:[^\\]]|\\]\\])*\\]'
+/** A name's text, lower-cased; a quoted one loses its quotes and unescapes only its own doubled quote (`"a""b"` is a"b). */
+function unquoteName(name: string): string {
+  const q = name[0]
+  if (q === '"' || q === "`") return name.slice(1, -1).replaceAll(q + q, q).toLowerCase()
+  if (q === "[") return name.slice(1, -1).replaceAll("]]", "]").toLowerCase()
+  return name.toLowerCase()
+}
+/** A name's characters, unquoted: letters and digits in any script, `_` and `$`. */
+const NAME = "[\\p{L}\\p{N}_$]"
 
 /**
  * The items of the SQL's outermost SELECT list (the first one outside parentheses, so after any WITH), split at
@@ -131,8 +144,9 @@ export function selectItems(stripped: string): string[] {
     if (ch === "(") depth++
     else if (ch === ")") depth--
     if (depth !== 0) continue
-    const word = /^[a-z_]+/i.exec(text.slice(i))?.[0]?.toLowerCase()
-    const boundary = i === 0 || !/[\w$]/.test(text[i - 1]!)
+    // A keyword is a whole name: `from` inside `éfrom` or `fromage` ends no list.
+    const word = /^[\p{L}\p{N}_$]+/u.exec(text.slice(i))?.[0]?.toLowerCase()
+    const boundary = i === 0 || !/[\p{L}\p{N}_$]/u.test(text[i - 1]!)
     if (start < 0) {
       if (boundary && word === "select") {
         start = i + 6
@@ -154,27 +168,42 @@ export function selectItems(stripped: string): string[] {
   return items.filter((one) => one !== "")
 }
 
-/** Words that end an expression (`x is null`, `case … end`) rather than alias it. */
-const ENDS_EXPRESSION = /^(?:null|true|false|end)$/i
-/** Words after which the next word is an operand (`a and b`, `sum(x) over w`), not an alias. */
-const TAKES_OPERAND = /^(?:and|or|not|is|in|like|ilike|rlike|regexp|similar|to|between|case|when|then|else|over|collate|escape|interval|distinct|by|as|at|zone|any|all|some|exists|div|mod|xor)$/i
+/** Words that join, compare or qualify operands (`a and b`, `x is null`, `sum(x) over w`): never an alias, never a type. */
+const OPERATOR_WORDS = ["and", "or", "not", "is", "isnull", "notnull", "in", "like", "ilike", "rlike", "regexp", "similar",
+  "between", "case", "when", "then", "else", "over", "filter", "collate", "escape", "div", "mod", "xor", "any", "all", "some", "exists"]
+/** Literal words: they end an expression (`x is null`, `case … end`), and a bare one is no column. */
+const LITERAL_WORDS = ["null", "true", "false", "end"]
+const wordList = (list: string[]) => new RegExp(`^(?:${list.join("|")})$`, "i")
+/** Words that end an expression rather than alias it. */
+const ENDS_EXPRESSION = wordList(LITERAL_WORDS)
+/** Words after which the next word is an operand, not an alias: the operators, and words that take one (`interval`, `at time zone`). */
+const TAKES_OPERAND = wordList([...OPERATOR_WORDS, "to", "interval", "distinct", "by", "as", "at", "zone"])
+/** Words a type name never holds: an item with one after `::` is more than a cast (`amount::numeric is not null`). */
+const NOT_TYPE = wordList([...OPERATOR_WORDS, ...LITERAL_WORDS, "as", "at"])
+/** An interval's fields: after a complete interval literal (`interval '1' day`) the word is part of it, not an alias. */
+const INTERVAL_FIELD = /^(?:year|month|week|day|hour|minute|second|millisecond|microsecond|quarter|decade|century|millennium)s?$/i
 
 /**
  * A SELECT item's output name when the SQL gives one (`x as name`, `x name`, a bare `t.col`), `*` for a star,
  * else null.
  */
 export function itemName(item: string): string | null {
-  if (/^(?:[\w$]+\.)*\*(?:\s|$)/.test(item)) return "*"
-  const as = new RegExp(`\\s+as\\s+(${QUOTED}|[\\w$]+)$`, "i").exec(item)
+  const part = `(?:${QUOTED}|${NAME}+)`
+  if (new RegExp(`^(?:${part}\\.)*\\*(?:\\s|$)`, "u").test(item)) return "*"
+  const as = new RegExp(`\\s+as\\s+(${part})$`, "iu").exec(item)
   if (as) return unquoteName(as[1]!)
-  const bare = new RegExp(`^(?:(?:${QUOTED}|[\\w$]+)\\.)*(${QUOTED}|[\\w$]+)$`).exec(item)
+  const bare = new RegExp(`^(?:${part}\\.)*(${part})$`, "u").exec(item)
   if (bare) return unquoteName(bare[1]!)
   // An alias without AS: the last word, after an expression that ends in a name, a `)`, a quote or a literal.
-  const plain = new RegExp(`^([\\s\\S]*?[\\w$)"\`\\]'])\\s+(${QUOTED}|[\\w$]+)$`).exec(item)
+  const plain = new RegExp(`^([\\s\\S]*?(?:${NAME}|[)"\`\\]']))\\s+(${part})$`, "u").exec(item)
   if (!plain) return null
-  const before = /([\w$]+)\s*$/.exec(plain[1]!)?.[1]
-  if ((before && TAKES_OPERAND.test(before)) || /(?<![\w$])interval\s+(?:''|[\d.]+)$/i.test(plain[1]!)) return null
-  return ENDS_EXPRESSION.test(plain[2]!) ? null : unquoteName(plain[2]!)
+  const [, expression, alias] = plain as unknown as [string, string, string]
+  // The word before: an operator takes the next word as its operand, unless it is a column after a dot (`t.mod id`).
+  const before = new RegExp(`(\\.)?(${NAME}+)\\s*$`, "u").exec(expression)
+  if (before && !before[1] && TAKES_OPERAND.test(before[2]!)) return null
+  // After a complete interval literal (`interval '1' day`), a field is part of it; any other word is an alias.
+  if (new RegExp(`(?<!${NAME})interval\\s+(?:''|[\\d.]+)$`, "iu").test(expression) && INTERVAL_FIELD.test(alias)) return null
+  return ENDS_EXPRESSION.test(alias) ? null : unquoteName(alias)
 }
 
 /**
@@ -220,26 +249,31 @@ function castTokens(item: string): CastToken[] {
   return out
 }
 
-/** Words a type name never holds: an item with one after `::` is more than a cast (`amount::numeric is not null`). */
-const NOT_TYPE =
-  /^(?:as|is|not|isnull|notnull|null|true|false|between|in|like|ilike|similar|and|or|div|mod|xor|collate|at|over|filter|case|when|then|else|end|escape)$/i
+/** How deep `castColumn` follows parentheses and casts inside one another before it reads the item as no cast. */
+const CAST_NESTING = 64
 
 /**
  * The column a SELECT item casts, unaliased; null otherwise. It reads the item as tokens, in this grammar, and the
  * whole item must match:
  *
- *   item    = operand { "::" type }          (at least one cast or one pair of parentheses)
+ *   item    = operand { "::" type } [ "collate" name { "." name } ]   (at least one cast, collate or pair of parentheses)
  *   operand = column | "(" item ")" | "cast" "(" item "as" type ")"
  *   column  = name { "." name }              (a bare `null`, `true`, `false` or `end` is a literal)
  *   type    = word { word | "." | "(" mod { "," mod } ")" | "[" [ number ] "]" }   (mod = number | name)
  *
- * So `amount::numeric`, `(amount)::numeric`, `cast((amount)as numeric)`, `cast(amount as numeric)::int` and `q.end::int`
- * name a column; `amount::numeric + 1`, `coalesce(amount)::numeric`, `(1.5)::numeric` and `(null)::int` don't.
+ * So `amount::numeric`, `(amount)::numeric`, `cast((amount)as numeric)`, `cast(amount as numeric)::int`, `q.end::int`
+ * and `amount::text collate "C"` name a column; `amount::numeric + 1`, `coalesce(amount)::numeric`, `(1.5)::numeric` and
+ * `(null)::int` don't. Parentheses nested deeper than CAST_NESTING read as no cast.
+ *
+ * A type may be several words (`double precision`), so an alias without AS after a cast (`amount::numeric total`) reads
+ * as part of the type. The caller asks only about the engine's `_col_N` labels, and the engine names an aliased item
+ * itself, so that item never reaches it.
  */
 export function castColumn(item: string): string | null {
   const t = castTokens(item)
   let at = 0
   let shaped = false
+  let nesting = 0
   const punct = (k: number, text: string) => t[k]?.kind === "punct" && t[k]!.text === text
   const word = (k: number, text: string) => t[k]?.kind === "name" && t[k]!.text.toLowerCase() === text
   const named = (k: number) => t[k]?.kind === "quoted" || t[k]?.kind === "name"
@@ -277,9 +311,12 @@ export function castColumn(item: string): string | null {
     return at - start === 1 && ENDS_EXPRESSION.test(last.text) ? null : last.text.toLowerCase()
   }
   const operand = (): string | null => {
+    if ((punct(at, "(") || word(at, "cast")) && nesting >= CAST_NESTING) return null
     if (punct(at, "(")) {
       at++
+      nesting++
       const name = chain()
+      nesting--
       if (name === null || !punct(at, ")")) return null
       at++
       shaped = true
@@ -287,7 +324,9 @@ export function castColumn(item: string): string | null {
     }
     if (word(at, "cast") && punct(at + 1, "(")) {
       at += 2
+      nesting++
       const name = chain()
+      nesting--
       if (name === null || !word(at, "as")) return null
       at++
       if (!type() || !punct(at, ")")) return null
@@ -305,6 +344,12 @@ export function castColumn(item: string): string | null {
       if (!type()) return null
       shaped = true
     }
+    // A collation keeps the operand's name (`amount::text collate "C"` is amount).
+    if (word(at, "collate") && named(at + 1)) {
+      at += 2
+      while (punct(at, ".") && named(at + 1)) at += 2
+      shaped = true
+    }
     return name
   }
 
@@ -318,7 +363,7 @@ export function castColumn(item: string): string | null {
  */
 function columnsTemplates(stripped: string): Set<string> {
   const out = new Set<string>()
-  const call = new RegExp(COLUMNS_CALL.source, "gi")
+  const call = new RegExp(COLUMNS_CALL.source, "giu")
   // A quoted name is blanked whole, so a `)` or `columns(` inside one neither ends nor starts a call.
   const text = stripped.replace(new RegExp(QUOTED, "g"), (q) => " ".repeat(q.length))
   for (let m = call.exec(text); m; m = call.exec(text)) {
@@ -328,7 +373,7 @@ function columnsTemplates(stripped: string): Set<string> {
       if (text[i] === "(") depth++
       else if (text[i] === ")" && --depth === 0) break
     }
-    const alias = new RegExp(`^\\s*as\\s+(${QUOTED}|[\\w$]+)`, "i").exec(stripped.slice(i + 1))
+    const alias = new RegExp(`^\\s*as\\s+(${QUOTED}|${NAME}+)`, "iu").exec(stripped.slice(i + 1))
     if (alias && /\\\d/.test(alias[1]!)) out.add(unquoteName(alias[1]!))
   }
   return out
