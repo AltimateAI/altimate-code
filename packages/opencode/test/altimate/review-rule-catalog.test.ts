@@ -222,6 +222,12 @@ describe("rawColumnExposures", () => {
     // Both schemas read on both sides: the prefix is compared.
     const both = { head: new Set(["restricted", "public"]), base: new Set(["restricted", "public"]) }
     expect(refCovered("public.customers.ssn", new Set(["restricted.customers.ssn"]), both)).toBe(false)
+    // The base already read `public`: moving `customers` there is a swap.
+    const swap = { head: new Set(["public"]), base: new Set(["restricted", "public"]) }
+    expect(refCovered("public.customers.ssn", new Set(["restricted.customers.ssn"]), swap)).toBe(false)
+    // A single-table swap to a schema the base never read looks like an environment change.
+    const alone = { head: new Set(["public"]), base: new Set(["restricted"]) }
+    expect(refCovered("public.customers.ssn", new Set(["restricted.customers.ssn"]), alone)).toBe(true)
     // Without an environment, names must be equal.
     expect(refCovered("analytics.dbt_ci_pr_42.customers.ssn", prod)).toBe(false)
   })

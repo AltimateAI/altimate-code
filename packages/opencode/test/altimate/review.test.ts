@@ -2584,6 +2584,16 @@ describe("orchestrate", () => {
     expectReportedPii(await piiRuns(head, base, "-  c.ssn\n+  p.ssn\n", ["ssn"]), ["ssn"])
   })
 
+  test("switching a table to a schema the base already read is a different source", async () => {
+    const base = "select c.customer_id,\n  c.ssn\nfrom restricted.customers c\njoin public.orders o using (customer_id)"
+    const head = base.replace("restricted.customers", "public.customers")
+    expectReportedPii(
+      await piiRuns(head, base, "-from restricted.customers c\n+from public.customers c\n", ["ssn"]),
+      ["ssn"],
+      "none",
+    )
+  })
+
   test("a base compiled into another schema is the same table, not new exposure", async () => {
     const raw = "select customer_id,\n  ssn\nfrom {{ ref('customers') }}"
     const touched = raw.replace("select customer_id,", "select customer_id, region,")

@@ -679,11 +679,12 @@ export interface RelationPrefixes {
 /**
  * Head table `h` and base table `b` are the same table. Equal names are. With
  * the same own name, an unqualified side matches a qualified one, and two
- * different prefixes are compared only when each also appears among the other
- * side's relations, i.e. both sides were compiled in one environment: a base
- * compiled into `dbt_prod` and a head into `dbt_ci_pr_42` (or a `+schema`
- * change) read the same tables, while `restricted.customers` vs
- * `public.customers` in a model that reads both schemas on both sides do not.
+ * different prefixes are different tables when the base already read tables
+ * under the head's prefix (that prefix exists in the base's environment, so
+ * the head chose another schema): base `restricted.customers` +
+ * `public.orders` → head `public.customers` is a swap. A head prefix the base
+ * never read is an environment difference: a base compiled into `dbt_prod`
+ * and a head into `dbt_ci_pr_42` (or a `+schema` change) read the same tables.
  * Without `env`, names must be equal.
  */
 function sameTable(h: string, b: string, env?: RelationPrefixes): boolean {
@@ -693,7 +694,7 @@ function sameTable(h: string, b: string, env?: RelationPrefixes): boolean {
   const y = splitTable(b)
   if (x.name !== y.name) return false
   if (!x.prefix || !y.prefix) return true
-  return !(env.base.has(x.prefix) && env.head.has(y.prefix))
+  return !env.base.has(x.prefix)
 }
 
 /**
