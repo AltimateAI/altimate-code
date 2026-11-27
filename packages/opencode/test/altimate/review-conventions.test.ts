@@ -993,6 +993,11 @@ describe("loadConventions hardening (round 2)", () => {
     }
   })
 
+  test("frontmatter that is not YAML: a globs list at column 0 is read", () => {
+    const r = parseMdc("---\nglobs:\n- **/*.sql\n- models/**\nalwaysApply: false\n---\nBody.\n")
+    expect(r.globs).toEqual(["**/*.sql", "models/**"])
+  })
+
   test("a one-character model is taken off its `<model>:` title prefix when grouping", () => {
     const conv: Convention[] = [{ path: "models/CLAUDE.md", source: "claude_md", scope: "models", text: "x" }]
     const mk = (model: string) =>

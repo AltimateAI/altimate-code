@@ -160,7 +160,8 @@ function parseFrontmatterLines(text: string): { globs: string[]; alwaysApply: bo
   let alwaysApply = false
   let inGlobList = false
   for (const line of text.split(/\r?\n/)) {
-    const item = /^\s+-\s*(.+)$/.exec(line)
+    // List items may sit at column 0 (`globs:\n- a`) or be indented.
+    const item = /^\s*-\s*(.+)$/.exec(line)
     if (inGlobList && item) {
       globs.push(...globList(frontmatterValue(item[1])))
       continue
