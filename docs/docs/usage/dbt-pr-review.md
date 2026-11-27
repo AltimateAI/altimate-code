@@ -259,7 +259,10 @@ For a personal access token, the account is the `/user` login. For Actions' own
 `GITHUB_TOKEN`, it is `github-actions[bot]`. A GitHub App installation token cannot
 read `/user`, so set `ALTIMATE_REVIEW_BOT_LOGIN` to the app's bot login (for example
 `my-app[bot]`). Without it, outside Actions, each run posts a new summary comment
-rather than risk editing another bot's comment.
+rather than risk editing another bot's comment. Inside Actions, an App token without
+the variable is treated as `github-actions[bot]`, so it never finds the summary it
+posted earlier and adds a new one on every run; set `ALTIMATE_REVIEW_BOT_LOGIN`
+whenever the review posts with an App token.
 
 ## Configuration — `.altimate/review.yml`
 
