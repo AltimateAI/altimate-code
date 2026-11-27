@@ -642,7 +642,7 @@ across 12 dialects all plan; anything still unrecognized stays *undecidable*, ne
    `_OTHER_FILES`, `_PYTHON_FILES`, `_VERIFY`); `1` turns one on. `true`/`false`,
    `on`/`off` and `yes`/`no` are accepted too; an empty value counts as unset, and
    any other value is ignored (with a warning, printed once per value and only when
-   the AI lane runs). `ai: false` turns the whole lane off.
+   the AI lane is enabled). `ai: false` turns the whole lane off.
    `ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE=<file>` replaces the finder's system
    prompt. The path must be absolute and outside the repository checkout (for
    example under `$RUNNER_TEMP`); a file inside the reviewed repository or the
