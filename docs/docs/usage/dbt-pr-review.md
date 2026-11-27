@@ -664,7 +664,8 @@ across 12 dialects all plan; anything still unrecognized stays *undecidable*, ne
    specific first, up to 3,000 characters per call (`ai.conventions: false` or
    `ALTIMATE_REVIEW_CONVENTIONS=0` turns this off). A file that is a symlink at the
    base commit is skipped, and so is any instruction file that holds a private key
-   or a service-account key: it is never sent to the model. The verifier reads a
+   or a service-account key: it is never sent to the model. Tokens, passwords and
+   keys in the other files are redacted before they are sent. The verifier reads a
    convention file's base-branch text, not the PR's edit of it.
 4. **Rubric → verdict.** Findings map to a verdict by a versioned rubric (data,
    not prompt): any blocking-category `critical` → `REQUEST_CHANGES`; ≥3 warnings

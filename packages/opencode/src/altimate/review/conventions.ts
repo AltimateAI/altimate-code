@@ -3,6 +3,7 @@ import YAML from "yaml"
 import { globToRegExp } from "./diff-filter"
 import { type Finding, SEVERITY_ORDER } from "./finding"
 import { holdsCredentials } from "./credentials"
+import { redactSecrets } from "@/installation"
 
 /**
  * Team conventions from the repository's guideline files, read from the BASE
@@ -15,7 +16,8 @@ import { holdsCredentials } from "./credentials"
  * (frontmatter `globs` / `alwaysApply`; rules with neither are manual and skipped);
  * `.cursorrules`; `.github/copilot-instructions.md`; `CONTRIBUTING.md` cut to its
  * dbt/SQL/test/naming sections. A file that is a symlink at the base commit is skipped (git
- * would return the link target's name), and so is any document that carries key material.
+ * would return the link target's name), and so is any document that carries key material;
+ * tokens and passwords in the others are redacted (`redactConvention`).
  *
  * With the `conventions` switch (`ALTIMATE_REVIEW_CONVENTIONS`, on by default) each
  * finder call carries the conventions that apply to its files, most specific first,
@@ -278,6 +280,12 @@ export interface LoadConventionsInput {
   changedPaths: string[]
 }
 
+/** Convention text with secrets redacted: the shared `redactSecrets` (tokens, passwords, keys in
+ *  URLs, long opaque blobs) plus AWS access key ids. */
+export function redactConvention(text: string): string {
+  return redactSecrets(text).replace(/\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g, "[REDACTED]")
+}
+
 /** Concurrent base-commit reads at most. */
 const READ_CONCURRENCY = 8
 
@@ -304,11 +312,12 @@ export async function loadConventions(input: LoadConventionsInput): Promise<Conv
       waiting.shift()?.()
     }
   }
-  // A document that carries key material is never sent to the model, like any other AI-lane input.
+  // A document that carries key material is never sent to the model, like any other AI-lane input;
+  // tokens and passwords in the rest are redacted.
   const read = async (rel: string): Promise<string | undefined> => {
     if ((exists && !exists.has(rel)) || links.has(rel)) return undefined
     const text = await limited(() => input.readBase(rel))
-    return text !== undefined && holdsCredentials(text) ? undefined : text
+    return text === undefined || holdsCredentials(text) ? undefined : redactConvention(text)
   }
   const scopes = scopesOf(input.changedPaths)
   const wholeFile = (path: string, source: ConventionSource, scope: string, text: string | undefined): Convention[] =>

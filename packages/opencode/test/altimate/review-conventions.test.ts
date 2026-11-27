@@ -130,11 +130,12 @@ describe("loadConventions (fixture as the base commit)", () => {
 
   test("per-file cap of 4,000 characters; absent files are skipped", async () => {
     const all = await loadConventions({
-      readBase: async (rel) => (rel === "AGENTS.md" ? "x".repeat(9_000) : undefined),
+      // Words, not one 9,000-character run: secret redaction treats a long opaque run as a key.
+      readBase: async (rel) => (rel === "AGENTS.md" ? "ab ".repeat(3_000) : undefined),
       changedPaths: ["models/a.sql"],
     })
     expect(all.map((c) => c.path)).toEqual(["AGENTS.md"])
-    expect(all[0].text.startsWith("x".repeat(4_000) + "\n… (truncated)")).toBe(true)
+    expect(all[0].text.startsWith("ab ".repeat(3_000).slice(0, 4_000) + "\n… (truncated)")).toBe(true)
   })
 
   test("a git failure reading or listing the base commit throws instead of passing for no conventions", async () => {
@@ -1000,5 +1001,17 @@ describe("convention grouping, round 2b", () => {
     const f = { ...mk("models/a.sql", 1, "Per models/CLAUDE.md.\n\nThe same applies to: `models/b.sql`.\n\nSame rule, also here:\n- x (line 5)") }
     const lane = replayFindings({ findings: [f], ai: { state: "ok", calls: 1 } })
     expect(lane.findings[0].body).not.toContain("The same applies to")
+  })
+})
+
+describe("convention text redaction", () => {
+  test("tokens, passwords and AWS key ids are redacted before the text is loaded", async () => {
+    const password = fakeChars(15, 1)
+    const ghToken = "ghp_" + fakeChars(22, 4)
+    const text = `Use password: ${password} for staging, token ${ghToken}, and ${FAKE_AWS_KEY_ID}.\nSnake case.`
+    const all = await loadConventions({ readBase: async (rel) => (rel === "CLAUDE.md" ? text : undefined), changedPaths: ["models/a.sql"] })
+    expect(all).toHaveLength(1)
+    expect(all[0].text).toContain("Snake case.")
+    for (const secret of [password, ghToken.slice(4), FAKE_AWS_KEY_ID]) expect(all[0].text).not.toContain(secret)
   })
 })
