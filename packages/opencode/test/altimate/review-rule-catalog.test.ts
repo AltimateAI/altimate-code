@@ -4,7 +4,6 @@ import {
   ruleMatches,
   inputFromExample,
   finalOutputs,
-  rawColumnExposures,
   refCovered,
   selectItemColumns,
   selectItems,
@@ -66,11 +65,13 @@ describe("selectItemColumns", () => {
   })
 })
 
-describe("rawColumnExposures", () => {
+const rawOf = (sql: string) => finalOutputs(sql).raw
+
+describe("finalOutputs().raw", () => {
   const asObject = (m: Map<string, Set<string>>) => Object.fromEntries([...m].map(([k, v]) => [k, [...v].sort()]))
   test("reads the final projection only, not a CTE's own aliases", () => {
     const sql = "with h as (\n  select ssn as contact\n  from customers\n)\nselect c.email as contact from customers c"
-    expect(asObject(rawColumnExposures(sql))).toEqual({ contact: ["customers.email"] })
+    expect(asObject(rawOf(sql))).toEqual({ contact: ["customers.email"] })
   })
   test("resolves a final column through the CTE it reads, and `*` over a CTE", () => {
     const sql = [
@@ -78,42 +79,42 @@ describe("rawColumnExposures", () => {
       "final as (select id, sha2(phone) as phone, ssn, email as contact from src)",
       "select * from final",
     ].join("\n")
-    expect(asObject(rawColumnExposures(sql))).toEqual({
+    expect(asObject(rawOf(sql))).toEqual({
       id: ["{{ref('customers')}}.id"],
       ssn: ["{{ref('customers')}}.ssn"],
       contact: ["{{ref('customers')}}.email"],
     })
-    expect(asObject(rawColumnExposures("with b as (select email as contact from c) select contact from b"))).toEqual({
+    expect(asObject(rawOf("with b as (select email as contact from c) select contact from b"))).toEqual({
       contact: ["c.email"],
     })
   })
   test("parses a select item whose alias is on another line", () => {
     const sql = "select c.customer_id,\n  c.ssn\n    as tax_ref\nfrom customers c"
-    expect(asObject(rawColumnExposures(sql))).toEqual({ customer_id: ["customers.customer_id"], tax_ref: ["customers.ssn"] })
+    expect(asObject(rawOf(sql))).toEqual({ customer_id: ["customers.customer_id"], tax_ref: ["customers.ssn"] })
   })
   test("accepts quoted identifiers", () => {
-    expect(asObject(rawColumnExposures('select "c"."ssn" as "tax_ref" from customers "c"'))).toEqual({ tax_ref: ["customers.ssn"] })
+    expect(asObject(rawOf('select "c"."ssn" as "tax_ref" from customers "c"'))).toEqual({ tax_ref: ["customers.ssn"] })
   })
   test("accepts an alias without AS, and not a trailing keyword", () => {
     const sql = "select c.ssn tax_ref, cast(c.dob as date) dob_day, case when x then y end, sha2(c.email) em from c"
-    expect(asObject(rawColumnExposures(sql))).toEqual({ tax_ref: ["c.ssn"], dob_day: ["c.dob"] })
+    expect(asObject(rawOf(sql))).toEqual({ tax_ref: ["c.ssn"], dob_day: ["c.dob"] })
   })
   test("names a later set-operation branch by the first branch's position", () => {
     const sql = "select id, ssn as tax_ref from a\nunion all\nselect id, email from b"
-    expect(asObject(rawColumnExposures(sql))).toEqual({ id: ["a.id", "b.id"], tax_ref: ["a.ssn", "b.email"] })
+    expect(asObject(rawOf(sql))).toEqual({ id: ["a.id", "b.id"], tax_ref: ["a.ssn", "b.email"] })
   })
   test("keeps the source table, so a same-named column from another table is distinct", () => {
     const sql = "select c.ssn, s.ssn as spouse_ssn, schema1.employees.email from customers c, schema1.employees join spouses as s on true"
-    expect(asObject(rawColumnExposures(sql))).toEqual({
+    expect(asObject(rawOf(sql))).toEqual({
       ssn: ["customers.ssn"],
       spouse_ssn: ["spouses.ssn"],
       email: ["schema1.employees.email"],
     })
   })
   test("keeps the database and schema in the source identity", () => {
-    expect(asObject(rawColumnExposures("select ssn from restricted.customers"))).toEqual({ ssn: ["restricted.customers.ssn"] })
-    expect(asObject(rawColumnExposures("select ssn from public.customers"))).toEqual({ ssn: ["public.customers.ssn"] })
-    expect(asObject(rawColumnExposures('select c.ssn, customers.email from "DB"."Public"."Customers" c, raw.customers'))).toEqual({
+    expect(asObject(rawOf("select ssn from restricted.customers"))).toEqual({ ssn: ["restricted.customers.ssn"] })
+    expect(asObject(rawOf("select ssn from public.customers"))).toEqual({ ssn: ["public.customers.ssn"] })
+    expect(asObject(rawOf('select c.ssn, customers.email from "DB"."Public"."Customers" c, raw.customers'))).toEqual({
       ssn: ["db.public.customers.ssn"],
       email: ["raw.customers.email"],
     })
@@ -124,15 +125,15 @@ describe("rawColumnExposures", () => {
       "k as (select customer_id, sha2(ssn) as ssn from customers)",
       "select r.ssn as a, k.ssn as b, c.ssn as d from r join k on true join customers c on true",
     ].join("\n")
-    expect(asObject(rawColumnExposures(sql))).toEqual({ a: ["customers.ssn"], d: ["customers.ssn"] })
+    expect(asObject(rawOf(sql))).toEqual({ a: ["customers.ssn"], d: ["customers.ssn"] })
     // An unknown qualifier never matches anything: it resolves to a unique ref.
-    expect([...(rawColumnExposures("select x.ssn from customers c").get("ssn") ?? [])][0]).toMatch(/^\?\d+\.ssn$/)
+    expect([...(rawOf("select x.ssn from customers c").get("ssn") ?? [])][0]).toMatch(/^\?\d+\.ssn$/)
   })
   test("resolves through a FROM subquery under its alias", () => {
-    expect(asObject(rawColumnExposures("select s.ssn, s.email from (select sha2(ssn) as ssn, email from customers) s"))).toEqual({
+    expect(asObject(rawOf("select s.ssn, s.email from (select sha2(ssn) as ssn, email from customers) s"))).toEqual({
       email: ["customers.email"],
     })
-    expect(asObject(rawColumnExposures("select ssn from (select * from customers) as s"))).toEqual({ ssn: ["customers.ssn"] })
+    expect(asObject(rawOf("select ssn from (select * from customers) as s"))).toEqual({ ssn: ["customers.ssn"] })
   })
   test("only a plain `*` passes columns through; `* except (…)` does not", () => {
     expect(finalOutputs("select * from customers").passthrough).toBe(true)
@@ -141,7 +142,7 @@ describe("rawColumnExposures", () => {
   })
   test("a CTE with a column list is still a CTE: a renamed column resolves to nothing known", () => {
     const sql = "with m (id, tax) as (select customer_id, ssn from customers)\nselect tax as ssn from m"
-    expect([...(rawColumnExposures(sql).get("ssn") ?? [])][0]).toMatch(/^\?\d+\.tax$/)
+    expect([...(rawOf(sql).get("ssn") ?? [])][0]).toMatch(/^\?\d+\.tax$/)
   })
   test("a CTE named `final` is a CTE, not the model's output", () => {
     // The outer `b` is the output; the CTE outputs no `b`, so it resolves to nothing known.
@@ -151,13 +152,13 @@ describe("rawColumnExposures", () => {
     expect([...lost.raw.get("b")!][0]).toMatch(/^\?\d+\.b$/)
     // Masked in the CTE, selected by name or through `*`: nothing raw.
     const masked = "with final as (select id, md5(email) as email from customers) select id, email from final"
-    expect(asObject(rawColumnExposures(masked))).toEqual({ id: ["customers.id"] })
-    expect(asObject(rawColumnExposures(masked.replace("select id, email from final", "select * from final")))).toEqual({
+    expect(asObject(rawOf(masked))).toEqual({ id: ["customers.id"] })
+    expect(asObject(rawOf(masked.replace("select id, email from final", "select * from final")))).toEqual({
       id: ["customers.id"],
     })
     // Masked in the outer list: nothing raw, and the outer names are the outputs.
     const outer = "with final as (select id, email from customers) select id, md5(email) as email_hash from final"
-    expect(asObject(rawColumnExposures(outer))).toEqual({ id: ["customers.id"] })
+    expect(asObject(rawOf(outer))).toEqual({ id: ["customers.id"] })
     expect([...finalOutputs(outer).names].sort()).toEqual(["email_hash", "id"])
   })
   test("`reads` lists the source columns a computed output is built from", () => {
@@ -214,7 +215,7 @@ describe("rawColumnExposures", () => {
     const named = "with k as (select customer_id, sha2(ssn) as ssn from customers) select * from k join spouses s using (customer_id)"
     expect([...finalOutputs(named).starRaw("ssn")]).toEqual(["spouses.ssn"])
     // The unqualified column read keeps its combined ref.
-    expect(asObject(rawColumnExposures("select ssn from customers c join spouses s using (customer_id)"))).toEqual({
+    expect(asObject(rawOf("select ssn from customers c join spouses s using (customer_id)"))).toEqual({
       ssn: ["customers|spouses.ssn"],
     })
   })
@@ -255,11 +256,11 @@ describe("rawColumnExposures", () => {
     expect(refCovered("analytics.dbt_ci_pr_42.customers.ssn", prod)).toBe(false)
   })
   test("`distinct on (…)` is a select prefix, not part of the first item", () => {
-    expect(asObject(rawColumnExposures("select distinct on (id) ssn, id from customers"))).toEqual({
+    expect(asObject(rawOf("select distinct on (id) ssn, id from customers"))).toEqual({
       ssn: ["customers.ssn"],
       id: ["customers.id"],
     })
-    expect(asObject(rawColumnExposures("select distinct on (date_trunc('day', ts), id) c.ssn from customers c"))).toEqual({
+    expect(asObject(rawOf("select distinct on (date_trunc('day', ts), id) c.ssn from customers c"))).toEqual({
       ssn: ["customers.ssn"],
     })
   })
@@ -324,6 +325,6 @@ describe("rawColumnExposures", () => {
   })
   test("ignores commas and keywords inside literals and comments", () => {
     const sql = "select ssn as a, -- , email as a\n  'x, from y' as b, email as c from t"
-    expect(asObject(rawColumnExposures(sql))).toEqual({ a: ["t.ssn"], c: ["t.email"] })
+    expect(asObject(rawOf(sql))).toEqual({ a: ["t.ssn"], c: ["t.email"] })
   })
 })

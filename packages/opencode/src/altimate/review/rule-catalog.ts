@@ -626,7 +626,24 @@ const STAR = new RegExp(String.raw`^(?:${SEGMENT}\.)*\*$`)
 
 /** The model's final output, as `finalOutputs` resolves it. */
 export interface FinalOutputs {
-  /** Per output name, the `source.column` refs it exposes RAW (see `rawColumnExposures`). */
+  /**
+   * Per output name of the model (its FINAL projection, never a CTE's or a
+   * nested query's own aliases), the source columns it exposes RAW under that
+   * name, each as `source.column` where the source is the table (its full
+   * relation name as written) the column is read from: `c.ssn as tax_ref` with
+   * `customers c` → `tax_ref: {customers.ssn}`, so the same column name from
+   * another table (`s.ssn` with `spouses s`, or `restricted.customers` vs
+   * `public.customers`) is a different exposure. A qualifier resolves
+   * through its own FROM/JOIN source only; a column read from a CTE or a FROM
+   * subquery takes that scope's exposure for it (masked there → nothing raw), and
+   * `*` over them takes all of theirs. An unqualified column resolves through the
+   * CTEs/subqueries that output it, else the single table read (several tables →
+   * one combined `a|b.column` ref). A qualifier that matches no source gets a ref
+   * that matches nothing on the other side. A later set-operation branch takes the
+   * first branch's name at the same position. An item that wraps the column in any
+   * other function or expression (`sha2(c.ssn)`, `left(c.ssn, 4)`, `case …`,
+   * `a || b`) exposes nothing raw and is left out.
+   */
   raw: Map<string, Set<string>>
   /** Every output name the final projection resolves. */
   names: Set<string>
@@ -640,8 +657,8 @@ export interface FinalOutputs {
    *  unqualified one), for `refCovered`'s environment check. */
   prefixes: Set<string>
   /** Per output name, a signature of how it is computed: the item text (string
-   *  literals included) plus the full text of every CTE or subquery its select
-   *  reads. Equal signatures on two sides mean the name is computed the same way. */
+   *  literals as written, each FROM/JOIN alias named by its source) plus the
+   *  full text of every CTE or subquery its select reads. Equal signatures on two sides mean the name is computed the same way. */
   signatures: Map<string, Set<string>>
   /** Per output name, every `source.column` ref its value is computed from, raw
    *  or not, resolved like `raw` (`lower(s.ssn) as email` with `spouses s` →
@@ -654,28 +671,6 @@ interface ScopeOutputs extends Omit<FinalOutputs, "passthrough" | "starRaw" | "p
   stars: Array<{ branch: number; qualifier?: string }>
   /** Every item's text, and that of every scope it reads. */
   body: string
-}
-
-/**
- * Per output name of the model (its FINAL projection, never a CTE's or a
- * nested query's own aliases), the source columns it exposes RAW under that
- * name, each as `source.column` where the source is the table (its full
- * relation name as written) the column is read from: `c.ssn as tax_ref` with
- * `customers c` → `tax_ref: {customers.ssn}`, so the same column name from
- * another table (`s.ssn` with `spouses s`, or `restricted.customers` vs
- * `public.customers`) is a different exposure. A qualifier resolves
- * through its own FROM/JOIN source only; a column read from a CTE or a FROM
- * subquery takes that scope's exposure for it (masked there → nothing raw), and
- * `*` over them takes all of theirs. An unqualified column resolves through the
- * CTEs/subqueries that output it, else the single table read (several tables →
- * one combined `a|b.column` ref). A qualifier that matches no source gets a ref
- * that matches nothing on the other side. A later set-operation branch takes the
- * first branch's name at the same position. An item that wraps the column in any
- * other function or expression (`sha2(c.ssn)`, `left(c.ssn, 4)`, `case …`,
- * `a || b`) exposes nothing raw and is left out.
- */
-export function rawColumnExposures(sql: string): Map<string, Set<string>> {
-  return finalOutputs(sql).raw
 }
 
 let unresolvedRefs = 0
@@ -721,7 +716,7 @@ function sameTable(h: string, b: string, env?: RelationPrefixes): boolean {
 
 /**
  * `ref` is one of the `exposed` source columns. An unqualified column read over
- * several tables (`customers|orders.email`, see `rawColumnExposures`) comes from
+ * several tables (`customers|orders.email`, see `FinalOutputs.raw`) comes from
  * exactly one of them (the query would be ambiguous otherwise), so it is
  * covered by a single-table ref to one of its members. The reverse is not: a
  * base combined ref does not say which table the column came from, so a head
@@ -752,7 +747,7 @@ const lowerOutsideLiterals = (sql: string) =>
   sql.replace(/'(?:[^']|'')*'|[^']+/g, (m) => (m.startsWith("'") ? m : m.toLowerCase()))
 
 /** The model's final output: every name it resolves, the source columns each
- *  exposes raw (as `rawColumnExposures`), and how each is computed. */
+ *  exposes raw (`raw`), and how each is computed. */
 export function finalOutputs(sql: string): FinalOutputs {
   const { items, sources } = parseSelects(sql)
   const byScope = new Map<string, SelectItem[]>()
