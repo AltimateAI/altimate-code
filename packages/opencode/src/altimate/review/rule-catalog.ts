@@ -870,8 +870,36 @@ export function finalOutputs(sql: string): FinalOutputs {
     return result
   }
   const { raw, names, signatures, reads, stars } = resolve(ROOT_SCOPE, new Set())
+  // The raw refs a `*` passes `col` through as. Unlike an unqualified column
+  // read over several sources (one combined ref: it comes from exactly one of
+  // them), a `*` passes every source's columns through, so each source is
+  // resolved on its own: `select * from customers join spouses` exposes
+  // `customers.ssn` and `spouses.ssn`, which a head `c.ssn` or `s.ssn` matches.
+  const starRefs = (scope: string, branch: number, qualifier: string | undefined, col: string, seen: Set<string>) => {
+    const srcs = sources.get(`${scope}#${branch}`) ?? []
+    const named = (x: Source) => x.name === qualifier || x.short === qualifier
+    const picked = qualifier
+      ? [srcs.find((x) => x.alias === qualifier) ?? srcs.find((x) => !x.alias && named(x)) ?? srcs.find(named)].filter(
+          (x): x is Source => !!x,
+        )
+      : srcs
+    const inner = innerOf(seen, scope)
+    const out = new Set<string>()
+    for (const src of picked) {
+      if (!isDerived(src, scope, seen)) {
+        if (!byScope.has(src.name)) out.add(`${src.name}.${col}`)
+        continue
+      }
+      const body = resolve(src.name, inner)
+      const refs = body.names.has(col)
+        ? (body.raw.get(col) ?? new Set<string>())
+        : union(body.stars.map((st) => starRefs(src.name, st.branch, st.qualifier, col, inner)))
+      for (const r of refs) out.add(r)
+    }
+    return out
+  }
   const starRaw = (column: string) =>
-    union(stars.map((st) => resolveRef(ROOT_SCOPE, st.branch, st.qualifier, column, new Set()).raw))
+    union(stars.map((st) => starRefs(ROOT_SCOPE, st.branch, st.qualifier, column, new Set())))
   const prefixes = new Set<string>()
   for (const list of sources.values()) for (const src of list) if (!byScope.has(src.name)) prefixes.add(splitTable(src.name).prefix)
   return { raw, names, signatures, reads, passthrough: stars.length > 0, starRaw, prefixes }

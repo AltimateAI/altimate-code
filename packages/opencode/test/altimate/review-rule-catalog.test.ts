@@ -203,6 +203,21 @@ describe("rawColumnExposures", () => {
     const masked = "with m as (select customer_id, sha2(ssn) as ssn from customers) select * from m"
     expect([...finalOutputs(masked).starRaw("ssn")]).toEqual([])
   })
+  test("`starRaw` resolves a plain `*` over a join to each source on its own", () => {
+    // A `*` passes every source's columns through; an unqualified column read does not.
+    const join = "select * from customers c join spouses s using (customer_id)"
+    expect([...finalOutputs(join).starRaw("ssn")].sort()).toEqual(["customers.ssn", "spouses.ssn"])
+    const viaCte = `with j as (${join}) select * from j`
+    expect([...finalOutputs(viaCte).starRaw("ssn")].sort()).toEqual(["customers.ssn", "spouses.ssn"])
+    // A qualified `*` stays on its source; a CTE that names the column is used as named.
+    expect([...finalOutputs("select s.* from customers c join spouses s on true").starRaw("ssn")]).toEqual(["spouses.ssn"])
+    const named = "with k as (select customer_id, sha2(ssn) as ssn from customers) select * from k join spouses s using (customer_id)"
+    expect([...finalOutputs(named).starRaw("ssn")]).toEqual(["spouses.ssn"])
+    // The unqualified column read keeps its combined ref.
+    expect(asObject(rawColumnExposures("select ssn from customers c join spouses s using (customer_id)"))).toEqual({
+      ssn: ["customers|spouses.ssn"],
+    })
+  })
   test("`refCovered` matches an unqualified column over a join to its single-table ref", () => {
     expect(refCovered("customers|orders.email", new Set(["customers.email"]))).toBe(true)
     // The reverse is not covered: the base never said which table it read.

@@ -2556,6 +2556,42 @@ describe("orchestrate", () => {
     expect(broad.map((f) => (f.evidence?.result as any)?.columns)).toEqual([["email", "ssn"], ["email", "ssn"], ["email", "ssn"]])
   })
 
+  test("expanding a base `select *` over a join into qualified columns is not new exposure", async () => {
+    // detectPii sees the joined tables' columns through `*`, as the real engine does with a schema.
+    const runs = async (head: string, base: string, diff: string) => {
+      const out: Array<{ reviewers: string[]; env: Awaited<ReturnType<typeof runReview>> }> = []
+      for (const reviewers of [["pii_exposure"], [], ["dbt_patterns"]]) {
+        const env = await runReview({
+          changedFiles: [{ path: "models/marts/m.sql", status: "modified", diff }],
+          config: { ...DEFAULT_REVIEW_CONFIG, reviewers },
+          rubric: DEFAULT_RUBRIC,
+          mode: "gate",
+          runner: {
+            ...piiRunner(["ssn"]),
+            async detectPii(sql: string) {
+              return { columns: /\bssn\b|select\s+\*/i.test(sql) ? ["ssn"] : [] }
+            },
+          },
+          getContent: content(head, base),
+        })
+        out.push({ reviewers, env })
+      }
+      return out
+    }
+    const base = "select *\nfrom customers c\njoin spouses s using (customer_id)"
+    for (const col of ["c.ssn", "s.ssn"]) {
+      const head = `select c.customer_id,\n  ${col}\nfrom customers c\njoin spouses s using (customer_id)`
+      for (const { reviewers, env } of await runs(head, base, `-select *\n+select c.customer_id,\n+  ${col}\n`))
+        expect({ reviewers, pii: env.findings.filter((f) => f.category === "pii_exposure") }).toEqual({ reviewers, pii: [] })
+    }
+    // Control: the same column from a table the base never read is new.
+    const other = "select c.customer_id,\n  e.ssn\nfrom customers c\njoin employees e using (customer_id)"
+    expectReportedPii(
+      await runs(other, base, "-select *\n-from customers c\n-join spouses s using (customer_id)\n+select c.customer_id,\n+  e.ssn\n+from customers c\n+join employees e using (customer_id)\n"),
+      ["ssn"],
+    )
+  })
+
   test("a head column pinned to one table is new when the base read it unqualified over a join", async () => {
     // Base `ssn` over customers ⋈ spouses does not say which table it came from.
     const base = "select customer_id,\n  ssn\nfrom customers c\njoin spouses s using (customer_id)"
