@@ -3256,43 +3256,115 @@ describe("orchestrate", () => {
     })
   })
 
-  test("raw-base proof: a raw column aliased in a CTE or subquery still blocks, a masked one stays undecided", async () => {
-    const cteBase = "with src as (\n  select\n    customer_id\n  from {{ ref('customers') }}\n)\nselect\n  customer_id\nfrom src"
-    const subBase = "select s.customer_id\nfrom (\n  select customer_id\n  from {{ ref('customers') }}\n) s"
-    const cases = [
-      {
-        name: "CTE alias carried to the final select",
-        base: cteBase,
-        head: "with src as (\n  select\n    customer_id,\n    ssn as tax_ref\n  from {{ ref('customers') }}\n)\nselect\n  customer_id,\n  tax_ref\nfrom src",
-        diff: "-    customer_id\n+    customer_id,\n+    ssn as tax_ref\n-  customer_id\n+  customer_id,\n+  tax_ref\n",
-        critical: true,
-      },
+  test("raw-base proof: the column blocks when it reaches the final output unmasked, and stays undecided when masked, dropped or only tested", async () => {
+    const REF = "{{ ref('customers') }}"
+    const OTHER = "{{ ref('spouses') }}"
+    const cteBase = `with src as (\n  select\n    customer_id\n  from ${REF}\n)\nselect\n  customer_id\nfrom src`
+    const subBase = `select s.customer_id\nfrom (\n  select customer_id\n  from ${REF}\n) s`
+    const plainBase = `select customer_id\nfrom ${REF}`
+    // `src` with one more item on its own line, then the rest of the model.
+    const src = (item: string, rest: string) => `with src as (\n  select\n    customer_id,\n    ${item}\n  from ${REF}\n)${rest}`
+    const cases: Array<{ name: string; base: string; head: string; critical: boolean }> = [
+      // Reaches the output unmasked: blocks.
+      { name: "CTE alias carried to the final select", base: cteBase, head: src("ssn as tax_ref", "\nselect\n  customer_id,\n  tax_ref\nfrom src"), critical: true },
       {
         name: "subquery alias carried to the final select",
         base: subBase,
-        head: "select s.customer_id,\n  s.tax_ref\nfrom (\n  select customer_id,\n    ssn as tax_ref\n  from {{ ref('customers') }}\n) s",
-        diff: "-select s.customer_id\n+select s.customer_id,\n+  s.tax_ref\n-  select customer_id\n+  select customer_id,\n+    ssn as tax_ref\n",
+        head: `select s.customer_id,\n  s.tax_ref\nfrom (\n  select customer_id,\n    ssn as tax_ref\n  from ${REF}\n) s`,
+        critical: true,
+      },
+      { name: "two CTEs", base: cteBase, head: src("ssn as x", ", b as (\n  select customer_id, x\n  from src\n)\nselect\n  customer_id,\n  x\nfrom b"), critical: true },
+      { name: "`select *` over the CTE", base: cteBase, head: src("ssn", "\nselect * from src"), critical: true },
+      { name: "`* exclude` of another column", base: cteBase, head: src("ssn", "\nselect * exclude (customer_id)\nfrom src"), critical: true },
+      {
+        name: "alias chain after 35 `select *` import CTEs",
+        base: cteBase,
+        head:
+          "with " +
+          Array.from({ length: 35 }, (_, i) => `c${i} as (select * from {{ ref('t${i}') }}),\n`).join("") +
+          src("ssn as a", ", mid as (\n  select customer_id, a as b\n  from src\n)\nselect\n  customer_id,\n  b\nfrom mid").slice(5),
         critical: true,
       },
       {
+        name: "second union branch, selected under the first branch's name",
+        base: cteBase,
+        head: `with u as (\n  select customer_id, tax_id from ${OTHER}\n  union all\n  select\n    customer_id,\n    ssn\n  from ${REF}\n)\nselect customer_id, tax_id\nfrom u`,
+        critical: true,
+      },
+      {
+        name: "scalar subquery in the final select",
+        base: cteBase,
+        head: src("ssn as tax_ref", `\nselect\n  o.customer_id,\n  (select s.tax_ref from src s where s.customer_id = o.customer_id) as tax_ref\nfrom ${OTHER} o`),
+        critical: true,
+      },
+      { name: "multi-line coalesce keeps the value", base: plainBase, head: `select customer_id,\n  coalesce(\n    ssn,\n    ''\n  ) as tax_ref\nfrom ${REF}`, critical: true },
+      { name: "kept by `max` in the final select", base: cteBase, head: src("ssn as tax_ref", "\nselect\n  customer_id,\n  max(tax_ref) as tax_ref\nfrom src\ngroup by 1"), critical: true },
+      { name: "a Jinja column list in the final select", base: cteBase, head: src("ssn", "\nselect\n  {{ dbt_utils.star(from=ref('customers'), except=['region']) }}\nfrom src"), critical: true },
+      // Masked, dropped, or only tested: undecided.
+      {
         name: "multi-line sha2 in a CTE",
         base: cteBase,
-        head: "with src as (\n  select\n    customer_id,\n    sha2(\n      ssn\n    ) as tax_ref\n  from {{ ref('customers') }}\n)\nselect\n  customer_id,\n  tax_ref\nfrom src",
-        diff: "-    customer_id\n+    customer_id,\n+    sha2(\n+      ssn\n+    ) as tax_ref\n-  customer_id\n+  customer_id,\n+  tax_ref\n",
+        head: src("sha2(\n      ssn\n    ) as tax_ref", "\nselect\n  customer_id,\n  tax_ref\nfrom src"),
         critical: false,
       },
       {
         name: "multi-line regexp_replace in a subquery",
         base: subBase,
-        head: "select s.customer_id,\n  s.tax_ref\nfrom (\n  select customer_id,\n    regexp_replace(\n      ssn,\n      '[0-9]',\n      '*'\n    ) as tax_ref\n  from {{ ref('customers') }}\n) s",
-        diff: "-select s.customer_id\n+select s.customer_id,\n+  s.tax_ref\n-  select customer_id\n+  select customer_id,\n+    regexp_replace(\n+      ssn,\n+      '[0-9]',\n+      '*'\n+    ) as tax_ref\n",
+        head: `select s.customer_id,\n  s.tax_ref\nfrom (\n  select customer_id,\n    regexp_replace(\n      ssn,\n      '[0-9]',\n      '*'\n    ) as tax_ref\n  from ${REF}\n) s`,
+        critical: false,
+      },
+      { name: "raw in the import CTE, hashed in the final select", base: cteBase, head: src("ssn", "\nselect\n  customer_id,\n  sha2(ssn) as tax_ref\nfrom src"), critical: false },
+      { name: "raw in the import CTE, dropped by the final select", base: cteBase, head: src("ssn as tax_ref", "\nselect\n  customer_id\nfrom src"), critical: false },
+      {
+        name: "hashed in `final`, then `select * from final`",
+        base: cteBase,
+        head: src("ssn", ", final as (\n  select customer_id, sha2(ssn) as tax_ref\n  from src\n)\nselect * from final"),
+        critical: false,
+      },
+      {
+        name: "hashed under the same name",
+        base: cteBase,
+        head: src("ssn", ", final as (\n  select customer_id, sha2(ssn) as ssn\n  from src\n)\nselect customer_id, ssn\nfrom final"),
+        critical: false,
+      },
+      { name: "`* exclude` of the column", base: cteBase, head: src("ssn", "\nselect * exclude (ssn)\nfrom src"), critical: false },
+      {
+        name: "read only by an `exists` condition",
+        base: cteBase,
+        head: src("ssn", `\nselect o.*\nfrom ${OTHER} o\nwhere exists (select * from src s where s.customer_id = o.customer_id)`),
+        critical: false,
+      },
+      { name: "`order by` line, not selected", base: plainBase, head: `select customer_id\nfrom ${REF}\norder by\n  ssn`, critical: false },
+      {
+        name: "window partition line",
+        base: plainBase,
+        head: `select\n  customer_id,\n  row_number() over (partition by\n    ssn\n  order by customer_id) as rn\nfrom ${REF}`,
         critical: false,
       },
     ]
+    // A line diff of base → head.
+    const diffOf = (base: string, head: string) => {
+      const a = base.split("\n")
+      const b = head.split("\n")
+      const lcs = Array.from({ length: a.length + 1 }, () => new Array<number>(b.length + 1).fill(0))
+      for (let i = a.length - 1; i >= 0; i--)
+        for (let j = b.length - 1; j >= 0; j--) lcs[i][j] = a[i] === b[j] ? lcs[i + 1][j + 1] + 1 : Math.max(lcs[i + 1][j], lcs[i][j + 1])
+      const out: string[] = []
+      let i = 0
+      let j = 0
+      while (i < a.length || j < b.length) {
+        if (i < a.length && j < b.length && a[i] === b[j]) {
+          i++
+          j++
+        } else if (j < b.length && (i >= a.length || lcs[i][j + 1] >= lcs[i + 1][j])) out.push(`+${b[j++]}`)
+        else out.push(`-${a[i++]}`)
+      }
+      return `${out.join("\n")}\n`
+    }
     for (const reviewers of [[], ["dbt_patterns"]]) {
       for (const c of cases) {
         const env = await runReview({
-          changedFiles: [{ path: "models/marts/m1.sql", status: "modified" as const, diff: c.diff }],
+          changedFiles: [{ path: "models/marts/m1.sql", status: "modified" as const, diff: diffOf(c.base, c.head) }],
           config: { ...DEFAULT_REVIEW_CONFIG, reviewers },
           rubric: DEFAULT_RUBRIC,
           mode: "gate",
@@ -3309,6 +3381,25 @@ describe("orchestrate", () => {
         }).toEqual({ reviewers, name: c.name, critical: c.critical, blocks: c.critical })
       }
     }
+  })
+
+  test("the raw-base proof parses each file once however many PII lines it adds", async () => {
+    // 300 added PII lines in a 3,000-column CTE: the proof is asked twice per line.
+    const cols = Array.from({ length: 3000 }, (_, i) => `    c${i},`).join("\n")
+    const pii = Array.from({ length: 300 }, (_, i) => `    ssn as t${i},`).join("\n")
+    const base = `with src as (\n  select\n${cols}\n    customer_id\n  from {{ ref('customers') }}\n)\nselect * from src`
+    const head = `with src as (\n  select\n${cols}\n${pii}\n    customer_id\n  from {{ ref('customers') }}\n)\nselect customer_id from src`
+    const t0 = performance.now()
+    const env = await runReview({
+      changedFiles: [{ path: "models/marts/m1.sql", status: "modified" as const, diff: `${pii.split("\n").map((l) => `+${l}`).join("\n")}\n` }],
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"] },
+      rubric: DEFAULT_RUBRIC,
+      mode: "gate",
+      runner: piiRunner(["ssn"]),
+      getContent: content(head, base),
+    })
+    expect(env.findings.filter(isTwin).length).toBeGreaterThan(0)
+    expect(performance.now() - t0).toBeLessThan(1500)
   })
 
   test("without a compiled base, an added `c.ssn` over a raw base with no `ssn` still blocks", async () => {

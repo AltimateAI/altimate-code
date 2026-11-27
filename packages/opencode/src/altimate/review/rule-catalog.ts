@@ -417,6 +417,27 @@ interface ParsedSelects {
   items: SelectItem[]
   /** Per `scope#branch`, the sources its FROM / JOIN clauses read. */
   sources: Map<string, Source[]>
+  /** Per `scope#branch`, the masked text of its FROM/JOIN source list: table
+   *  names, aliases and table-function or `pivot`/`unpivot` arguments, without
+   *  the bodies of FROM subqueries and without join conditions. */
+  sourceText: Map<string, string>
+  /** `scope#branch` selects with a source the parser could not name: a
+   *  parenthesised join, a Jinja expression other than `ref`/`source`/`this`, a
+   *  comma-joined source after a join condition, or no source at all in a
+   *  select that holds a Jinja expression (which may be its FROM). */
+  unknownSources: Set<string>
+  /** Nested queries that are the operand of `in`, `exists`, `any`, `some` or
+   *  `all`: their rows decide a condition and never reach an output. */
+  predicates: Set<string>
+  /** The SQL has a shape whose scopes, select lists or output names are not
+   *  modelled: a CTE column list (`a (x, y) as (…)`), a `with` inside
+   *  parentheses, `select as struct|value`, or a select list that stops at a
+   *  clause word used as a column (`select topic, offset, ssn from …`). */
+  unmodelled: boolean
+  /** Items holding a Jinja expression that may stand for a raw column or a
+   *  column list: an item without an alias, or one whose expression is not a
+   *  macro call (`{{ col }} as x`). */
+  jinjaItems: Set<SelectItem>
 }
 
 /** Offset of the `)` closing the `(` at `open` in masked SQL, or the end. */
@@ -446,16 +467,21 @@ function parseSelects(sql: string): ParsedSelects {
   }
   const items: SelectItem[] = []
   const sources = new Map<string, Source[]>()
+  const sourceText = new Map<string, string>()
+  const unknownSources = new Set<string>()
+  const predicates = new Set<string>()
+  const jinjaItems = new Set<SelectItem>()
+  let unmodelled = false
   // The scope each nested query's `(` opens, so a FROM subquery is a named source.
   const parenScope = new Map<number, string>()
   // Each select's scope, branch and the offset its select list ends at.
-  const selects: Array<{ scope: string; branch: number; end: number }> = []
+  const selects: Array<{ scope: string; branch: number; start: number; end: number }> = []
   const scopes: string[] = [ROOT_SCOPE]
   const branches = new Map<string, number>()
   // `name as (`, or `name (col, …) as (`: a column list still names the CTE, whose
   // outputs then keep the body's own names (so a renamed column resolves to nothing).
   const cteHead = new RegExp(
-    String.raw`(${SEGMENT})\s*(?:\([^()]*\)\s*)?\s+as\s*(?:(?:not\s+)?materialized\s*)?$`,
+    String.raw`(${SEGMENT})\s*(\([^()]*\)\s*)?\s+as\s*(?:(?:not\s+)?materialized\s*)?$`,
     "i",
   )
   const tableRef = new RegExp(String.raw`^\s*((?:${SEGMENT}\s*\.\s*)*${SEGMENT})`, "i")
@@ -483,6 +509,23 @@ function parseSelects(sql: string): ParsedSelects {
     nestedKeys.add(key)
     return key
   }
+  // A `from` of the same select after `at`: at its nesting level, before a set
+  // operator or the end of the query (`is distinct from` is not one).
+  const fromAhead = (at: number) => {
+    let depth = 0
+    for (let j = at; j < s.length; j++) {
+      const d = s[j]
+      if (d === "(") depth++
+      else if (d === ")") {
+        if (--depth < 0) return false
+      } else if (d === ";" && depth === 0) return false
+      else if (depth === 0 && !isWordChar(s[j - 1])) {
+        if (SET_OPERATOR.test(s.slice(j, j + 10))) return false
+        if (/^from\b/i.test(s.slice(j, j + 5)) && !/\bdistinct\s+$/i.test(s.slice(Math.max(0, j - 12), j))) return true
+      }
+    }
+    return false
+  }
   for (let i = 0; i < s.length; i++) {
     const c = s[i]
     if (c === "(") {
@@ -490,10 +533,19 @@ function parseSelects(sql: string): ParsedSelects {
       const cte = cteHead.exec(s.slice(Math.max(0, i - 200), i))
       // A CTE body is named by its CTE; a nested query gets its own scope; any
       // other parenthesis (a call, a grouping) stays in its parent's scope.
-      if (cte && !/^as$/i.test(cte[1])) scopes.push(unquote(cte[1]))
-      else if (/^[\s(]*select\b/i.test(s.slice(i + 1, i + 200))) {
+      if (/^\s*with\b/i.test(s.slice(i + 1, i + 50))) unmodelled = true
+      if (cte && !/^as$/i.test(cte[1])) {
+        scopes.push(unquote(cte[1]))
+        if (cte[2]) unmodelled = true
+      } else if (/^[\s(]*select\b/i.test(s.slice(i + 1, i + 200))) {
         scopes.push(nestedKey(parent, i))
         parenScope.set(i, scopes[scopes.length - 1])
+        const before = s.slice(Math.max(0, i - 40), i)
+        if (
+          /(?:^|[^\w$."\x60])(?:in|exists|any|some)\s*$/i.test(before) ||
+          (/(?:^|[^\w$."\x60])all\s*$/i.test(before) && !/\b(?:union|intersect|except|minus)\s+all\s*$/i.test(before))
+        )
+          predicates.add(scopes[scopes.length - 1])
       } else scopes.push(parent)
       continue
     }
@@ -514,6 +566,7 @@ function parseSelects(sql: string): ParsedSelects {
       const prefix = /^\s+(?:(?:distinct|all)\b|top\s+\d+\b)?/i.exec(s.slice(start, start + 100))
       if (prefix) start += prefix[0].length
     }
+    if (/^\s*as\s+(?:struct|value)\b/i.test(s.slice(start, start + 40))) unmodelled = true
     let depth = 0
     let itemStart = start
     let position = 0
@@ -523,7 +576,7 @@ function parseSelects(sql: string): ParsedSelects {
       if (!raw.trim()) return
       const first = itemStart + (raw.length - raw.trimStart().length)
       const last = itemStart + raw.trimEnd().length - 1
-      items.push({
+      const item: SelectItem = {
         ...describeItem(raw),
         exact: normalizeItem(withLiterals.slice(itemStart, stop)),
         scope,
@@ -531,7 +584,13 @@ function parseSelects(sql: string): ParsedSelects {
         position: position++,
         startLine: lineOf(first),
         endLine: lineOf(last),
-      })
+      }
+      items.push(item)
+      // Jinja expressions of the item (masked to `_`, so not ones inside a literal).
+      const jinja = [...sql.slice(itemStart, stop).matchAll(/\{\{[\s\S]*?\}\}/g)].filter(
+        (m) => s[itemStart + m.index!] === "_",
+      )
+      if (jinja.length && (!splitAlias(item.text).alias || jinja.some((m) => !m[0].includes("(")))) jinjaItems.add(item)
     }
     for (let j = start; j <= s.length; j++) {
       const d = s[j]
@@ -554,23 +613,39 @@ function parseSelects(sql: string): ParsedSelects {
         // `* except (…)` (BigQuery) is one item, not a set operation.
         !(/^except\b/i.test(s.slice(j, j + 7)) && /\*\s*$/.test(s.slice(itemStart, j)))
       ) {
+        // A list that stops at any other clause word while this select still
+        // has a FROM ahead stopped at a column named like one (`offset`, `window`).
+        if (!/^from\b/i.test(s.slice(j, j + 5)) && !SET_OPERATOR.test(s.slice(j, j + 10)) && fromAhead(j)) unmodelled = true
         push(j)
         end = j
         break
       }
     }
-    selects.push({ scope, branch, end })
+    selects.push({ scope, branch, start, end })
   }
   // Sources read at each select's own level: the table, CTE or subquery after
   // `from`, `join`, or a `,` inside a FROM list, with its alias, up to the end of
   // the select (`)`, `;`, a set operator).
   const aliasRe = new RegExp(String.raw`^\s+(?:as\s+)?(${SEGMENT})`, "i")
   const segmentRe = new RegExp(SEGMENT, "g")
-  for (const { scope, branch, end } of selects) {
+  for (const { scope, branch, start, end } of selects) {
+    const key = `${scope}#${branch}`
     const read: Source[] = []
     let inFrom = false
+    // Inside a join's `on` / `using` condition: a `,` at this level starts a
+    // comma-joined source (`join b on … , lateral flatten(…) f`).
+    let inCondition = false
     let depth = 0
-    for (let j = end; j < s.length; j++) {
+    // The source list's own text, one segment per source: from after `from`,
+    // `join` or `,` to the next of them or the word that ends the list.
+    let text = ""
+    let segment = -1
+    const closeSegment = (stop: number) => {
+      if (segment >= 0) text += ` ${s.slice(segment, stop)}`
+      segment = -1
+    }
+    let j = end
+    for (; j < s.length; j++) {
       const d = s[j]
       if (depth === 0 && (d === ")" || d === ";")) break
       if (d === "(") depth++
@@ -580,6 +655,7 @@ function parseSelects(sql: string): ParsedSelects {
       if (boundary && SET_OPERATOR.test(s.slice(j, j + 10))) break
       const kw = boundary ? /^(from|join)\b/i.exec(s.slice(j, j + 5)) : null
       if (kw || (inFrom && d === ",")) {
+        closeSegment(j)
         const after = j + (kw ? kw[0].length : 1)
         const lead = after + (/^\s*/.exec(s.slice(after, after + 200))?.[0].length ?? 0)
         let name: string | undefined
@@ -609,14 +685,33 @@ function parseSelects(sql: string): ParsedSelects {
           const src: Source = short && short !== name ? { name, short } : { name }
           if (alias && !NOT_A_SOURCE_ALIAS.has(unquote(alias))) src.alias = unquote(alias)
           read.push(src)
-        }
+          // A Jinja source that is not a relation call could name anything, a CTE included.
+          if (short?.startsWith("{{") && !/^\{\{[-+]?(?:(?:ref|source)\(|this[-+]?\}\}$)/.test(short)) unknownSources.add(key)
+        } else unknownSources.add(key)
+        // A FROM subquery's body is its own scope: only its alias belongs to this list.
+        segment = s[lead] === "(" && name ? rest : after
         inFrom = true
         j = after - 1
-      } else if (boundary && FROM_LIST_END.test(s.slice(j, j + 10))) inFrom = false
+        inCondition = false
+      } else if (inCondition && d === ",") {
+        // Not read as a source (the resolvers keep their source list): its text
+        // counts, and the select reads something unnamed.
+        closeSegment(j)
+        segment = j + 1
+        unknownSources.add(key)
+      } else if (boundary && FROM_LIST_END.test(s.slice(j, j + 10))) {
+        closeSegment(j)
+        inCondition = inFrom || inCondition ? /^(?:on|using)\b/i.test(s.slice(j, j + 6)) : false
+        inFrom = false
+      }
     }
-    sources.set(`${scope}#${branch}`, read)
+    closeSegment(j)
+    // No source parsed, yet a Jinja expression in the select: it may hold the FROM.
+    if (!read.length && /(?<![\w$])_{4,}(?![\w$])/.test(s.slice(start, j))) unknownSources.add(key)
+    sources.set(key, read)
+    sourceText.set(key, text)
   }
-  return { items, sources }
+  return { items, sources, sourceText, unknownSources, predicates, unmodelled, jinjaItems }
 }
 
 /**
@@ -961,6 +1056,379 @@ export function finalOutputs(sql: string): FinalOutputs {
   const prefixes = new Set<string>()
   for (const list of sources.values()) for (const src of list) if (!byScope.has(src.name)) prefixes.add(splitTable(src.name).prefix)
   return { raw, names, signatures, reads, passthrough: stars.length > 0, starRaw, prefixes }
+}
+
+/** A Jinja statement tag that emits no text of its own: control flow and `set`. */
+export const SILENT_JINJA_TAG = /^\{%[-+]?\s*(?:if|elif|else|endif|for|endfor|set|endset)\b[\s\S]*%\}$/
+
+// Calls whose result does not reveal their argument: hashes, encryption and
+// masking (by name, so a project's own `mask_ssn(…)` counts), a part of a
+// string, a count or a length, and a date reduced to a part or a difference.
+// Any other call (`coalesce`, `trim`, `max`, `replace`, a cast) keeps the value.
+const MASKING_NAME =
+  /hash|md5|hmac|fingerprint|encrypt|cipher|mask|redact|anonymi[sz]e|pseudonymi[sz]e|tokeni[sz]e|obfuscate|scramble|(?:^|_)(?:sha|crc)(?:\d|_|$)/i
+const MASKING_EXACT = new Set(
+  "left right substr substring regexp_replace translate length len char_length character_length count count_if countif approx_count_distinct datediff date_diff timestampdiff timestamp_diff months_between age date_trunc datetrunc extract date_part datepart year".split(
+    " ",
+  ),
+)
+// `unmask(…)`, `decrypt(…)`, `detokenize(…)` undo one.
+const isMaskingCall = (name: string) =>
+  MASKING_EXACT.has(name.toLowerCase()) || (MASKING_NAME.test(name) && !/^(?:de|un)/i.test(name))
+const NULL_TEST = new RegExp(String.raw`(?<![\w$."\x60])${COLUMN_REF}\s+is\s+(?:not\s+)?null\b`, "gi")
+
+/**
+ * The columns an expression item reads in a way that keeps their value: every
+ * read except those inside a masking call (`sha2(ssn)`, `right(ssn, 4)`), a
+ * null test (`ssn is null`), a window or filter clause, or a query nested in
+ * the item (its own scope). `coalesce(ssn, '')`, `max(ssn)`, `case … then ssn
+ * end` and `replace(ssn, '-', '')` still read `ssn`.
+ */
+function unmaskedReads(text: string): Array<{ qualifier?: string; column: string }> {
+  let e = splitAlias(text).expr
+  for (let m = /\(\s*select\b/i.exec(e); m; m = /\(\s*select\b/i.exec(e))
+    e = `${e.slice(0, m.index)} ${e.slice(closingParen(e, m.index) + 1)}`
+  const call = /(?<![\w$."\x60])((?:[A-Za-z_][\w$]*\s*\.\s*)*)([A-Za-z_][\w$]*)\s*\(/g
+  for (let m = call.exec(e); m; m = call.exec(e)) {
+    if (!isMaskingCall(m[2])) continue
+    const open = m.index + m[0].length - 1
+    e = `${e.slice(0, m.index)} ${e.slice(closingParen(e, open) + 1)}`
+    call.lastIndex = m.index
+  }
+  return columnReads(e.replace(NULL_TEST, " "))
+}
+
+/** What a `*` select item passes on: which source it spans and under which
+ *  names it carries a column (`* exclude (a)`, `* except (a)`, `* replace (f(a)
+ *  as a)`, `* rename (a as b)`, in any combination). `undefined` for an item
+ *  that is not a star; `opaque` for one whose columns cannot be named
+ *  (`object_construct(*)`, `struct(t.*)`, `* ilike '…'`). */
+interface StarItem {
+  qualifier?: string
+  opaque?: boolean
+  /** The names `column` leaves the star under: none when it is excluded or
+   *  replaced by an expression, its new name when renamed. */
+  carries: (column: string) => string[]
+}
+
+const STAR_HEAD = new RegExp(String.raw`^((?:${SEGMENT}\s*\.\s*)*)\*`)
+const SEGMENT_ONLY = new RegExp(String.raw`^${SEGMENT}$`)
+
+function starItem(text: string): StarItem | undefined {
+  const head = STAR_HEAD.exec(text)
+  if (!head) {
+    // A `*` inside the item that is not a multiplication (an operand on both
+    // sides): `object_construct(*)`, `struct(t.*)`, `as struct *`. `count(*)`
+    // reads no column.
+    const t = text.replace(/\bcount\s*\(\s*\*\s*\)/gi, " ")
+    for (let i = t.indexOf("*"); i >= 0; i = t.indexOf("*", i + 1)) {
+      const prev = /(\S)\s*$/.exec(t.slice(0, i))?.[1]
+      const next = /^\s*(\S)/.exec(t.slice(i + 1))?.[1]
+      const product = !!prev && /[\w$)"'\x60\]]/.test(prev) && !!next && /[\w$("'\x60.+-]/.test(next)
+      if (!product) return { opaque: true, carries: (c) => [c] }
+    }
+    return undefined
+  }
+  const segments = [...head[1].matchAll(new RegExp(SEGMENT, "g"))].map((m) => unquote(m[0]))
+  const qualifier = segments.length ? segments[segments.length - 1] : undefined
+  const dropped = new Set<string>()
+  // Entries of `replace (…)` then `rename (…)`, in the order they apply: the
+  // columns each entry's value comes from (unmasked), and its name.
+  const steps: Array<{ kind: "replace" | "rename"; from: string[]; to: string }> = []
+  let rest = text.slice(head[0].length)
+  while (rest.trim()) {
+    const m = /^\s*(exclude|except|replace|rename)\b\s*/i.exec(rest)
+    if (!m) return { qualifier, opaque: true, carries: (c) => [c] }
+    rest = rest.slice(m[0].length)
+    let list: string
+    if (rest.startsWith("(")) {
+      const close = closingParen(rest, 0)
+      list = rest.slice(1, close)
+      rest = rest.slice(close + 1)
+    } else {
+      // One bare entry: `exclude ssn`, `rename a as b`.
+      const bare = new RegExp(String.raw`^${SEGMENT}(?:\s+as\s+${SEGMENT})?`, "i").exec(rest)
+      if (!bare) return { qualifier, opaque: true, carries: (c) => [c] }
+      list = bare[0]
+      rest = rest.slice(bare[0].length)
+    }
+    const kind = m[1].toLowerCase()
+    for (const entry of topLevelItems(list)) {
+      if (!entry.trim()) continue
+      if (kind === "exclude" || kind === "except") {
+        if (!SEGMENT_ONLY.test(entry.trim())) return { qualifier, opaque: true, carries: (c) => [c] }
+        dropped.add(unquote(entry.trim()))
+        continue
+      }
+      // `expr as name`: a raw column under `name`, or an expression that masks it.
+      const item = describeItem(entry)
+      const { alias } = splitAlias(item.text)
+      if (!alias) return { qualifier, opaque: true, carries: (c) => [c] }
+      const from = item.rawColumn ? [item.rawColumn] : unmaskedReads(item.text).map((r) => r.column)
+      steps.push({ kind: kind as "replace" | "rename", from, to: unquote(alias) })
+    }
+  }
+  const carries = (column: string) => {
+    if (dropped.has(column)) return []
+    let names = new Set([column])
+    for (const step of steps) {
+      if (step.kind === "rename") {
+        if (step.from.some((f) => names.delete(f))) names.add(step.to)
+        continue
+      }
+      // `replace (expr as to)`: `to` now holds `expr`. It still holds the column
+      // only when `expr` reads it unmasked.
+      const kept = step.from.some((f) => names.has(f))
+      names.delete(step.to)
+      if (kept) names.add(step.to)
+    }
+    return [...names]
+  }
+  return { qualifier, carries }
+}
+
+const wordIn = (text: string | undefined, word: string, dotted = true) =>
+  !!text &&
+  new RegExp(
+    `(?<![\\w$${dotted ? "" : "."}])["\x60]?${word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}["\x60]?(?![\\w$${dotted ? "" : "."}])`,
+    "i",
+  ).test(text)
+
+/** Whether raw columns of a model's SQL can reach its final output raw. */
+export interface RawReach {
+  /** Every select item of the SQL, as `selectItems` returns them. */
+  items: SelectItem[]
+  /** The item's output keeps `column`'s value: it selects it raw, or reads it in
+   *  an expression outside any masking call (`coalesce(ssn, '')`, not `sha2(ssn)`). */
+  carries: (item: SelectItem, column: string) => boolean
+  /** The value this item outputs may reach the model's final output unmasked. */
+  reaches: (item: SelectItem) => boolean
+  /** The item may pass `column`'s value on to the final output unmasked: it
+   *  carries it and reaches the output, or is a `*` that does not exclude or
+   *  mask it and whose name for it reaches the output. */
+  passes: (item: SelectItem, column: string) => boolean
+  /** The final output may expose a column named `column` raw: through an item
+   *  that carries it and reaches the output, or through a `*` (or a Jinja
+   *  column list) over a table whose columns the SQL does not list. */
+  mayExpose: (column: string) => boolean
+  /** The 1-based `line` sits in a clause that selects nothing: the nearest
+   *  clause word before it, outside closed parentheses, is `where`, `group by`,
+   *  `order by`, `partition by`, `having`, `qualify`, `on`, `using`, `from` or
+   *  `join`. `false` when that cannot be told (no clause word, or `select`). */
+  inClause: (line: number) => boolean
+}
+
+// Jinja expressions are masked to `_`, a word character: one glued to a clause
+// word (`{{ config() }}select`, `from{{ ref('x') }}`) hides that word.
+const JINJA_GLUED_KEYWORD =
+  /\}\}(?=(?:select|from|join|union|intersect|except|minus|with|where|on|using|as)\b)|(?<![\w$])(?:select|from|join|union|intersect|except|minus|with|where|on|using|as)(?=\{\{)/i
+const CLAUSE_WORD =
+  /^(select|from|join|where|group\s+by|order\s+by|partition\s+by|having|qualify|on|using|limit|offset|window|with|union|intersect|except|minus|fetch|into|values)\b/i
+const SELECTS_NOTHING = /^(?:from|join|where|group\s+by|order\s+by|partition\s+by|having|qualify|on|using)$/i
+
+/**
+ * Follows a raw column from the select item that reads it to the model's final
+ * output, on SQL that may still hold Jinja. The answer is "may reach": it is
+ * `false` only when every query that can read the item's scope is known and
+ * none passes the column on raw, so an unknown shape counts as reaching.
+ *
+ * An item of the final select reaches the output. An item of a CTE or a FROM
+ * subquery reaches it when a query reading that scope (in its FROM/JOIN list,
+ * or correlated from a query nested in one that does) selects the item's
+ * output name raw, or through a `*` that spans the scope and neither excludes
+ * nor masks it, or in an expression that keeps its value (`coalesce(x, '')`,
+ * `max(x)`), and that query's own output reaches it in turn (`with a as (select
+ * ssn as x …), b as (select x from a) select x from b`). A query that reads the
+ * name only inside masking calls (`sha2(x)`, `right(x, 4)`), or does not select
+ * it, stops it.
+ *
+ * Counted as reaching, because the names leaving them are unknown:
+ * a nested query that is not a FROM source (a scalar subquery in a select
+ * list, a `lateral` subquery, a parenthesised set-operation branch); a reader
+ * whose source list names the column (`unpivot (v for k in (ssn))`,
+ * `unnest(s.ssn)`); a reader selecting the scope as a whole row (`select s`,
+ * `to_json(s)`), expanding it as a struct (`ssn.*`), with a `*` that cannot be
+ * named (`object_construct(*)`), or with a Jinja expression that may stand for
+ * columns; a reader whose sources did not parse, matched by name alone; and any
+ * SQL with a CTE column list, a parenthesised `with`, `select as struct`, a
+ * clause word used as a column name, a Jinja expression glued to a clause word,
+ * or a Jinja statement other than control flow. The operand of `in` / `exists`
+ * / `any` / `some` / `all` decides a condition and reaches nothing.
+ */
+export function rawReach(sql: string): RawReach {
+  const { items, sources, sourceText, unknownSources, predicates, unmodelled, jinjaItems } = parseSelects(sql)
+  const opaque =
+    unmodelled ||
+    JINJA_GLUED_KEYWORD.test(sql) ||
+    !(sql.match(/\{%[\s\S]*?%\}/g) ?? []).every((t) => SILENT_JINJA_TAG.test(t))
+  const byKey = new Map<string, SelectItem[]>()
+  const firstNames = new Map<string, string | undefined>()
+  for (const item of items) {
+    const key = `${item.scope}#${item.branch}`
+    const list = byKey.get(key)
+    if (list) list.push(item)
+    else byKey.set(key, [item])
+    if (item.branch === 0) firstNames.set(`${item.scope}\u0000${item.position}`, item.name)
+  }
+  // A later set-operation branch outputs under the first branch's name.
+  const outName = (item: SelectItem) =>
+    item.branch === 0 ? item.name : (firstNames.get(`${item.scope}\u0000${item.position}`) ?? item.name)
+  const scopes = new Set(items.map((i) => i.scope))
+  const fromSubqueries = new Set<string>()
+  for (const list of sources.values()) for (const src of list) if (src.name.includes(">")) fromSubqueries.add(src.name)
+  const inPredicate = (scope: string) => {
+    for (let at = scope.length; at > 0; at = scope.lastIndexOf(">", at - 1)) if (predicates.has(scope.slice(0, at))) return true
+    return false
+  }
+  const naming = (src: Source) => [src.alias, src.name, src.short].filter((x): x is string => !!x)
+  // Every select whose rows can reach an output (not the operand of a
+  // condition), with the selects it is nested in, at any depth.
+  const keyed = [...sources.keys()].map((key) => ({ key, scope: key.slice(0, key.lastIndexOf("#")) }))
+  const selects = keyed
+    .filter((sel) => !inPredicate(sel.scope))
+    .map((sel) => ({ ...sel, outer: keyed.filter((o) => sel.scope.startsWith(`${o.scope}>`)) }))
+  const stars = new Map<SelectItem, StarItem | undefined>()
+  const starOf = (item: SelectItem) => {
+    if (!stars.has(item)) stars.set(item, starItem(item.text))
+    return stars.get(item)
+  }
+  // An expression item's unmasked reads. A `*` item names no column it reads
+  // (`* exclude (ssn)`), and a raw item is its column.
+  const readsByItem = new Map<SelectItem, Array<{ qualifier?: string; column: string }>>()
+  const readsOf = (item: SelectItem) => {
+    let reads = readsByItem.get(item)
+    if (!reads) readsByItem.set(item, (reads = item.rawColumn || starOf(item) ? [] : unmaskedReads(item.text)))
+    return reads
+  }
+
+  const reach = (scope: string, name: string | undefined, seen: Set<string>): boolean => {
+    if (scope === ROOT_SCOPE) return true
+    if (scope.includes(">")) {
+      if (inPredicate(scope)) return false
+      // Not a FROM source: a scalar subquery, a lateral or a set-operation branch.
+      if (!fromSubqueries.has(scope)) return true
+    }
+    if (!name) return true
+    const visit = `${scope}\u0000${name}`
+    if (seen.has(visit)) return false
+    seen.add(visit)
+    for (const sel of selects) {
+      const own = (sources.get(sel.key) ?? []).filter((src) => src.name === scope)
+      const outerSelects = sel.outer
+      const outer = outerSelects.flatMap((o) => (sources.get(o.key) ?? []).filter((src) => src.name === scope))
+      // Sources that did not parse, here or in an enclosing select, or a list
+      // that names the scope without parsing it as a source.
+      const blind =
+        unknownSources.has(sel.key) ||
+        outerSelects.some((o) => unknownSources.has(o.key)) ||
+        (!own.length && !scope.includes(">") && wordIn(sourceText.get(sel.key), scope, false))
+      if (!own.length && !outer.length && !blind) continue
+      // A table function, `unpivot` or array join over the column moves its
+      // values under another name.
+      if (wordIn(sourceText.get(sel.key), name)) return true
+      const scopeNames = new Set([...own, ...outer].flatMap(naming))
+      const otherNames = new Set(
+        [sel, ...outerSelects].flatMap((x) => (sources.get(x.key) ?? []).filter((src) => src.name !== scope).flatMap(naming)),
+      )
+      // A qualifier names the scope, or no source the parser knows: an alias it
+      // did not read (`src pivot (…) p`) may still be the scope, so that counts.
+      const fromScope = (qualifier?: string) =>
+        !qualifier || blind || scopeNames.has(qualifier) || !otherNames.has(qualifier)
+      for (const item of byKey.get(sel.key) ?? []) {
+        if (jinjaItems.has(item)) return true
+        const star = starOf(item)
+        if (star) {
+          // An unqualified `*` spans the select's own sources only.
+          if (star.qualifier ? !fromScope(star.qualifier) : !own.length && !blind) continue
+          // `x.*` over a struct column named like the output expands its fields.
+          if (star.qualifier === name && !scopeNames.has(name)) return true
+          if (star.opaque) return true
+          if (star.carries(name).some((carried) => reach(sel.scope, carried, seen))) return true
+          continue
+        }
+        // The name selected raw, or read by an expression that keeps its value.
+        const keeps = item.rawColumn
+          ? item.rawColumn === name && fromScope(item.rawQualifier)
+          : readsOf(item).some((r) => r.column === name && fromScope(r.qualifier))
+        if (keeps) {
+          if (reach(sel.scope, outName(item), seen)) return true
+          continue
+        }
+        // The scope as a whole row: `select s from src s`, `to_json(s)`.
+        const row = (r: { qualifier?: string; column: string }) => !r.qualifier && scopeNames.has(r.column)
+        if (item.rawColumn ? !item.rawQualifier && scopeNames.has(item.rawColumn) : readsOf(item).some(row)) return true
+      }
+    }
+    return false
+  }
+  const memo = new Map<string, boolean>()
+  const reachMemo = (scope: string, name: string | undefined) => {
+    const key = `${scope}\u0000${name ?? "\u0000"}`
+    let out = memo.get(key)
+    if (out === undefined) memo.set(key, (out = reach(scope, name, new Set())))
+    return out
+  }
+  const carries = (item: SelectItem, column: string) =>
+    item.rawColumn ? item.rawColumn === column : readsOf(item).some((r) => r.column === column)
+  const reaches = (item: SelectItem) => opaque || reachMemo(item.scope, outName(item))
+  const passes = (item: SelectItem, column: string) => {
+    const star = starOf(item)
+    if (!star) return carries(item, column) && reaches(item)
+    if (star.opaque) return opaque || reachMemo(item.scope, undefined)
+    return star.carries(column).some((name) => opaque || reachMemo(item.scope, name))
+  }
+  const exposeMemo = new Map<string, boolean>()
+  const mayExpose = (column: string) => {
+    if (opaque) return true
+    let out = exposeMemo.get(column)
+    if (out !== undefined) return out
+    out =
+      items.some((i) => carries(i, column) && reaches(i)) ||
+      selects.some((sel) => {
+        // A select reading a table whose columns are not listed in the SQL.
+        const tables = (sources.get(sel.key) ?? []).filter((src) => !scopes.has(src.name))
+        if (!tables.length && !unknownSources.has(sel.key)) return false
+        const tableNames = new Set(tables.flatMap(naming))
+        const derivedNames = new Set((sources.get(sel.key) ?? []).filter((src) => scopes.has(src.name)).flatMap(naming))
+        return (byKey.get(sel.key) ?? []).some((item) => {
+          if (jinjaItems.has(item)) return reachMemo(sel.scope, column)
+          const star = starOf(item)
+          if (star) {
+            // A `*` qualified by a CTE or subquery passes that scope's columns only.
+            if (star.qualifier && derivedNames.has(star.qualifier) && !tableNames.has(star.qualifier)) return false
+            return star.opaque ? reachMemo(sel.scope, column) : star.carries(column).some((c) => reachMemo(sel.scope, c))
+          }
+          // A table as a whole row.
+          return !!item.rawColumn && !item.rawQualifier && tableNames.has(item.rawColumn) && reachMemo(sel.scope, column)
+        })
+      })
+    exposeMemo.set(column, out)
+    return out
+  }
+  let masked: string | undefined
+  let lineStarts: number[] | undefined
+  const inClause = (line: number) => {
+    masked ??= maskSql(sql)
+    if (!lineStarts) {
+      lineStarts = [0]
+      for (let i = 0; i < masked.length; i++) if (masked[i] === "\n") lineStarts.push(i + 1)
+    }
+    const start = lineStarts[line - 1]
+    if (start === undefined) return false
+    // Backwards from the line, skipping parentheses that closed before it.
+    let depth = 0
+    for (let i = start - 1; i >= 0; i--) {
+      const c = masked[i]
+      if (c === ")") depth++
+      else if (c === "(") depth = Math.max(0, depth - 1)
+      else if (depth === 0 && !isWordChar(masked[i - 1]) && /[a-z]/i.test(c)) {
+        const word = CLAUSE_WORD.exec(masked.slice(i, i + 24))
+        if (word) return SELECTS_NOTHING.test(word[1].replace(/\s+/g, " "))
+      }
+    }
+    return false
+  }
+  return { items, carries, reaches, passes, mayExpose, inClause }
 }
 
 /** A diff line with comments and whitespace normalised (and a leading/trailing

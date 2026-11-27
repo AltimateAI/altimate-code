@@ -16,12 +16,15 @@ import { type ReviewMode, type ReviewScope, type VerdictEnvelope, buildEnvelope,
 import { detectModelPatterns, detectSchemaYmlPatterns, splitDiff } from "./dbt-patterns"
 import {
   type FinalOutputs,
+  type RawReach,
   type RelationPrefixes,
   type SelectItem,
   type SelectItemColumn,
   finalOutputs,
+  rawReach,
   refCovered,
   ROOT_SCOPE,
+  SILENT_JINJA_TAG,
   normalizeSelectLine,
   selectItems,
 } from "./rule-catalog"
@@ -1121,18 +1124,22 @@ interface ModelContext {
  * multiplication (`a * b`) also matches, which only leaves the base undecided.
  */
 const RAW_BASE_PLAIN_EXPR = /^\{\{-?\s*(?:(?:ref|source|config)\s*\([^{}]*\)|this)\s*-?\}\}$/
-const RAW_BASE_SILENT_TAG = /^\{%[-+]?\s*(?:if|elif|else|endif|for|endfor|set|endset)\b[\s\S]*%\}$/
 const RAW_BASE_STAR = /(?:^|[\s.(])\*(?=\s|$|[a-z(),])/i
-function rawBaseLacks(oldSql: string | undefined, names: string[]): boolean {
-  if (!oldSql || !names.length) return false
-  if (!(oldSql.match(/\{\{[\s\S]*?\}\}/g) ?? []).every((e) => RAW_BASE_PLAIN_EXPR.test(e))) return false
-  if (!(oldSql.match(/\{%[\s\S]*?%\}/g) ?? []).every((t) => RAW_BASE_SILENT_TAG.test(t))) return false
-  if (selectItems(oldSql).some((i) => RAW_BASE_STAR.test(i.text.replace(/\bcount\s*\(\s*\*\s*\)/gi, " ")))) return false
+/** What `rawBaseLacks` reads from a raw base, parsed once per file: its code
+ *  without comments, or `undefined` when the base is undecided for every column. */
+function rawBaseCode(oldSql: string | undefined): string | undefined {
+  if (!oldSql) return undefined
+  if (!(oldSql.match(/\{\{[\s\S]*?\}\}/g) ?? []).every((e) => RAW_BASE_PLAIN_EXPR.test(e))) return undefined
+  if (!(oldSql.match(/\{%[\s\S]*?%\}/g) ?? []).every((t) => SILENT_JINJA_TAG.test(t))) return undefined
+  if (selectItems(oldSql).some((i) => RAW_BASE_STAR.test(i.text.replace(/\bcount\s*\(\s*\*\s*\)/gi, " ")))) return undefined
   // Comments out, literals and quoted identifiers kept (one pass, so `--` inside
   // `'…'` or `"…"` is not a comment).
-  const code = oldSql.replace(/\{#[\s\S]*?#\}|\/\*[\s\S]*?\*\/|--[^\n]*|'(?:[^']|'')*'|"(?:[^"]|"")*"/g, (m) =>
+  return oldSql.replace(/\{#[\s\S]*?#\}|\/\*[\s\S]*?\*\/|--[^\n]*|'(?:[^']|'')*'|"(?:[^"]|"")*"/g, (m) =>
     m.startsWith("'") || m.startsWith('"') ? m : " ",
   )
+}
+function rawBaseLacks(code: string | undefined, names: string[]): boolean {
+  if (code === undefined || !names.length) return false
   return names.every((n) => !new RegExp(`(?<![\\w$])${n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w$])`, "i").test(code))
 }
 
@@ -1574,13 +1581,17 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     }
     return r
   }
-  // Head select items spanning any head line equal to `line` (normalised).
-  const headItemsOnLine = (file: string, line: string) => {
+  // The 1-based head lines equal to `line` (normalised).
+  const headLineNumbers = (file: string, line: string) => {
     const r = reindentInfo(file)
     const normalized = normalizeSelectLine(line)
     if (!r || !normalized) return []
-    const lineNos = r.headLines.flatMap((l, i) => (l === normalized ? [i + 1] : []))
-    return r.head.filter((i) => lineNos.some((n) => i.startLine <= n && n <= i.endLine))
+    return r.headLines.flatMap((l, i) => (l === normalized ? [i + 1] : []))
+  }
+  // Head select items spanning any head line equal to `line` (normalised).
+  const headItemsOnLine = (file: string, line: string) => {
+    const lineNos = headLineNumbers(file, line)
+    return (reindentInfo(file)?.head ?? []).filter((i) => lineNos.some((n) => i.startLine <= n && n <= i.endLine))
   }
   const isReindented = (file: string, line: string) => {
     const r = reindentInfo(file)
@@ -1591,21 +1602,59 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // Without a compiled base every other PII lane is undecided (an unknown-
   // confidence warning). A regex twin whose source columns the raw base cannot
   // expose (`rawBaseLacks`) is proven new, so those undecided findings must not
-  // stand in for it: it survives their dedup and keeps its severity below. A
-  // column whose line lies inside a head select item that does not select it raw
-  // (a masking expression such as `sha2(\n ssn\n) as tax_ref`) proves nothing.
-  // The item may sit in any scope: a CTE's `ssn as tax_ref` reaches the output
-  // through the final select's `tax_ref`.
+  // stand in for it: it survives their dedup and keeps its severity below.
+  // The proof is withheld only on evidence, from the head's raw SQL, that the
+  // column on the twin's line does not reach the model's output unmasked:
+  //  - its line lies inside select items and each reads it only inside masking
+  //    calls or a window clause (`sha2(\n ssn\n) as tax_ref`; not `coalesce(\n
+  //    ssn,\n '')`, which keeps the value), or is a `*` that excludes it;
+  //  - every item carrying it on that line sits in a CTE or FROM subquery that
+  //    no reading query passes on unmasked (`rawReach`: hashed or dropped on the
+  //    way, or read only by an `in`/`exists` condition);
+  //  - its line is in no select item but in a clause that selects nothing
+  //    (`order by\n ssn`), and nothing in the head may expose the column.
+  // Anything `rawReach` cannot follow counts as reaching, so the twin blocks.
+  const headReachByFile = new Map<string, RawReach | undefined>()
+  const headReach = (file: string) => {
+    if (!headReachByFile.has(file)) {
+      const sql = ctxByPath.get(file)?.newSql
+      headReachByFile.set(file, sql ? rawReach(sql) : undefined)
+    }
+    return headReachByFile.get(file)
+  }
+  const rawBaseCodeByFile = new Map<string, string | undefined>()
+  const baseCode = (file: string) => {
+    if (!rawBaseCodeByFile.has(file)) rawBaseCodeByFile.set(file, rawBaseCode(ctxByPath.get(file)?.oldSql))
+    return rawBaseCodeByFile.get(file)
+  }
+  // Asked for each twin in the dedup and again for its severity: kept per finding
+  // (per-token twins share a fingerprint, so the finding itself is the key).
+  const provenByFinding = new WeakMap<Finding, boolean>()
   const provenNewTwin = (f: Finding) => {
+    let proven = provenByFinding.get(f)
+    if (proven === undefined) provenByFinding.set(f, (proven = proveNewTwin(f)))
+    return proven
+  }
+  const proveNewTwin = (f: Finding) => {
     const ctx = ctxByPath.get(f.file)
     if (!ctx || !hasOldSide(ctx.file) || ctx.engineOldSql) return false
     const result = (f.evidence?.result ?? {}) as { column?: string; line?: string; items?: SelectItemColumn[] }
     const hits = result.items?.length ? result.items : result.column ? [{ column: result.column, line: result.line ?? "" }] : []
-    const notMasked = ({ column, line }: { column: string; line: string }) => {
-      const items = headItemsOnLine(f.file, line)
-      return !items.length || items.some((i) => i.rawColumn?.toLowerCase() === column)
+    if (!hits.length || !rawBaseLacks(baseCode(f.file), hits.map((h) => h.column))) return false
+    const reach = headReach(f.file)
+    const head = reindentInfo(f.file)?.head ?? []
+    const mayReachOutput = (hit: { column: string; line: string }) => {
+      const column = hit.column.toLowerCase()
+      const lineNos = headLineNumbers(f.file, hit.line)
+      if (!reach || !lineNos.length) return true
+      // Any head line with this text counts: the diff does not say which one it is.
+      return lineNos.some((n) => {
+        const items = head.filter((i) => i.startLine <= n && n <= i.endLine)
+        if (items.length) return items.some((i) => reach.passes(i, column))
+        return !reach.inClause(n) || reach.mayExpose(column)
+      })
     }
-    return hits.length > 0 && hits.every(notMasked) && rawBaseLacks(ctx.oldSql, hits.map((h) => h.column))
+    return hits.every(mayReachOutput)
   }
   const merged = flat.filter((f) => {
     const tool = f.evidence?.tool
