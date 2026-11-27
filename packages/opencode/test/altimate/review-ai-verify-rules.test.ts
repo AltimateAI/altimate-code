@@ -599,3 +599,28 @@ describe("round 2b: critical rule findings", () => {
     expect(llm).not.toHaveBeenCalled()
   })
 })
+
+describe("round 4: what counts as a rule verdict; which findings go first under the ceiling", () => {
+  test("an answer without a valid verdict is no verdict; a refutation without evidence is unverifiable", async () => {
+    const rules = [ruleFinding(1), ruleFinding(2), ruleFinding(3), ruleFinding(4)]
+    const { llm } = scripted(() => ({
+      text: JSON.stringify([
+        { id: "c1", evidence: "line 11" },
+        verdict("c2", { verdict: "refuted", evidence: "" }),
+        verdict("c3", { verdict: "maybe" }),
+        verdict("c4", { verdict: "refuted", evidence: "line 11 has no division" }),
+      ]),
+    }))
+    const res = await runAiVerify(
+      { findings: rules, grounding: [], evidence: evidence(), model: FAKE_MODEL, rulesOnly: true },
+      { llm, env: {} },
+    )
+    expect(res.status.ruleVerdicts!.map((v) => [v.verdict, v.noVerdict])).toEqual([
+      [null, true],
+      ["unverifiable", false],
+      [null, true],
+      ["refuted", false],
+    ])
+    expect(res.status).toMatchObject({ reviewed: 2, unreviewed: 2 })
+  })
+})

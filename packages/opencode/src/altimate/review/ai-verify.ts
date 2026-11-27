@@ -285,6 +285,8 @@ export interface ModelFeatures {
   /** At most 240 characters citing a tool result or a quoted line. */
   evidence: string
   toolsUsed: string[]
+  /** The answer named no valid verdict, so the parser supplied `unverifiable`. */
+  verdictMissing?: true
 }
 
 const CLAIM_TYPES: ModelFeatures["claimType"][] = [
@@ -377,6 +379,9 @@ export function parseVerifierOutput(text: string, ids: Set<string>): Map<string,
       requiresAssumedInput: r.requires_assumed_input === true || r.requires_assumed_input === "true",
       evidence: typeof r.evidence === "string" ? r.evidence.trim().slice(0, EVIDENCE_MAX) : "",
       toolsUsed: tools.map((t) => t.slice(0, 40)),
+      ...(typeof r.verdict === "string" && (VERDICTS as string[]).includes(r.verdict.trim().toLowerCase())
+        ? {}
+        : { verdictMissing: true as const }),
     })
   }
   return out
@@ -724,7 +729,10 @@ function ruleStatus(
   const batchOf = new Map<number, number>()
   batches.forEach((b, k) => b.idx.forEach((i) => batchOf.set(i, k)))
   const ruleVerdicts: RuleVerdict[] = findings.map((f, i) => {
-    const m = model[i]
+    // An answer without a valid verdict is no verdict, and a refutation without evidence is no
+    // verification (as in `triage`): it counts as unverifiable.
+    const raw = model[i]?.verdictMissing ? undefined : model[i]
+    const m = raw?.verdict === "refuted" && !raw.evidence.trim() ? { ...raw, verdict: "unverifiable" as const } : raw
     return {
       id: f.id,
       file: f.file,
