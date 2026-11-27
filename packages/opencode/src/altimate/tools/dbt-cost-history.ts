@@ -226,13 +226,13 @@ export function bigqueryBoundarySql(input: { project: string; location?: unknown
   const w = input.window
   // What can join a run that starts after the cutoff: a job that ended within a minute before it, or the CTAS into
   // dbt's temporary relation that ended within ten minutes before its final build.
-  return `select /* run boundary */ /* ${OWN_MARK} */ job_id, user_email, creation_time, end_time, statement_type, destination_table.table_id as destination_table_id, destination_table.dataset_id as destination_dataset_id
+  return `select /* run boundary */ /* ${OWN_MARK} */ job_id, user_email, creation_time, end_time, state, statement_type, destination_table.table_id as destination_table_id, destination_table.dataset_id as destination_dataset_id
 from ${bqJobs(input.project, input.location, input.view ?? "JOBS")}
 where creation_time < ${at(w.startBeforeMs)} and creation_time > ${at(w.startAfterMs)}
-  and upper(job_type) = 'QUERY' and upper(state) = 'DONE' and error_result is null
+  and upper(job_type) = 'QUERY' and ${LIVE_OR_DONE}
   and parent_job_id is null
   and (
-    end_time >= ${at(w.joinEndAtLeastMs)}
+    end_time is null or end_time >= ${at(w.joinEndAtLeastMs)}
     or (upper(statement_type) = 'CREATE_TABLE_AS_SELECT' and ends_with(destination_table.table_id, '${DBT_TMP_SUFFIX}')
         and end_time >= ${at(w.tmpEndAtLeastMs)})
   )
@@ -307,7 +307,7 @@ export function parseTime(value: string | null | undefined): number {
  * hit its limit, else the start of the window. `stmts` are the matching statements that started before it and could
  * join a run that began earlier; undefined when they could not be read.
  */
-export type Boundary = { cutoff: number; stmts?: { user: string | null; start: number; end: number; tmp?: boolean; dataset?: string | null }[] }
+export type Boundary = { cutoff: number; stmts?: { user: string | null; start: number; end: number; tmp?: boolean; dataset?: string | null; live?: boolean }[] }
 
 /** When the boundary statements can't be read, runs starting this close to the cutoff are not trusted. */
 export const BOUNDARY_FALLBACK_MS = 24 * 3_600_000
@@ -519,25 +519,20 @@ export function bigqueryRuns(
   })
   // Only a group with a build job is a run; a group of reads (`dbt show`) is not priced.
   const candidates = all.filter((r) => r.build)
-  const live = candidates.filter((r) => !(r.pending || (asOfMs !== undefined && r.end >= asOfMs - BQ_CHAIN_MS)))
+  const joins = (b: NonNullable<Boundary["stmts"]>[number], r: BqUnit) =>
+    (b.user ?? "") === r.user &&
+    (b.end >= r.start - BQ_CHAIN_MS ||
+      (!!b.tmp &&
+        (r.finals ?? []).some((f) => b.end <= f.start && b.end >= f.start - BQ_TMP_JOIN_MS && (!b.dataset || !f.dataset || b.dataset === f.dataset))))
+  // A job before the cutoff that is still running and could join the run makes it a run in progress, not just an uncertain one.
+  const liveBefore = (r: BqUnit) => !!boundary?.stmts?.some((b) => b.live && joins(b, r))
+  const live = candidates.filter((r) => !(r.pending || (asOfMs !== undefined && r.end >= asOfMs - BQ_CHAIN_MS) || liveBefore(r)))
   // Unread statements before the cutoff that would have joined a run, whatever the run now pairs with: a job by the
   // run's user that ended at or after a minute before the run's start, or a temporary-relation CTAS by the same user,
   // into the dataset of a final build (or any, when that build names none), that ended at or before the build's start
   // and within ten minutes of it (an unread CTAS could have been the one that build took). Such a run is not trusted.
   const unsure = (r: BqUnit) =>
-    boundary
-      ? boundary.stmts
-        ? boundary.stmts.some(
-            (b) =>
-              (b.user ?? "") === r.user &&
-              (b.end >= r.start - BQ_CHAIN_MS ||
-                (b.tmp &&
-                  (r.finals ?? []).some(
-                    (f) => b.end <= f.start && b.end >= f.start - BQ_TMP_JOIN_MS && (!b.dataset || !f.dataset || b.dataset === f.dataset),
-                  ))),
-          )
-        : r.start <= boundary.cutoff + BOUNDARY_FALLBACK_MS
-      : false
+    boundary ? (boundary.stmts ? boundary.stmts.some((b) => joins(b, r)) : r.start <= boundary.cutoff + BOUNDARY_FALLBACK_MS) : false
   const counted = live.filter((r) => !unsure(r))
   const runs = counted.filter((r) => r.known && Number.isFinite(r.start))
   const causes: Causes = {}
@@ -802,6 +797,7 @@ export async function loadHistory(input: {
    * The matching statements just before the period `read` covers: the history read's own cutoff when it hit its
    * limit, else the start of the window. A boundary that can't be read (or hit its limit) is unknown.
    */
+  const live = (r: Row) => isPending(r) || !Number.isFinite(parseTime(r.end_time))
   const boundaryFor = async (read: Row[], sqlFor: (window: BoundaryWindow) => string): Promise<Boundary | undefined> => {
     if (!read.length) return undefined
     const starts = read.map((r) => parseTime(r.creation_time)).filter(Number.isFinite)
@@ -824,7 +820,9 @@ export async function loadHistory(input: {
           .map((r) => ({
             user: r.user_email ?? null,
             start: parseTime(r.creation_time),
-            end: parseTime(r.end_time),
+            // A job with no end time is still running: it lasts to the instant read.
+            end: live(r) ? asOfMs : parseTime(r.end_time),
+            live: live(r),
             tmp: stmtType(r) === "CREATE_TABLE_AS_SELECT" && (r.destination_table_id ?? "").endsWith(DBT_TMP_SUFFIX),
             dataset: r.destination_dataset_id ?? null,
           })),

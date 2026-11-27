@@ -622,6 +622,14 @@ describe("boundary SQL", () => {
     expect(sql).toContain(`strpos(query, '"node_id": "model.shop.orders"') > 0`)
   })
 
+  test("the boundary query reads jobs still queued or running, with their state, and those with no end time yet", () => {
+    const sql = bigqueryBoundarySql({ project: "p", needle: "n", window: boundaryWindow(CUT) })
+    expect(sql).toContain("or upper(state) in ('PENDING','RUNNING')")
+    expect(sql).not.toContain("upper(state) = 'DONE' and error_result is null\n  and parent_job_id")
+    expect(sql).toContain("end_time, state, statement_type")
+    expect(sql).toContain(`end_time is null or end_time >= timestamp_millis(${CUT - 60_000})`)
+  })
+
   test("the boundary query returns the id of each statement, so the ones already read can be excluded", () => {
     expect(bigqueryBoundarySql({ project: "p", needle: "n", window: boundaryWindow(1) })).toContain("select /* run boundary */ /* altimate_cost_read */ job_id")
   })
@@ -872,6 +880,20 @@ describe("review follow-ups: read-only hooks, boundary identity and unfinished r
     expect(cost.runs).toBe(1)
     expect(cost.notes.join(" ")).toContain("Some runs ran in a reservation")
     expect(cost.notes.join(" ")).not.toContain("newest run")
+  })
+
+  test("a job still running before the cutoff that could join a run makes it a run in progress, not an uncertain one", () => {
+    const rows = [job("m", 5, 1, TIB, "MERGE")]
+    const stmt = (live: boolean, user = "a@x.com") => ({ user, start: C3 - 30 * MIN, end: C3 + 100 * MIN, live })
+    const cost = (live: boolean, user?: string) => priceBigquery(rows, undefined, "model.s.m", {}, { cutoff: C3, stmts: [stmt(live, user)] }).cost
+    const running = cost(true)
+    expect(running.basis).toBe("none")
+    expect(running.notes).toContain("A run still in progress was left out.")
+    expect(running.notes.join(" ")).not.toContain("may have started before")
+    // The same job, finished, only makes the run uncertain.
+    expect(cost(false).notes.join(" ")).toContain("may have started before")
+    // Another user's running job cannot join it.
+    expect(cost(true, "b@x.com").runs).toBe(1)
   })
 
   test("two runs in progress are counted in one note", () => {

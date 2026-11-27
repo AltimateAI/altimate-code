@@ -1017,6 +1017,26 @@ describe("dbt_cost_estimate cost", () => {
       })
     })
 
+    test.each([
+      ["a running job", "RUNNING", null],
+      ["a job with no end time yet", "DONE", null],
+    ])("a boundary job that is %s before the cutoff leaves the run in progress, not priced", async (_name, state, end) => {
+      await withNow(async () => {
+        const edge = asOf - 30 * day
+        const rowsAtEdge = [row("m", edge + 300_000, edge + 360_000, "MERGE", TIB)]
+        useAdapter(calls, {
+          ...answer(rowsAtEdge),
+          boundary: async () =>
+            table(["job_id", "user_email", "creation_time", "end_time", "state", "statement_type", "destination_table_id", "destination_dataset_id"], [
+              ["live", "a@x.com", iso(edge - 3_600_000), end, state, "MERGE", null, null],
+            ]),
+        })
+        const cost = await ask()
+        expect(cost.runs).toBeUndefined()
+        expect(cost.notes).toContain("A run still in progress was left out.")
+      })
+    })
+
     test("an unread temporary CTAS into another dataset does not drop a complete run, one into its dataset does", async () => {
       await withNow(async () => {
         // The window is not full, so the boundary starts at the window's edge; place the unread CTAS just before it.
