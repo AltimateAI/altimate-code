@@ -84,6 +84,11 @@ export function envBool(raw: string | undefined): boolean | undefined {
 }
 
 const WARNED = new Set<string>()
+/** What else a switch's env variable accepts, for the warning. */
+const ENV_EXTRA: Partial<Record<AiSwitchName, string>> = {
+  verifyRules: ", drop_refuted/off",
+  rulesOff: ", or an absolute path to a JSON list of rule ids",
+}
 
 /** Every switch for one review: env, then the `ai:` config object, then the default. */
 export function resolveAiSwitches(
@@ -101,7 +106,7 @@ export function resolveAiSwitches(
     // No warning for a lane that will not run (`warn: false`).
     if (opts.warn !== false && fromEnv === undefined && raw?.trim() && !WARNED.has(warning)) {
       WARNED.add(warning)
-      process.stderr.write(`⚠️  ignoring ${AI_SWITCH_ENV[name]}=${raw}: use 1/0 (or true/false, on/off, yes/no)\n`)
+      process.stderr.write(`⚠️  ignoring ${AI_SWITCH_ENV[name]}=${raw}: use 1/0 (or true/false, on/off, yes/no${ENV_EXTRA[name] ?? ""})\n`)
     }
     out[name] = fromEnv ?? configuredSwitch(configured[name as keyof typeof configured]) ?? AI_SWITCH_DEFAULTS[name]
   }

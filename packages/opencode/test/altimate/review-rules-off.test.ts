@@ -317,3 +317,42 @@ describe("round 2: rule types off apply only to files the AI lane reviewed", () 
     expect(failed.findings).toEqual(base.findings)
   })
 })
+
+describe("round 2b: rules-off env and list file", () => {
+  test("`yes`/`no` work like the other switches; the warning names the extra spellings", () => {
+    expect(rulesOffEnv("no").on).toBe(false)
+    expect(rulesOffEnv("YES").on).toBe(true)
+    expect(resolveAiSwitches({ ai: true }, { ALTIMATE_REVIEW_RULES_OFF: "no" }).rulesOff).toBe(false)
+    const write0 = process.stderr.write
+    let err = ""
+    ;(process.stderr as any).write = (s: string) => ((err += s), true)
+    try {
+      resolveAiSwitches({ ai: true }, { ALTIMATE_REVIEW_AI_VERIFY_RULES: "sometimes-2b" })
+    } finally {
+      ;(process.stderr as any).write = write0
+    }
+    expect(err).toContain("drop_refuted/off")
+  })
+
+  test("a list named `..x.json` inside the review's repository is refused", async () => {
+    await using repo = await tmpdir({ git: true })
+    const file = join(repo.path, "..rules.json")
+    writeFileSync(file, '["a:b"]')
+    expect(() => resolveRulesOff({ ai: true }, { rulesOff: true }, { ALTIMATE_REVIEW_RULES_OFF: file }, repo.path)).toThrow("inside the git work tree")
+  })
+
+  test("fails closed when no work tree resolves; the review's repository is checked from anywhere", async () => {
+    await using repo = await tmpdir({ git: true })
+    await using elsewhere = await tmpdir()
+    const file = join(repo.path, "rules.json")
+    writeFileSync(file, '["a:b"]')
+    const cwd = process.cwd()
+    process.chdir(elsewhere.path)
+    try {
+      expect(() => resolveRulesOff({ ai: true }, { rulesOff: true }, { ALTIMATE_REVIEW_RULES_OFF: file })).toThrow("refusing it")
+      expect(() => resolveRulesOff({ ai: true }, { rulesOff: true }, { ALTIMATE_REVIEW_RULES_OFF: file }, repo.path)).toThrow("inside the git work tree")
+    } finally {
+      process.chdir(cwd)
+    }
+  })
+})

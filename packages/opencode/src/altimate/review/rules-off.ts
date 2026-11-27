@@ -7,49 +7,29 @@
 // AI findings and `critical` rule findings are never dropped (`classify-pii:exposes` is
 // critical for a new high-confidence PII column in a mart), and the finder's grounding is
 // left as it is. With the AI lane off, skipped or failed nothing changes (fail-open).
-// `ai.rulesOff: false` or `ALTIMATE_REVIEW_RULES_OFF=0|off|false` keeps every type;
+// `ai.rulesOff: false` or `ALTIMATE_REVIEW_RULES_OFF=0|off|false|no` keeps every type;
 // `ai.rulesOn: [ids]` keeps single types; `ALTIMATE_REVIEW_RULES_OFF=<path>` replaces the
 // list with a JSON list of rule ids. Rule ids compare in one spelling (`normalizeRuleId`).
-import { existsSync, readFileSync, realpathSync } from "node:fs"
-import { dirname, isAbsolute, join, relative } from "node:path"
+import { readFileSync } from "node:fs"
+import { trustedFilePath } from "./trusted-file"
+import { envBool } from "./ai-switches"
 import { type Finding, findingOrigin, normalizeRuleId } from "./finding"
 import type { ReviewConfig } from "./config"
 import type { AiSwitches } from "./ai-switches"
 
 /**
- * `ALTIMATE_REVIEW_RULES_OFF` read: `1`/`on`/`true` and `0`/`off`/`false` (any case) set the
- * switch; a value that looks like a path (has a slash or backslash, or ends in `.json`) names a list
+ * `ALTIMATE_REVIEW_RULES_OFF` read: the boolean spellings every switch takes (`envBool`:
+ * `1`/`true`/`on`/`yes`, `0`/`false`/`off`/`no`, any case) set the switch; a value that looks like a path (has a slash or backslash, or ends in `.json`) names a list
  * file and turns it on; anything else is ignored, so a natural spelling never reaches the
  * file system.
  */
 export function rulesOffEnv(v: string | undefined): { on?: boolean; file?: string } {
   const t = v?.trim()
   if (!t) return {}
-  if (/^(1|on|true)$/i.test(t)) return { on: true }
-  if (/^(0|off|false)$/i.test(t)) return { on: false }
+  const on = envBool(t)
+  if (on !== undefined) return { on }
   if (/[\\/]/.test(t) || /\.json$/i.test(t)) return { on: true, file: t }
   return {}
-}
-
-/** The git work tree containing `dir` (the nearest ancestor with a `.git` entry), realpath'd; undefined outside one. */
-function workTreeOf(dir: string): string | undefined {
-  let d: string
-  try {
-    d = realpathSync(dir)
-  } catch {
-    return undefined
-  }
-  for (;;) {
-    if (existsSync(join(d, ".git"))) return d
-    const up = dirname(d)
-    if (up === d) return undefined
-    d = up
-  }
-}
-
-function isInsideDir(p: string, dir: string): boolean {
-  const rel = relative(dir, p)
-  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))
 }
 
 export const NOISY_RULES_OFF: readonly string[] = [
@@ -100,29 +80,21 @@ export function resolveRulesOff(
   cfg: Pick<ReviewConfig, "ai">,
   switches: Pick<AiSwitches, "rulesOff">,
   env: Record<string, string | undefined> = process.env,
-  cwd: string = process.cwd(),
+  reviewDir?: string,
 ): Set<string> | undefined {
   if (!switches.rulesOff) return undefined
   const { file } = rulesOffEnv(env.ALTIMATE_REVIEW_RULES_OFF)
   let list: readonly string[] = NOISY_RULES_OFF
   if (file) {
-    // The list decides which rule findings are posted: a file in the PR checkout would let a PR choose.
-    if (!isAbsolute(file)) throw new Error("ALTIMATE_REVIEW_RULES_OFF must name an absolute path outside the repository")
-    const tree = workTreeOf(cwd)
-    const real = (() => {
-      try {
-        return realpathSync(file)
-      } catch {
-        return file
-      }
-    })()
-    if (tree && isInsideDir(real, tree))
-      throw new Error(`ALTIMATE_REVIEW_RULES_OFF: the rule list ${file} is inside the git work tree; place it outside the checkout`)
-    // Synchronous: read once per review, before it starts, from a synchronous resolver; a small local file.
+    // The list decides which rule findings are posted: a file in the PR checkout would let a PR
+    // choose. `trustedFilePath` checks it against the review's repository and the process's work
+    // tree and fails closed; the realpath it checked is the one read.
     let parsed: unknown
     try {
-      parsed = JSON.parse(readFileSync(file, "utf8"))
+      // Synchronous: read once per review, before it starts, from a synchronous resolver; a small local file.
+      parsed = JSON.parse(readFileSync(trustedFilePath("ALTIMATE_REVIEW_RULES_OFF", file, [reviewDir]), "utf8"))
     } catch (e) {
+      if ((e as NodeJS.ErrnoException)?.code !== "ENOENT" && e instanceof Error && e.message.startsWith("ALTIMATE_REVIEW_RULES_OFF")) throw e
       const why = (e as NodeJS.ErrnoException)?.code === "ENOENT" ? "file not found" : e instanceof Error ? e.message : String(e)
       throw new Error(`ALTIMATE_REVIEW_RULES_OFF: cannot read the rule list ${file}: ${why}`)
     }

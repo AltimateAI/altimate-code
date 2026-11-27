@@ -379,7 +379,7 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
   const aiOn = !aiDisabledReason
   const aiSwitches = resolveAiSwitches(config, process.env, { warn: aiOn })
   // Rule types off once the AI lane runs; a bad list file named by the env variable fails here.
-  const rulesOff = aiOn ? resolveRulesOff(config, aiSwitches) : undefined
+  const rulesOff = aiOn ? resolveRulesOff(config, aiSwitches, process.env, gitRoot) : undefined
   // `pythonFiles`: .py files outside the dbt project skip every lane but the AI lane. A file
   // renamed out of this project belongs to it (`--all-projects` assigns it here), so it is offered
   // at its new path whatever other projects took.
