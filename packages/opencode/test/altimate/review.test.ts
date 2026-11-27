@@ -2686,6 +2686,47 @@ describe("orchestrate", () => {
     }
   })
 
+  test("a regex twin takes the output name from the parsed select item: next-line, implicit and quoted aliases", async () => {
+    const cases: Array<[string, string]> = [
+      ["  c.ssn\n    as tax_ref", "tax_ref"],
+      ["  c.ssn tax_ref", "tax_ref"],
+      ['  c.ssn as "Tax Ref"', "Tax Ref"],
+    ]
+    for (const [item, output] of cases) {
+      // The output name is what the engine reports for the base and head.
+      const runner: ReviewRunner = {
+        ...piiRunner(["ssn"]),
+        detectPii: async (sql: string) => ({ columns: /ssn/.test(sql) ? [output] : [] }),
+      }
+      const base = `select c.customer_id,\n${item}\nfrom customers c`
+      const head = base.replace(/\bc\./g, "cust.").replace("customers c", "customers cust")
+      const diff = [
+        "-select c.customer_id,",
+        `-${item.split("\n")[0]}`,
+        "-from customers c",
+        "+select cust.customer_id,",
+        `+${item.split("\n")[0].replace("c.", "cust.")}`,
+        "+from customers cust",
+        "",
+      ].join("\n")
+      for (const reviewers of [["pii_exposure"], [], ["dbt_patterns"]]) {
+        const env = await runReview({
+          changedFiles: [{ path: "models/marts/m.sql", status: "modified", diff }],
+          config: { ...DEFAULT_REVIEW_CONFIG, reviewers },
+          rubric: DEFAULT_RUBRIC,
+          mode: "gate",
+          runner,
+          getContent: content(head, base),
+        })
+        expect({ item, reviewers, pii: env.findings.filter((f) => f.category === "pii_exposure") }).toEqual({
+          item,
+          reviewers,
+          pii: [],
+        })
+      }
+    }
+  })
+
   test("a PII line moved from a CTE into the final select is not a reindent", async () => {
     // `    email,` leaves the CTE and the same text lands in the final select: the
     // model's output now carries `email`, though the line matches a removed one.

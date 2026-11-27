@@ -164,12 +164,11 @@ export function selectItemColumns(line: string, tokenRe: RegExp): SelectItemColu
   const seen = new Set<string>()
   // Literals are blanked first: their contents are neither column tokens nor
   // item separators (`email || ',' || phone_number as contact` is one item).
-  for (const item of topLevelItems(stripLiterals(stripComments(line)))) {
-    // The item's alias is its first `AS` outside parentheses (`cast(x as int) as y`
-    // → `y`), which also holds when the line runs on into `from …`.
-    let flat = item
-    while (/\([^()]*\)/.test(flat)) flat = flat.replace(/\([^()]*\)/g, " ")
-    const alias = /\bas\s+["`]?([A-Za-z_][\w$]*)/i.exec(flat)?.[1]?.toLowerCase()
+  // Clause text (`from ssn_vault`, `where …`) is not a select list.
+  for (const item of topLevelItems(selectListText(stripLiterals(stripComments(line))))) {
+    // The alias as the select-list parser reads it: with or without `AS`,
+    // quoted (`as "Tax Ref"` → `tax ref`), after any parenthesised expression.
+    const alias = itemAlias(item)
     for (const m of item.matchAll(global)) {
       const column = m[1]?.toLowerCase()
       if (!column || seen.has(`${column} ${alias ?? ""}`)) continue
@@ -204,6 +203,33 @@ const NOT_AN_ALIAS = new Set(
 // Words that end a select list at its own nesting level.
 const SELECT_LIST_END =
   /^(from|where|group|order|limit|qualify|having|union|intersect|except|minus|window|into|fetch|offset)\b/i
+
+/** `line` with everything outside a select list blanked: from a clause keyword
+ *  (`from`, `where`, …) at a query's own level up to the next `select`. A
+ *  keyword inside a call (`extract(day from d)`) does not count. */
+function selectListText(line: string): string {
+  // Per open parenthesis: whether it opens a subquery, and the outer mode.
+  const stack: Array<{ query: boolean; listing: boolean }> = []
+  let listing = true
+  let query = true
+  let out = ""
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i]
+    if (c === "(") {
+      stack.push({ query, listing })
+      query = /^\s*select\b/i.test(line.slice(i + 1, i + 40))
+      if (query) listing = false
+    } else if (c === ")") {
+      const outer = stack.pop()
+      if (outer) ({ query, listing } = outer)
+    } else if (query && !isWordChar(line[i - 1])) {
+      if (/^select\b/i.test(line.slice(i, i + 7))) listing = true
+      else if (SELECT_LIST_END.test(line.slice(i, i + 10))) listing = false
+    }
+    out += listing || c === "(" || c === ")" ? c : c === "\n" ? c : " "
+  }
+  return out
+}
 
 const unquote = (s: string) => s.replace(/^["`]|["`]$/g, "").toLowerCase()
 
@@ -295,14 +321,24 @@ function columnReads(expr: string): Array<{ qualifier?: string; column: string }
   return out
 }
 
+/** A select item's expression and its alias (`AS` or implicit), if any. */
+function splitAlias(text: string): { expr: string; alias?: string } {
+  const explicit = EXPLICIT_ALIAS.exec(text)
+  if (explicit) return { expr: explicit[1], alias: explicit[2] }
+  const implicit = IMPLICIT_ALIAS.exec(text)
+  if (implicit && !NOT_AN_ALIAS.has(unquote(implicit[2]))) return { expr: implicit[1], alias: implicit[2] }
+  return { expr: text }
+}
+
+/** A select item's output alias, unquoted and lowercased, when it has one. */
+function itemAlias(item: string): string | undefined {
+  const { alias } = splitAlias(normalizeItem(item))
+  return alias ? unquote(alias) : undefined
+}
+
 function describeItem(raw: string): Pick<SelectItem, "name" | "rawColumn" | "rawQualifier" | "text" | "reads"> {
   const text = normalizeItem(raw)
-  let expr = text
-  let alias: string | undefined
-  const explicit = EXPLICIT_ALIAS.exec(text)
-  const implicit = explicit ? null : IMPLICIT_ALIAS.exec(text)
-  if (explicit) [, expr, alias] = explicit
-  else if (implicit && !NOT_AN_ALIAS.has(unquote(implicit[2]))) [, expr, alias] = implicit
+  const { expr, alias } = splitAlias(text)
   const ref = RAW_COLUMN_EXPRS.map((re) => re.exec(expr)).find(Boolean)
   const rawColumn = ref ? unquote(ref[2]) : undefined
   const rawQualifier = ref?.[1] ? unquote(ref[1]) : undefined

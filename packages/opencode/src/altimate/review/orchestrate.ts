@@ -20,6 +20,7 @@ import {
   type SelectItemColumn,
   finalOutputs,
   refCovered,
+  ROOT_SCOPE,
   normalizeSelectLine,
   selectItems,
 } from "./rule-catalog"
@@ -1264,11 +1265,18 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // neither is a base output that only masks the column (`sha2(c.ssn) as ssn_hash`)
   // or a CTE's own alias that never reaches the final select. A column the head's
   // final output doesn't expose raw under that name is reported.
-  const isBaseExposed = (file: string, column: string, alias?: string) => {
-    const refs = [...(outputs(file, "new").raw.get(alias ?? column) ?? [])].filter((r) => r.endsWith(`.${column}`))
-    if (!refs.length) return false
+  // The output name comes from the head's final-select item that spans the line
+  // and reads the column raw, so an alias on the next line counts; else the
+  // twin's own alias, else the column.
+  const isBaseExposed = (file: string, column: string, alias?: string, line?: string) => {
+    const spanning = line ? headItemsOnLine(file, line).filter((i) => i.scope === ROOT_SCOPE && i.rawColumn === column) : []
+    const names = spanning.length ? [...new Set(spanning.map((i) => i.name!))] : [alias ?? column]
+    const head = outputs(file, "new").raw
     const exposed = baseRawPii(file)
-    return refs.every((r) => refCovered(r, exposed))
+    return names.every((name) => {
+      const refs = [...(head.get(name) ?? [])].filter((r) => r.endsWith(`.${column}`))
+      return refs.length > 0 && refs.every((r) => refCovered(r, exposed))
+    })
   }
   // A head PII output name the base already exposed. When the head selects a
   // column raw under it, the base must expose that same source column raw (base
@@ -1498,23 +1506,33 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // is unwrapped, exposes something new.
   const reindentByFile = new Map<string, { removed: Set<string>; head: SelectItem[]; headLines: string[]; base: Set<string> }>()
   const itemKey = (i: SelectItem) => `${i.scope}#${i.branch}\u0000${i.text.toLowerCase()}`
-  const isReindented = (file: string, line: string) => {
+  const reindentInfo = (file: string) => {
     const ctx = ctxByPath.get(file)
-    if (!ctx?.newSql || !ctx.oldSql) return false
+    if (!ctx?.newSql) return undefined
     let r = reindentByFile.get(file)
     if (!r) {
       r = {
         removed: new Set(splitDiff(ctx.file.diff).removed.map(normalizeSelectLine).filter(Boolean)),
         head: selectItems(ctx.newSql),
         headLines: ctx.newSql.split("\n").map(normalizeSelectLine),
-        base: new Set(selectItems(ctx.oldSql).map(itemKey)),
+        base: new Set(ctx.oldSql ? selectItems(ctx.oldSql).map(itemKey) : []),
       }
       reindentByFile.set(file, r)
     }
+    return r
+  }
+  // Head select items spanning any head line equal to `line` (normalised).
+  const headItemsOnLine = (file: string, line: string) => {
+    const r = reindentInfo(file)
     const normalized = normalizeSelectLine(line)
-    if (!normalized || !r.removed.has(normalized)) return false
+    if (!r || !normalized) return []
     const lineNos = r.headLines.flatMap((l, i) => (l === normalized ? [i + 1] : []))
-    const items = r.head.filter((i) => lineNos.some((n) => i.startLine <= n && n <= i.endLine))
+    return r.head.filter((i) => lineNos.some((n) => i.startLine <= n && n <= i.endLine))
+  }
+  const isReindented = (file: string, line: string) => {
+    const r = reindentInfo(file)
+    if (!r || !ctxByPath.get(file)?.oldSql || !r.removed.has(normalizeSelectLine(line))) return false
+    const items = headItemsOnLine(file, line)
     return items.length > 0 && items.every((i) => r.base.has(itemKey(i)))
   }
   const merged = flat.filter((f) => {
@@ -1548,12 +1566,12 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
         const classified = classifiedPiiColumnsByFile.get(f.file)
         if (classified?.has(result.column) || (result.alias && classified?.has(result.alias))) return false
         // A column the base already exposed is not newly exposed by this PR.
-        return !isBaseExposed(f.file, result.column, result.alias)
+        return !isBaseExposed(f.file, result.column, result.alias, result.line)
       }
       // `select-pii-columns` keeps every matched column with its alias and line:
       // drop it when each one is a reindented base line or already base-exposed.
       const items = result.items ?? []
-      if (items.length && items.every((i) => isReindented(f.file, i.line) || isBaseExposed(f.file, i.column, i.alias))) return false
+      if (items.length && items.every((i) => isReindented(f.file, i.line) || isBaseExposed(f.file, i.column, i.alias, i.line))) return false
       // Otherwise suppress only when a precise detector actually EMITTED a PII
       // finding for the file (so the exposure is reported by the better source,
       // not silently dropped).

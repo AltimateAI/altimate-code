@@ -42,6 +42,19 @@ describe("selectItemColumns", () => {
       { column: "email", alias: undefined, line: "email, 'passport' as kind" },
     ])
   })
+  test("reads the alias as the select-list parser does: implicit, quoted, after a call", () => {
+    expect(selectItemColumns("c.ssn tax_ref,", PII)).toEqual([{ column: "ssn", alias: "tax_ref", line: "c.ssn tax_ref," }])
+    expect(selectItemColumns('c.ssn as "Tax Ref"', PII)).toEqual([{ column: "ssn", alias: "tax ref", line: 'c.ssn as "Tax Ref"' }])
+    expect(selectItemColumns("cast(c.ssn as varchar) as tax_ref", PII)[0].alias).toBe("tax_ref")
+    expect(selectItemColumns("case when x then ssn end,", PII)[0].alias).toBeUndefined()
+  })
+  test("collects no tokens from clause text after the select list", () => {
+    expect(selectItemColumns("email from ssn", PII)).toEqual([{ column: "email", alias: undefined, line: "email from ssn" }])
+    expect(selectItemColumns("email from t where ssn is not null", PII).map((c) => c.column)).toEqual(["email"])
+    // A keyword inside a call is not a clause; a later `select` resumes the list.
+    expect(selectItemColumns("extract(year from passport) as y", PII).map((c) => c.column)).toEqual(["passport"])
+    expect(selectItemColumns("email from a union all select ssn from b", PII).map((c) => c.column)).toEqual(["email", "ssn"])
+  })
   test("does not split a select item on a comma inside a literal", () => {
     const line = "email || ',' || phone_number as contact"
     expect(selectItemColumns(line, PII)).toEqual([
