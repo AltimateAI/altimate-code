@@ -271,8 +271,13 @@ function bulletsFor(items: Finding[], group: boolean): Array<{ text: string; cou
     // (e.g. two different columns) are distinct issues and stay separate bullets.
     const names = [...new Set(g.map((f) => f.model ?? f.file))]
     if (group && names.length >= GROUP_MIN_MODELS) {
+      // A name longer than the whole list's budget is only counted, so it does
+      // not stop the shorter names after it from being listed.
       const listed = takeWhole(
-        names.slice(0, 8).map((n) => `\`${n}\``),
+        names
+          .map((n) => `\`${n}\``)
+          .filter((n) => n.length <= BULLET_NAMES_MAX)
+          .slice(0, 8),
         BULLET_NAMES_MAX,
         ", ",
       )

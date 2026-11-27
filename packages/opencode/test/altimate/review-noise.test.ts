@@ -312,6 +312,14 @@ describe("summary grouping and budget", () => {
     for (const m of ms) expect(local).toContain(`\`models/${m}.sql\``)
   })
 
+  test("a model name longer than the model-list budget is counted and the shorter names after it are listed", () => {
+    const ms = [`m_${"x".repeat(250)}`, "m_b", "m_c"]
+    const fs = ms.map((m) => finding({ model: m, file: `models/${m}.sql`, title: `${m}: new model has no uniqueness/grain test` }))
+    const md = renderSummary(buildEnvelope({ findings: fs, tier: "lite", mode: "comment" }))
+    expect(md).toContain("3 findings across 3 model(s): `m_b`, `m_c` (+1 more)")
+    expect(md).not.toContain("x".repeat(250))
+  })
+
   test("the posted comment stays within budget, most severe first, and counts what it hides", () => {
     const many: Finding[] = []
     for (let i = 0; i < 200; i++)
