@@ -2977,7 +2977,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   const idealPosted = computeIdealVerdict(verdictFindings.filter((f) => !withheldIds.has(f)), input.rubric)
   const blocking = (f: Finding) => f.severity === "warning" && f.confidence !== "unknown" && verdictEligible(f, input.rubric)
   const listed =
-    idealAll === "REQUEST_CHANGES"
+    idealAll === "REQUEST_CHANGES" && idealPosted !== "REQUEST_CHANGES"
       ? withheldAll.filter((w) => blocking(w.f))
       : idealAll !== "APPROVE" && idealPosted === "APPROVE"
         ? withheldAll

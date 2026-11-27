@@ -613,6 +613,14 @@ describe("round 4: withheld findings in the comment and the merge", () => {
     expect(merged.summary.warning).toBeGreaterThan(merged.findings.filter((f) => f.severity === "warning").length)
   })
 
+  test("posted findings already block: the withheld ones did not change the verdict and are not listed", async () => {
+    const env = await run({ mode: "gate", runner: critRunner, verdictAt: () => "refuted" })
+    expect(env.verdict).toBe("REQUEST_CHANGES")
+    expect(env.findings.some((f) => f.severity === "critical")).toBe(true)
+    expect(env.rulesRefuted).toBeGreaterThan(0)
+    expect(env.withheld).toBeUndefined()
+  })
+
   test("the per-step counts are instances, like the withheld list and the verdict", async () => {
     const { renderSummary } = await import("../../src/altimate/review/format")
     const env = await run({ mode: "gate", runner: repeatRunner, verdictAt: () => "refuted" })
