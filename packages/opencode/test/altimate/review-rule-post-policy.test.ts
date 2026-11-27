@@ -554,3 +554,43 @@ describe("round 2c: a block on withheld findings is explainable", () => {
     expect(env.withheld).toBeUndefined()
   })
 })
+
+describe("round 4: withheld findings in the comment and the merge", () => {
+  test("a run whose findings were all withheld does not say no issues were found", async () => {
+    const { renderSummary } = await import("../../src/altimate/review/format")
+    const env = await run({ mode: "gate", runner: threeWarnRunner, verdictAt: () => "refuted" })
+    expect(env.withheld?.length).toBeGreaterThan(0)
+    // Nothing posted at all (the AI finding removed too): the verdict rests on the withheld list.
+    const text = renderSummary({ ...env, findings: [] }, { maxChars: Infinity })
+    expect(text).not.toContain("No issues found")
+    expect(text).toContain("No findings posted")
+  })
+
+  test("several hundred withheld findings: the list is capped and the summary stays within its budget", async () => {
+    const { renderSummary, SUMMARY_BUDGET_CHARS } = await import("../../src/altimate/review/format")
+    const env = await run({ mode: "gate", runner: threeWarnRunner, verdictAt: () => "refuted" })
+    const w = env.withheld![0]
+    const many = Array.from({ length: 300 }, (_, i) => ({ ...w, id: `${w.id}-${i}`, startLine: i + 1 }))
+    const text = renderSummary({ ...env, withheld: many })
+    expect(text.length).toBeLessThanOrEqual(SUMMARY_BUDGET_CHARS)
+    expect(text).toContain("### Withheld rule findings that count toward this verdict (300)")
+    expect(text).toContain("more in the verdict envelope")
+    // The posted AI finding is still in the comment.
+    expect(text).toContain(aiFinding.title)
+  })
+
+  test("--all-projects: a project that blocks only through withheld findings keeps them in the merged envelope", async () => {
+    const { mergeProjectEnvelopes } = await import("../../src/altimate/review/multi-project")
+    const { renderSummary } = await import("../../src/altimate/review/format")
+    const a = await run({ mode: "gate", runner: threeWarnRunner, verdictAt: () => "refuted" })
+    const b = await run({ mode: "gate" })
+    expect(a.withheld?.length).toBeGreaterThan(0)
+    const merged = mergeProjectEnvelopes([
+      { root: "a", paths: ["a/models/marts/m.sql"], env: a },
+      { root: "b", paths: ["b/models/marts/m.sql"], env: b },
+    ])
+    expect(merged.idealVerdict).toBe("REQUEST_CHANGES")
+    expect(merged.withheld?.map((x) => x.id).sort()).toEqual(a.withheld!.map((x) => x.id).sort())
+    expect(renderSummary(merged, { maxChars: Infinity })).toContain("### Withheld rule findings that count toward this verdict")
+  })
+})

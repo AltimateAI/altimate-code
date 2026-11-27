@@ -95,7 +95,12 @@ export function renderSummary(env: VerdictEnvelope, opts: RenderOptions = {}): s
       "",
       "Not posted as comments, but the verdict counts them:",
       "",
-      ...env.withheld.map((w) => `- \`${w.file}${w.startLine ? `:${w.startLine}` : ""}\` — ${w.title} (${WITHHELD_REASON[w.reason]})`),
+      ...env.withheld
+        .slice(0, WITHHELD_RENDER_CAP)
+        .map((w) => `- \`${w.file}${w.startLine ? `:${w.startLine}` : ""}\` — ${w.title} (${WITHHELD_REASON[w.reason]})`),
+      ...(env.withheld.length > WITHHELD_RENDER_CAP
+        ? [`- … and ${env.withheld.length - WITHHELD_RENDER_CAP} more in the verdict envelope`]
+        : []),
       "",
     )
   }
@@ -139,7 +144,12 @@ export function renderSummary(env: VerdictEnvelope, opts: RenderOptions = {}): s
   )
 
   if (!env.findings.length) {
-    lines.push("No issues found in the changed dbt models. 🎉", "")
+    lines.push(
+      env.withheld?.length
+        ? "No findings posted; the verdict rests on the withheld rule findings above."
+        : "No issues found in the changed dbt models. 🎉",
+      "",
+    )
     return [...lines, ...tail].join("\n")
   }
 
@@ -267,18 +277,22 @@ function bulletsFor(items: Finding[], group: boolean): Array<{ text: string; cou
   return out
 }
 
-/**
- * What the review could not fully check, each on its own line: undecidable
- * findings, models without compiled SQL, files outside the dbt project, and
- * the advisory AI lane when it did not run. Kept separate from the lint-only
- * banner so one undecidable finding never mislabels a manifest-backed run.
- */
 const WITHHELD_REASON: Record<NonNullable<VerdictEnvelope["withheld"]>[number]["reason"], string> = {
   rule_type_off: "rule type not posted while the AI review runs",
   refuted: "refuted by the verifier",
   unverifiable_high_sev: "the verifier could not check it",
   noisy_type_not_confirmed: "noisy rule type the verifier did not confirm",
 }
+
+/** Withheld findings listed in the summary at most; the envelope keeps every one. */
+const WITHHELD_RENDER_CAP = 10
+
+/**
+ * What the review could not fully check, each on its own line: undecidable
+ * findings, models without compiled SQL, files outside the dbt project, and
+ * the advisory AI lane when it did not run. Kept separate from the lint-only
+ * banner so one undecidable finding never mislabels a manifest-backed run.
+ */
 
 export function coverageNotes(env: VerdictEnvelope): string[] {
   const notes: string[] = []

@@ -309,9 +309,11 @@ export function mergeProjectEnvelopes(runs: ProjectRun[], coveredProjects?: stri
   return signEnvelope(VerdictEnvelope.parse(merged))
 }
 
-/** Rule-noise counts summed over the projects (each present only when some project has it). */
-function mergeRuleNoise(envs: VerdictEnvelope[]): Pick<VerdictEnvelope, "rulesOff" | "rulesRefuted" | "rulePolicy"> {
-  const out: Pick<VerdictEnvelope, "rulesOff" | "rulesRefuted" | "rulePolicy"> = {}
+/** Rule-noise counts summed over the projects (each present only when some project has it), and
+ *  every project's withheld findings: each project lists them only when they change its verdict,
+ *  so the merged verdict, the worst of the projects', stays explainable from the comment. */
+function mergeRuleNoise(envs: VerdictEnvelope[]): Pick<VerdictEnvelope, "rulesOff" | "rulesRefuted" | "rulePolicy" | "withheld"> {
+  const out: Pick<VerdictEnvelope, "rulesOff" | "rulesRefuted" | "rulePolicy" | "withheld"> = {}
   if (envs.some((e) => e.rulesOff)) {
     const off: Record<string, number> = {}
     for (const e of envs) for (const [rule, n] of Object.entries(e.rulesOff ?? {})) off[rule] = (off[rule] ?? 0) + n
@@ -327,6 +329,9 @@ function mergeRuleNoise(envs: VerdictEnvelope[]): Pick<VerdictEnvelope, "rulesOf
         noisy_type_not_confirmed: policies.reduce((n, p) => n + p.dropped.noisy_type_not_confirmed, 0),
       },
     }
+  const seen = new Set<string>()
+  const withheld = envs.flatMap((e) => e.withheld ?? []).filter((w) => !seen.has(w.id) && !!seen.add(w.id))
+  if (withheld.length) out.withheld = withheld
   return out
 }
 
