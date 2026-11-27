@@ -1591,17 +1591,21 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // Without a compiled base every other PII lane is undecided (an unknown-
   // confidence warning). A regex twin whose source columns the raw base cannot
   // expose (`rawBaseLacks`) is proven new, so those undecided findings must not
-  // stand in for it: it survives their dedup and keeps its severity below. Each
-  // column must also be selected raw by the head's final select on its line: a
-  // line inside a masking expression (`sha2(\n ssn\n) as tax_ref`) proves nothing.
+  // stand in for it: it survives their dedup and keeps its severity below. A
+  // column whose line lies inside a head select item that does not select it raw
+  // (a masking expression such as `sha2(\n ssn\n) as tax_ref`) proves nothing.
+  // The item may sit in any scope: a CTE's `ssn as tax_ref` reaches the output
+  // through the final select's `tax_ref`.
   const provenNewTwin = (f: Finding) => {
     const ctx = ctxByPath.get(f.file)
     if (!ctx || !hasOldSide(ctx.file) || ctx.engineOldSql) return false
     const result = (f.evidence?.result ?? {}) as { column?: string; line?: string; items?: SelectItemColumn[] }
     const hits = result.items?.length ? result.items : result.column ? [{ column: result.column, line: result.line ?? "" }] : []
-    const selectedRaw = ({ column, line }: { column: string; line: string }) =>
-      headItemsOnLine(f.file, line).some((i) => i.scope === ROOT_SCOPE && i.rawColumn?.toLowerCase() === column)
-    return hits.length > 0 && hits.every(selectedRaw) && rawBaseLacks(ctx.oldSql, hits.map((h) => h.column))
+    const notMasked = ({ column, line }: { column: string; line: string }) => {
+      const items = headItemsOnLine(f.file, line)
+      return !items.length || items.some((i) => i.rawColumn?.toLowerCase() === column)
+    }
+    return hits.length > 0 && hits.every(notMasked) && rawBaseLacks(ctx.oldSql, hits.map((h) => h.column))
   }
   const merged = flat.filter((f) => {
     const tool = f.evidence?.tool

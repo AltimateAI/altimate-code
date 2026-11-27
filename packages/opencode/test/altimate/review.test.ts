@@ -3256,6 +3256,61 @@ describe("orchestrate", () => {
     })
   })
 
+  test("raw-base proof: a raw column aliased in a CTE or subquery still blocks, a masked one stays undecided", async () => {
+    const cteBase = "with src as (\n  select\n    customer_id\n  from {{ ref('customers') }}\n)\nselect\n  customer_id\nfrom src"
+    const subBase = "select s.customer_id\nfrom (\n  select customer_id\n  from {{ ref('customers') }}\n) s"
+    const cases = [
+      {
+        name: "CTE alias carried to the final select",
+        base: cteBase,
+        head: "with src as (\n  select\n    customer_id,\n    ssn as tax_ref\n  from {{ ref('customers') }}\n)\nselect\n  customer_id,\n  tax_ref\nfrom src",
+        diff: "-    customer_id\n+    customer_id,\n+    ssn as tax_ref\n-  customer_id\n+  customer_id,\n+  tax_ref\n",
+        critical: true,
+      },
+      {
+        name: "subquery alias carried to the final select",
+        base: subBase,
+        head: "select s.customer_id,\n  s.tax_ref\nfrom (\n  select customer_id,\n    ssn as tax_ref\n  from {{ ref('customers') }}\n) s",
+        diff: "-select s.customer_id\n+select s.customer_id,\n+  s.tax_ref\n-  select customer_id\n+  select customer_id,\n+    ssn as tax_ref\n",
+        critical: true,
+      },
+      {
+        name: "multi-line sha2 in a CTE",
+        base: cteBase,
+        head: "with src as (\n  select\n    customer_id,\n    sha2(\n      ssn\n    ) as tax_ref\n  from {{ ref('customers') }}\n)\nselect\n  customer_id,\n  tax_ref\nfrom src",
+        diff: "-    customer_id\n+    customer_id,\n+    sha2(\n+      ssn\n+    ) as tax_ref\n-  customer_id\n+  customer_id,\n+  tax_ref\n",
+        critical: false,
+      },
+      {
+        name: "multi-line regexp_replace in a subquery",
+        base: subBase,
+        head: "select s.customer_id,\n  s.tax_ref\nfrom (\n  select customer_id,\n    regexp_replace(\n      ssn,\n      '[0-9]',\n      '*'\n    ) as tax_ref\n  from {{ ref('customers') }}\n) s",
+        diff: "-select s.customer_id\n+select s.customer_id,\n+  s.tax_ref\n-  select customer_id\n+  select customer_id,\n+    regexp_replace(\n+      ssn,\n+      '[0-9]',\n+      '*'\n+    ) as tax_ref\n",
+        critical: false,
+      },
+    ]
+    for (const reviewers of [[], ["dbt_patterns"]]) {
+      for (const c of cases) {
+        const env = await runReview({
+          changedFiles: [{ path: "models/marts/m1.sql", status: "modified" as const, diff: c.diff }],
+          config: { ...DEFAULT_REVIEW_CONFIG, reviewers },
+          rubric: DEFAULT_RUBRIC,
+          mode: "gate",
+          runner: piiRunner(["ssn"]),
+          getContent: content(c.head, c.base),
+        })
+        const twins = env.findings.filter(isTwin)
+        expect({ reviewers, name: c.name, twins: twins.length > 0 }).toEqual({ reviewers, name: c.name, twins: true })
+        expect({
+          reviewers,
+          name: c.name,
+          critical: twins.some((f) => f.severity === "critical"),
+          blocks: env.verdict === "REQUEST_CHANGES",
+        }).toEqual({ reviewers, name: c.name, critical: c.critical, blocks: c.critical })
+      }
+    }
+  })
+
   test("without a compiled base, an added `c.ssn` over a raw base with no `ssn` still blocks", async () => {
     for (const reviewers of [[], ["dbt_patterns"]]) {
       const env = await runReview({
