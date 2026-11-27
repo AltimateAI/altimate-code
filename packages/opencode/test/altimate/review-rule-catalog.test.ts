@@ -525,6 +525,63 @@ describe("rawReach", () => {
     ])
   })
 
+  test("shapes the parser does not model block: every `ssn` line counts as reaching", () => {
+    // As the orchestrator asks it: the items on the line, else the clause it sits in.
+    const lineReaches = (sql: string) => {
+      const r = rawReach(sql)
+      return sql.split("\n").flatMap((text, at) => {
+        if (!/\bssn\b/i.test(text)) return []
+        const items = r.items.filter((i) => i.startLine <= at + 1 && at + 1 <= i.endLine)
+        return [items.length ? items.some((i) => r.passes(i, "ssn")) : !r.inClause(at + 1) || r.mayExpose("ssn")]
+      })
+    }
+    const cases: Array<[string, string]> = [
+      ["`select all (select \u2026)` is a scalar subquery, not a condition", "select all\n  (select\n    ssn\n  from customers limit 1) as x\nfrom t"],
+      ["a column list on a subquery alias renames its columns", "select x\nfrom (\n  select\n    ssn\n  from customers\n) as t(x)"],
+      ["a column list on a CTE alias renames its columns", "with c as (\n  select\n    ssn\n  from customers\n)\nselect tax\nfrom c as y(tax)"],
+      ["`union all by name` pairs columns by name", "with u as (\n  select 1 as a, 2 as b from t\n  union all by name\n  select\n    ssn as b,\n    3 as a\n  from customers\n)\nselect b from u"],
+      ["a `*` in a later union branch lands under the first branch's names", "with c as (\n  select\n    id,\n    ssn\n  from customers\n),\nu as (\n  select id, name as label from people\n  union all\n  select * from c\n)\nselect id, label from u"],
+      ["a `*` in the first union branch shifts the positions after it", "with u as (\n  select *, 1 as k from a\n  union all\n  select 1,\n    ssn,\n    3\n  from customers\n)\nselect q from u"],
+      ["an array join in FROM over the column", "select c.id, v\nfrom customers c, unnest([\n  c.ssn\n]) as v"],
+      ["`unpivot` in FROM over the column", "select id, val\nfrom customers unpivot (val for col in (\n  ssn,\n  name\n))"],
+      ["`pivot` in FROM over the column", "select id, a, b\nfrom customers pivot (max(\n  ssn\n) for k in ('a', 'b'))"],
+      ["`lateral flatten` in FROM over the column", "select c.id, f.value as v\nfrom customers c,\nlateral flatten(input => array_construct(\n  c.ssn\n)) f"],
+      ["a DDL wrapper is not one query", "create table out as (\n  select\n    ssn\n  from customers\n)"],
+      ["a macro call that emits the column, on its own line", "select\n  {{ dbt.safe_cast(\"ssn\", api.Column.translate_type(\"string\")) }} as tax_id\nfrom customers"],
+      ["`adapter.quote` of the column, on its own line", "select\n  {{ adapter.quote(\"ssn\") }} as tax_id\nfrom customers"],
+      ["a reader's macro call that names the column", "with c as (\n  select\n    ssn\n  from customers\n)\nselect {{ dbt.safe_cast(\"ssn\", \"varchar\") }} as tax_id from c"],
+      ["a `columns('\u2026')` pattern in the reader", "with c as (\n  select\n    id,\n    ssn\n  from customers\n)\nselect columns('id|ss.') from c"],
+      ["a backslash-escaped quote before the line", "select\n  replace(name, '\\'', '') as n,\n  ssn\nfrom customers"],
+      ["a `#` comment holding an apostrophe", "select\n  id, # don't\n  ssn\nfrom customers"],
+      ["`match_recognize` measures over the column", "select id, s\nfrom customers match_recognize (\n  partition by id order by ts\n  measures last(\n    ssn\n  ) as s\n  pattern (a)\n  define a as true\n)"],
+      ["a CTE named like the table it reads with `*`", "with customers as (\n  select * from customers\n  where\n    ssn is not null\n)\nselect * from customers"],
+      ["a parenthesised first union branch", "with u as (\n  (select id, name from people)\n  union all\n  select\n    id,\n    ssn\n  from customers\n)\nselect id, name from u"],
+      ["`select distinct top n`", "select distinct top 10\n  ssn\nfrom customers"],
+      ["`select top n distinct`", "select top 10 distinct\n  ssn\nfrom customers"],
+      ["an alias that is a Jinja call", "with c as (\n  select\n    ssn as {{ var('tax_col') }}\n  from customers\n)\nselect id, tax_ref from c"],
+      ["an alias that is a Jinja variable", "with c as (\n  select\n    ssn as {{ tax_col }}\n  from customers\n)\nselect id, tax_ref from c"],
+      ["a struct field of the CTE's column", "with c as (\n  select struct_pack(\n    v := ssn\n  ) as tax from customers\n)\nselect tax.v from c"],
+      ["a struct field of the CTE's column (BigQuery)", "with c as (\n  select struct(\n    ssn as v\n  ) as tax from customers\n)\nselect tax.v from c"],
+      ["an array join in a CTE's FROM, then `select *`", "with x as (\n  select c.id, v\n  from customers c, unnest([\n    c.ssn\n  ]) as v\n)\nselect * from x"],
+      ["another column output under the PII name", "select\n  id,\n  tax_id_number as ssn\nfrom customers"],
+      ["a backslash-escaped quote that swallows the line", "select\n  replace(name, '\\'', '') as n,\n  ssn\nfrom customers\nwhere status = 'active'"],
+      ["a positional column in the reader", "with c as (\n  select\n    id,\n    ssn\n  from customers\n)\nselect $2 as tax_ref from c"],
+      ["a later item of the same select reading the alias", "with c as (\n  select\n    id,\n    ssn as raw_ssn,\n    raw_ssn as tax_ref\n  from customers\n)\nselect id, tax_ref from c"],
+    ]
+    for (const [name, sql] of cases) {
+      const lines = lineReaches(sql)
+      expect({ name, lines: lines.length > 0, reaches: lines.every(Boolean) }).toEqual({ name, lines: true, reaches: true })
+    }
+  })
+
+  test("deeply nested subqueries stay fast", () => {
+    const depth = 800
+    const sql = "select x from " + "(select x from ".repeat(depth) + `(select\n ssn as x\n from ${REF}) t` + ") t".repeat(depth)
+    const t0 = performance.now()
+    expect(reaches(sql)).toBe(true)
+    expect(performance.now() - t0).toBeLessThan(3000)
+  })
+
   test("malformed SQL and deep chains do not throw or stall", () => {
     for (const sql of ["ssn", "select\n  ssn\nfrom", `with src as (\n select ssn from ${REF}\nselect customer_id from src`, "select customer_id))\nfrom src)", "with a as (select * from a) select * from a"]) {
       const r = rawReach(sql)
