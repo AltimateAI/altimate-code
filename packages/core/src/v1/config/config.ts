@@ -103,11 +103,11 @@ export const Info = Schema.Struct({
   // altimate_change start — rates dbt_cost_estimate prices BigQuery usage at
   cost: Schema.optional(
     Schema.Struct({
-      bigqueryUsdPerTib: Schema.optional(Schema.Number).annotate({
-        description: "BigQuery on-demand price in USD per TiB billed; a positive number, at most 1e6; other values are ignored and named in the output (default 6.25)",
+      bigqueryUsdPerTib: Schema.optional(Schema.NullOr(Schema.Number)).annotate({
+        description: "BigQuery on-demand price in USD per TiB billed; a positive number, at most 1e6; other values, null included (a saved infinity becomes null), are ignored and named in the output (default 6.25)",
       }),
-      bigquerySlotHourUsd: Schema.optional(Schema.Number).annotate({
-        description: "BigQuery capacity price in USD per slot-hour, used for jobs that ran in a reservation; a positive number, at most 1e6; other values are ignored and named in the output (default 0.06)",
+      bigquerySlotHourUsd: Schema.optional(Schema.NullOr(Schema.Number)).annotate({
+        description: "BigQuery capacity price in USD per slot-hour, used for jobs that ran in a reservation; a positive number, at most 1e6; other values, null included (a saved infinity becomes null), are ignored and named in the output (default 0.06)",
       }),
     }),
   ).annotate({ description: "Prices dbt_cost_estimate uses to turn BigQuery usage into money" }),

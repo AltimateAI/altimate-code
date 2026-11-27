@@ -758,6 +758,9 @@ describe("review follow-ups: rates, location, ephemeral and pricing mode", () =>
   test("a rate that is zero, negative, not finite or above the maximum is ignored and named", () => {
     const raw = { bigqueryUsdPerTib: 1e308, bigquerySlotHourUsd: -1 }
     expect(cleanRates(raw)).toEqual({})
+    // null (what a saved infinity reads back as) is ignored and named like any other unusable value.
+    expect(cleanRates({ bigqueryUsdPerTib: null })).toEqual({})
+    expect(ignoredRateNotes({ bigqueryUsdPerTib: null, bigquerySlotHourUsd: 5 })).toEqual([expect.stringContaining("cost.bigqueryUsdPerTib is ignored")])
     expect(ignoredRateNotes(raw).map((n) => n.split(" ")[0])).toEqual(["cost.bigqueryUsdPerTib", "cost.bigquerySlotHourUsd"])
     expect(cleanRates({ bigqueryUsdPerTib: MAX_RATE + 1 })).toEqual({})
     expect(cleanRates({ bigqueryUsdPerTib: MAX_RATE, bigquerySlotHourUsd: 0.01 })).toEqual({ bigqueryUsdPerTib: MAX_RATE, bigquerySlotHourUsd: 0.01 })

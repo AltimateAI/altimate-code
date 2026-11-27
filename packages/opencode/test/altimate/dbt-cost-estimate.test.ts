@@ -956,6 +956,20 @@ describe("dbt_cost_estimate cost", () => {
     expect(table_.metadata.cost.notes.join(" ")).not.toContain("ephemeral")
   })
 
+  test("a rate saved as null is ignored and named, and the default stands", async () => {
+    costHistoryInternals.readCostConfig = async () => ({ bigqueryUsdPerTib: null, bigquerySlotHourUsd: null })
+    try {
+      useAdapter(calls, { history: bigqueryHistory([job("a", "2026-05-02 10:00:00+00:00", "2026-05-02 10:01:00+00:00", TIB)]) })
+      const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders", history: true }, ctx)
+      const notes = result.metadata.cost.notes.join(" ")
+      expect(notes).toContain("cost.bigqueryUsdPerTib is ignored")
+      expect(notes).toContain("cost.bigquerySlotHourUsd is ignored")
+      expect(result.metadata.cost.rate).toMatchObject({ value: 6.25, source: "default" })
+    } finally {
+      costHistoryInternals.readCostConfig = defaultReadCostConfig
+    }
+  })
+
   test("a configured rate the tool ignores is named, and the default is not passed off as the configured one", async () => {
     costHistoryInternals.readCostConfig = async () => ({ bigqueryUsdPerTib: -1, bigquerySlotHourUsd: 1_000_001 })
     try {
@@ -1239,7 +1253,19 @@ describe("cost config", () => {
       for (const value of [0, -1, 1e308, 1_000_001, 0.01, 6.25, 1e6]) expect(ok({ [key]: value })).toBe(true)
     }
     expect(ok({})).toBe(true)
+    // A rate saved as null loads (an infinity serializes to null), and so does one the PATCH route's Zod adapter validates.
+    const { zod } = await import("@/util/effect-zod")
+    for (const key of ["bigqueryUsdPerTib", "bigquerySlotHourUsd"]) {
+      expect(ok({ [key]: null })).toBe(true)
+      expect(zod(ConfigV1.Info).safeParse({ cost: { [key]: null } }).success).toBe(true)
+      expect(zod(ConfigV1.Info).safeParse({ cost: { [key]: 0 } }).success).toBe(true)
+    }
+    // The round trip of an unrelated save: 1e309 loads as Infinity, serializes as null, and the next load accepts it.
+    const loaded = Schema.decodeUnknownSync(ConfigV1.Info)(JSON.parse('{"cost":{"bigqueryUsdPerTib":1e309}}'))
+    const saved = JSON.stringify(loaded)
+    expect(saved).toContain('"bigqueryUsdPerTib":null')
+    expect(ok(JSON.parse(saved).cost)).toBe(true)
     // The text tells the user what happens to such a value.
-    expect(JSON.stringify(Schema.toJsonSchemaDocument(ConfigV1.Info))).toContain("other values are ignored and named in the output")
+    expect(JSON.stringify(Schema.toJsonSchemaDocument(ConfigV1.Info))).toContain("are ignored and named in the output")
   })
 })
