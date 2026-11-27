@@ -23,6 +23,9 @@ import {
   unreadable,
   windowStartMs,
   bigqueryChildrenSql,
+  accessProblem,
+  TARGET_JINJA,
+  MIN_BILLED_BYTES,
   ignoredRateNotes,
   locationNote,
   MAX_RATE,
@@ -255,7 +258,7 @@ describe("BigQuery pricing", () => {
     const { cost, reserved } = priceBigquery([bq("a", 0, 100 * TIB, "res", 3_600_000 * 2)], undefined, "model.s.m", {})
     expect(reserved).toBe(true)
     expect(cost).toMatchObject({ lastRun: 0.12, native: { unit: "slot_hours", lastRun: 2 }, rate: { value: 0.06, unit: "USD/slot-hour" } })
-    expect(cost.notes.join(" ")).toContain("not each job")
+    expect(cost.notes.join(" ")).toContain("an allocation, not the bill")
   })
 
   test("a configured slot-hour rate is used", () => {
@@ -431,7 +434,7 @@ describe("rates config and the text", () => {
   test("a dry-run price is worded as an estimate that the bill can differ from", () => {
     const text = costText({ basis: "dry_run", currency: "USD", rate: null, notes: [], selectOnly: { estimate: 2 } }, "1.0 TiB")
     expect(text).toBe(
-      "BigQuery's dry run estimates the SELECT at 1.0 TiB, about $2.00 on-demand. The bill can differ: a cached or BI Engine result bills nothing, external sources and some queries are not fully counted, and each table read bills at least 10 MiB.",
+      "BigQuery's dry run estimates the SELECT at 1.0 TiB, about $2.00 on-demand. BigQuery bills at least 10 MiB per query, which this estimate applies. The bill can differ: a cached or BI Engine result bills nothing, clustered tables often bill less after runtime pruning, and external sources and some queries are not fully counted.",
     )
     for (const claim of ["at most", "at least $", "ceiling", "floor"]) expect(text).not.toContain(claim)
   })
@@ -605,7 +608,7 @@ describe("boundary SQL", () => {
     expect(w).toEqual({
       startBeforeMs: CUT + 1,
       startAfterMs: CUT - BOUNDARY_SPAN_MS,
-      liveStartAfterMs: CUT - 30 * 86_400_000,
+      liveStartAfterMs: CUT - BOUNDARY_SPAN_MS,
       joinEndAtLeastMs: CUT - 60_000,
       tmpEndAtLeastMs: CUT - 600_000,
     })
@@ -631,10 +634,11 @@ describe("boundary SQL", () => {
     expect(sql).toContain(`strpos(query, '"node_id": "model.shop.orders"') > 0`)
   })
 
-  test("one boundary read: finished jobs from the 72-hour-10-minute lookback, or jobs still going from anywhere in the window, going first", () => {
-    const sql = bigqueryBoundarySql({ project: "p", needle, window: boundaryWindow(CUT, CUT - 5 * 86_400_000) })
+  test("one boundary read: finished jobs from the 72-hour-10-minute lookback, or jobs still going from no further back, going first", () => {
+    const sql = bigqueryBoundarySql({ project: "p", needle, window: boundaryWindow(CUT) })
     const going = "(upper(state) in ('PENDING','RUNNING') or end_time is null)"
-    expect(sql).toContain(`(${going} and creation_time > timestamp_millis(${CUT - 5 * 86_400_000}))`)
+    // A job still going cannot be older than the longest job span either, so it is not read from the window's start.
+    expect(sql).toContain(`(${going} and creation_time > timestamp_millis(${CUT - BOUNDARY_SPAN_MS}))`)
     expect(sql).toContain(`creation_time > timestamp_millis(${CUT - BOUNDARY_SPAN_MS}) and upper(state) = 'DONE' and error_result is null`)
     expect(sql).toContain(`order by ${going} desc, creation_time desc limit 500`)
     expect(sql).toContain("end_time, state, statement_type")
@@ -1055,6 +1059,82 @@ describe("review follow-ups: read-only hooks, boundary identity and unfinished r
     const { cost } = priceBigquery(rows, undefined, "model.s.m", {}, undefined, { asOfMs: asOf })
     expect(cost.runs).toBe(1)
     expect(cost.notes).toContain("2 runs still in progress were left out.")
+  })
+})
+
+describe("review: targets, scope, attribution, Python, permissions", () => {
+  const tgt = (row: Row, target: string): Row => ({ ...row, target_name: target })
+  const run = (id: string, startMin: number, billed: number, target: string): Row => tgt(bq(id, startMin * 10, billed), target)
+  const price = (rows: Row[], target?: string) => priceBigquery(rows, undefined, "model.s.m", {}, undefined, { target }).cost
+
+  test("the figures are of the current target's runs; other targets are listed in the metadata and a note", () => {
+    const rows = [run("p1", 0, TIB, "prod"), run("p2", 1, 3 * TIB, "prod"), ...[2, 3, 4].map((i) => run(`d${i}`, i, TIB / 100, "dev")), run("u", 5, 7 * TIB, "")]
+    const cost = price(rows, "prod")
+    expect(cost.runs).toBe(2)
+    expect(cost.highest).toBeCloseTo(18.75, 10)
+    expect(cost.target).toBe("prod")
+    expect(cost.otherTargets).toEqual([
+      { target: "dev", runs: 3, typical: expect.closeTo(0.0625, 10) },
+      { target: "unknown target", runs: 1, typical: expect.closeTo(43.75, 10) },
+    ])
+    expect(cost.notes.join(" ")).toContain("Runs of other targets are not in these figures: dev: 3 runs")
+    expect(costText(cost).split("\n")[0]).toContain("on target prod")
+    // With no current target named (an older caller), every run counts.
+    expect(price(rows).runs).toBe(6)
+    expect(price(rows).otherTargets).toBeUndefined()
+  })
+
+  test("when the current target has no runs but others do, nothing is the headline cost", () => {
+    const cost = price([run("d1", 0, TIB, "dev"), run("d2", 1, TIB, "dev")], "prod")
+    expect(cost.basis).toBe("none")
+    expect(cost.lastRun).toBeUndefined()
+    expect(cost.unknownReason).toContain("No run of model.s.m on the current target (prod)")
+    expect(cost.unknownReason).toContain("dev: 2 runs, typical $6.25")
+    expect(cost.otherTargets).toEqual([{ target: "dev", runs: 2, typical: 6.25 }])
+    // Runs that name no target are not the current target's either.
+    expect(price([run("u", 0, TIB, "")], "prod").otherTargets).toEqual([{ target: "unknown target", runs: 1, typical: 6.25 }])
+  })
+
+  test("the history reads the target name from the query comment, and the target's own name is read", () => {
+    expect(bigqueryHistorySql({ project: "p", needle: "n", asOfMs: ASOF })).toContain(`regexp_extract(query, r'"target_name": "([^"]*)"') as target_name`)
+    expect(TARGET_JINJA).toContain('"name": target.get("name")')
+  })
+
+  test("a history from JOBS_BY_USER says first that only the caller's jobs were read", () => {
+    const text = costText({ basis: "history", currency: "USD", runs: 1, windowDays: 30, lastRun: 1, typical: 1, highest: 1, rate: null, notes: [], scope: "user" })
+    expect(text.split("\n")[0]).toBe("Only your own jobs were read (no bigquery.jobs.listAll): service-account and other users' runs are missing.")
+    expect(costText({ basis: "history", currency: "USD", runs: 1, windowDays: 30, lastRun: 1, typical: 1, highest: 1, rate: null, notes: [], scope: "project" })).not.toContain("Only your own")
+  })
+
+  test("reservation runs are attributed slot time: named in the first line and in the metadata, with the Standard rate in the note", () => {
+    const slots = price([bq("a", 0, null, "res", 3_600_000)])
+    expect(slots.attribution).toBe("slot_time")
+    expect(costText(slots).split("\n")[0]).toContain("reservation runs are attributed slot time, not the bill")
+    expect(slots.notes.join(" ")).toContain("billed in steps of 50 with a one-minute minimum, and baseline slots are always charged")
+    expect(slots.notes.join(" ")).toContain("Standard is 0.04")
+    expect(price([bq("a", 0, TIB)]).attribution).toBe("bytes_billed")
+    expect(costText(price([bq("a", 0, TIB)])).split("\n")[0]).not.toContain("attributed")
+    const mixed = price([bq("a", 0, TIB), bq("b", 50, null, "res", 3_600_000)])
+    expect(mixed.attribution).toBe("mixed")
+    expect(costText(mixed).split("\n")[0]).toContain("attributed slot time")
+  })
+
+  test("a script whose start does not parse is unknown with its own cause, and a manifest language is read", () => {
+    const script = { ...bq("s", 0, null, null, 0, "SCRIPT"), creation_time: "not a time" }
+    const { cost } = priceBigquery([script, bq("m", 500, TIB)], [{ job_id: "k", parent_job_id: "s", creation_time: "1970-01-01T00:00:10Z", statement_type: "MERGE", total_bytes_billed: "1", total_slot_ms: "0", reservation_id: null, cache_hit: "False" }], "model.s.m", {})
+    expect(cost.runs).toBe(1)
+    expect(cost.notes.join(" ")).toContain("a script's start time could not be read")
+    expect(resolveModel({ "model.s.py": { resource_type: "model", name: "py", language: "python" } }, "py")).toEqual({ uniqueId: "model.s.py", materialized: undefined, language: "python" })
+  })
+
+  test("the access hint names both permission pairs", () => {
+    const hint = accessProblem("Access Denied: permission")!
+    expect(hint).toContain("bigquery.jobs.create and bigquery.jobs.listAll")
+    expect(hint).toContain("bigquery.jobs.create and bigquery.jobs.list for its own jobs")
+  })
+
+  test("a dry run's minimum bill is 10 MiB", () => {
+    expect(MIN_BILLED_BYTES).toBe(10 * 1024 * 1024)
   })
 })
 

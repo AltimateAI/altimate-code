@@ -122,6 +122,7 @@ beforeAll(async () => {
         model("shop", "mart", "table", ["model.shop.stg_orders"]),
         model("shop", "lonely", "table"),
         model("shop", "inline", "ephemeral"),
+        ["model.shop.pymodel", { resource_type: "model", name: "pymodel", language: "python", config: { materialized: "table" }, depends_on: { nodes: [] } }],
       ]),
       sources: { "source.shop.raw.orders": {}, "source.shop.raw.items": {} },
     }),
@@ -535,7 +536,7 @@ describe("dbt_cost_estimate cost", () => {
       native: { unit: "slot_hours", lastRun: 2 },
       rate: { value: 0.06, unit: "USD/slot-hour", source: "default" },
     })
-    expect(cost.notes.join(" ")).toContain("not each job")
+    expect(cost.notes.join(" ")).toContain("an allocation, not the bill")
   })
 
   test("BigQuery: a temporary CTAS into one dataset and a MERGE into another five minutes later are two runs through the tool", async () => {
@@ -650,16 +651,17 @@ describe("dbt_cost_estimate cost", () => {
     const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "stg_orders", history: true }, ctx)
     const cost = result.metadata.cost
     expect(cost.basis).toBe("dry_run")
-    expect(cost.selectOnly).toEqual({ estimate: (1024 / TIB) * 6.25 })
+    // 1 KiB is below BigQuery's 10 MiB per-query minimum, which the estimate applies.
+    expect(cost.selectOnly).toEqual({ estimate: (10 * 1024 ** 2 / TIB) * 6.25 })
     expect(cost.notes.join(" ")).toContain("The price covers the SELECT only.")
     expect(cost.notes.join(" ")).toContain("No runs of model.shop.stg_orders in the last 30 days")
-    expect(result.output).toContain("BigQuery's dry run estimates the SELECT at 1.0 KiB, about $0.00000001 on-demand. The bill can differ: a cached or BI Engine result bills nothing, external sources and some queries are not fully counted, and each table read bills at least 10 MiB.")
+    expect(result.output).toContain("BigQuery's dry run estimates the SELECT at 1.0 KiB, about $0.000060 on-demand. BigQuery bills at least 10 MiB per query, which this estimate applies. The bill can differ: a cached or BI Engine result bills nothing, clustered tables often bill less after runtime pruning, and external sources and some queries are not fully counted.")
     for (const claim of ["at most", "at least $", "ceiling", "floor", "perTable"]) expect(result.output).not.toContain(claim)
   })
 
   test.each([
     ["a script", "select 1; select * from big", "1.0 GiB", "The dry run covers only the first statement, so it is not priced."],
-    ["a zero estimate", "select 1", 0, "The dry run reported 0 bytes, which BigQuery also reports for sources it cannot size"],
+    ["a zero estimate", "select 1", 0, "The dry run reported 0 bytes, which BigQuery also reports for row-level security, external (federated) tables and cached results"],
   ])("%s: a dry run that is only a lower bound is not priced, with its own reason", async (_name, sql, bytes, reason) => {
     useAdapter(calls, { bytes, history: bigqueryHistory([]) })
     const result = await (await initTool(DbtCostEstimateTool)).execute({ sql, history: true }, ctx)
@@ -703,7 +705,9 @@ describe("dbt_cost_estimate cost", () => {
     const cost = result.metadata.cost
     expect(historyLog.some((q) => q.includes("JOBS_BY_USER") && q.includes("strpos"))).toBe(true)
     expect(cost).toMatchObject({ basis: "history", lastRun: 6.25 })
-    expect(cost.notes.join(" ")).toContain("Only your own runs were read")
+    expect(cost.scope).toBe("user")
+    // The first line of the answer says whose jobs were read, ahead of any figure.
+    expect(result.output.split("\n")[0]).toBe("Only your own jobs were read (no bigquery.jobs.listAll): service-account and other users' runs are missing.")
   })
 
   test("a history the role cannot read at all leaves the scan figure and says what is missing", async () => {
@@ -948,6 +952,43 @@ describe("dbt_cost_estimate cost", () => {
     expect(result.metadata.cost.unknownReason).toContain("region-us was read")
   })
 
+  test("a Python model is told it runs on Dataproc and never appears in JOBS, and no history query is sent", async () => {
+    useAdapter(calls, { history: bigqueryHistory([job("a", "2026-05-02 10:00:00+00:00", "2026-05-02 10:01:00+00:00", TIB)]) })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "pymodel", history: true }, ctx)
+    expect(historyLog).toEqual([])
+    expect(result.metadata.cost.runs).toBeUndefined()
+    expect([result.metadata.cost.unknownReason, ...result.metadata.cost.notes].join(" ")).toContain("A Python model runs on Dataproc, not as a BigQuery query job")
+  })
+
+  test("the current target's runs are the figures, the rest are in cost.otherTargets, and the scope is the project's", async () => {
+    const columns = [...JOB_COLUMNS, "target_name"]
+    const withTarget = (j: (string | null)[], target: string) => [...j, target]
+    const rows = [
+      withTarget(job("p", "2026-05-02 10:00:00+00:00", "2026-05-02 10:01:00+00:00", 2 * TIB), "prod"),
+      withTarget(job("d1", "2026-05-03 10:00:00+00:00", "2026-05-03 10:01:00+00:00", TIB / 100), "dev"),
+      withTarget(job("d2", "2026-05-04 10:00:00+00:00", "2026-05-04 10:01:00+00:00", TIB / 100), "dev"),
+    ]
+    useAdapter(calls, {
+      target: '{"project": "p1", "execution_project": null, "location": "EU", "name": "prod"}',
+      history: async (jinja) => (jinja.includes("countif(reservation_id") ? table(["jobs", "reserved"], [["10", "0"]]) : table(columns, rows)),
+    })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders", history: true }, ctx)
+    const cost = result.metadata.cost
+    expect(cost).toMatchObject({ basis: "history", runs: 1, lastRun: 12.5, target: "prod", scope: "project" })
+    expect(cost.otherTargets).toEqual([{ target: "dev", runs: 2, typical: 0.0625 }])
+    expect(result.output).toContain("Runs of other targets are not in these figures: dev: 2 runs")
+    expect(historyLog.find((q) => q.includes("total_bytes_billed"))).toContain("target_name")
+  })
+
+  test("a script row with an unreadable start sends no NaN to the children query and is left out with its cause", async () => {
+    const script = job("s", "not a time", "2026-05-02 10:01:00+00:00", null, null, 0, "SCRIPT")
+    useAdapter(calls, { history: bigqueryHistory([script, job("m", "2026-05-03 10:00:00+00:00", "2026-05-03 10:01:00+00:00", TIB)]) })
+    const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders", history: true }, ctx)
+    expect(historyLog.some((q) => q.includes("NaN"))).toBe(false)
+    expect(historyLog.some((q) => q.includes("parent_job_id in ("))).toBe(false)
+    expect(result.metadata.cost.notes.join(" ")).toContain("a script's start time could not be read")
+  })
+
   test("an ephemeral model with no runs is told it never runs on its own", async () => {
     useAdapter(calls, { history: bigqueryHistory([]) })
     const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "inline", history: true }, ctx)
@@ -1080,8 +1121,8 @@ describe("dbt_cost_estimate cost", () => {
         expect(cost.highest).toBeLessThan(100 * 6.25)
         // One boundary read, and no other query for jobs still going.
         expect(boundaryQueries()).toHaveLength(1)
-        // Jobs still going are read from the start of the history window, whatever the cutoff.
-        expect(boundaryQueries()[0]).toContain(`creation_time > timestamp_millis(${asOf - 30 * day}))`)
+        // Jobs still going are read from no further back than the longest job span before the cutoff.
+        expect(boundaryQueries()[0]).toContain(`creation_time > timestamp_millis(${T0 - 72 * HOUR - 10 * 60_000}))`)
         expect(historyLog.some((q) => q.includes("end_time, state\n"))).toBe(false)
       })
     })
