@@ -260,9 +260,11 @@ For a personal access token, the account is the `/user` login. For Actions' own
 read `/user`, so set `ALTIMATE_REVIEW_BOT_LOGIN` to the app's bot login (for example
 `my-app[bot]`). Without it, outside Actions, each run posts a new summary comment
 rather than risk editing another bot's comment. Inside Actions, an App token without
-the variable is treated as `github-actions[bot]`, so it never finds the summary it
-posted earlier and adds a new one on every run; set `ALTIMATE_REVIEW_BOT_LOGIN`
-whenever the review posts with an App token.
+the variable is treated as `github-actions[bot]`: it never finds the summary it
+posted earlier and adds a new one on every run, and if the PR already has a
+`github-actions[bot]` summary it updates that one and no longer recognises its own
+inline comments, so they are posted again. Set `ALTIMATE_REVIEW_BOT_LOGIN` whenever
+the review posts with an App token.
 
 ## Configuration — `.altimate/review.yml`
 
@@ -315,7 +317,15 @@ rubric:
 - **PII:** flagged only for PII columns the change newly exposes, not for
   columns the base already surfaced. That comparison needs the base version's
   SQL; when it can't be compiled, PII columns are reported as non-blocking
-  warnings that may predate the PR.
+  warnings that may predate the PR. One case still blocks without a compiled
+  base: the diff adds a highly sensitive column (an SSN, a passport or card
+  number, a date of birth) to a `marts/` or `reporting/` model, the base file's
+  own SQL cannot expose it (it does not name the column, select `*`, or call a
+  macro), and the column reaches the model's output unmasked, directly or
+  through CTEs and subqueries. A column that is hashed, masked or dropped on the
+  way (`sha2(ssn)`, `right(ssn, 4)`, `* exclude (ssn)`) stays a warning; one that
+  only passes through a value-preserving expression (`coalesce(ssn, '')`,
+  `max(ssn)`) still blocks.
 
 ### Risk-tier path tokens
 
