@@ -207,6 +207,10 @@ const SELECT_LIST_END =
 
 const unquote = (s: string) => s.replace(/^["`]|["`]$/g, "").toLowerCase()
 
+/** Scope key of the model's outermost query. No identifier unquotes to it, so a
+ *  CTE named `final` (the dbt style guide's last CTE) keeps its own scope. */
+export const ROOT_SCOPE = "\u0000root"
+
 /** One item of a select list, located in its query scope. */
 export interface SelectItem {
   /** Output name: the alias (with or without `AS`) or a bare column's own name. */
@@ -217,7 +221,7 @@ export interface SelectItem {
   rawQualifier?: string
   /** Whitespace-normalised item text, for comparing one item across base and head. */
   text: string
-  /** `final` for the outermost query, the CTE name for a CTE body, `<parent>>sub<n>` for a nested query. */
+  /** `ROOT_SCOPE` for the outermost query, the CTE name for a CTE body, `<parent>>sub<n>` for a nested query. */
   scope: string
   /** Which `UNION`/`INTERSECT`/`EXCEPT` branch of its scope (0 for the first select). */
   branch: number
@@ -316,7 +320,7 @@ function parseSelects(sql: string): ParsedSelects {
   const parenScope = new Map<number, string>()
   // Each select's scope, branch and the offset its select list ends at.
   const selects: Array<{ scope: string; branch: number; end: number }> = []
-  const scopes: string[] = ["final"]
+  const scopes: string[] = [ROOT_SCOPE]
   const branches = new Map<string, number>()
   // `name as (`, or `name (col, …) as (`: a column list still names the CTE, whose
   // outputs then keep the body's own names (so a renamed column resolves to nothing).
@@ -443,7 +447,7 @@ function parseSelects(sql: string): ParsedSelects {
 /**
  * Every select list in `sql`, item by item, with the query scope each belongs
  * to. Scope is what separates a CTE's `ssn as contact` from the final select's
- * `email as contact`: only `final` items are the model's output. Items are
+ * `email as contact`: only `ROOT_SCOPE` items are the model's output. Items are
  * parsed across lines, so a multi-line expression or alias is one item.
  */
 export function selectItems(sql: string): SelectItem[] {
@@ -588,7 +592,7 @@ export function finalOutputs(sql: string): FinalOutputs {
     memo.set(scope, result)
     return result
   }
-  const { raw, names, signatures, stars } = resolve("final", new Set())
+  const { raw, names, signatures, stars } = resolve(ROOT_SCOPE, new Set())
   return { raw, names, signatures, passthrough: stars.length > 0 }
 }
 

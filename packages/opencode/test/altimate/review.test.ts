@@ -2507,6 +2507,18 @@ describe("orchestrate", () => {
     expectReportedPii(runs2, ["ssn"], "none")
   })
 
+  test("a CTE named `final` does not make a masked base look raw", async () => {
+    // The dbt style guide's last CTE is `final`: the base masks `email` in it.
+    const base = "with final as (select customer_id, md5(email) as email from customers)\nselect customer_id, email from final"
+    // Dropping the CTE and selecting `email` raw unmasks it.
+    const head = "select customer_id, email\nfrom customers"
+    expectReportedPii(await piiRuns(head, base, `-${base.split("\n")[1]}\n+${head.split("\n")[0]}\n`, ["email"]), ["email"], "none")
+    // Control: an unrelated edit that keeps the masked `final` CTE exposes nothing new.
+    const touched = base.replace("select customer_id, email from final", "select customer_id, email\nfrom final")
+    const quiet = await piiRuns(touched, base, "-select customer_id, email from final\n+select customer_id, email\n+from final\n", ["email"])
+    for (const { env } of quiet) expect(env.findings.filter((f) => f.category === "pii_exposure")).toEqual([])
+  })
+
   test("a FROM subquery is a source: a column it masked is not credited as raw", async () => {
     const base = "select s.customer_id, s.ssn\nfrom (select customer_id, sha2(ssn) as ssn from customers) s"
     const head = "select customer_id, ssn\nfrom customers"

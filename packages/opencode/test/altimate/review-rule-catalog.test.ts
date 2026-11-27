@@ -119,6 +119,23 @@ describe("rawColumnExposures", () => {
     const sql = "with m (id, tax) as (select customer_id, ssn from customers)\nselect tax as ssn from m"
     expect([...(rawColumnExposures(sql).get("ssn") ?? [])][0]).toMatch(/^\?\d+\.tax$/)
   })
+  test("a CTE named `final` is a CTE, not the model's output", () => {
+    // The outer `b` is the output; the CTE outputs no `b`, so it resolves to nothing known.
+    const lost = finalOutputs("with final as (select a from t) select b from final")
+    expect([...lost.names]).toEqual(["b"])
+    expect([...lost.raw.keys()]).toEqual(["b"])
+    expect([...lost.raw.get("b")!][0]).toMatch(/^\?\d+\.b$/)
+    // Masked in the CTE, selected by name or through `*`: nothing raw.
+    const masked = "with final as (select id, md5(email) as email from customers) select id, email from final"
+    expect(asObject(rawColumnExposures(masked))).toEqual({ id: ["customers.id"] })
+    expect(asObject(rawColumnExposures(masked.replace("select id, email from final", "select * from final")))).toEqual({
+      id: ["customers.id"],
+    })
+    // Masked in the outer list: nothing raw, and the outer names are the outputs.
+    const outer = "with final as (select id, email from customers) select id, md5(email) as email_hash from final"
+    expect(asObject(rawColumnExposures(outer))).toEqual({ id: ["customers.id"] })
+    expect([...finalOutputs(outer).names].sort()).toEqual(["email_hash", "id"])
+  })
   test("ignores commas and keywords inside literals and comments", () => {
     const sql = "select ssn as a, -- , email as a\n  'x, from y' as b, email as c from t"
     expect(asObject(rawColumnExposures(sql))).toEqual({ a: ["t.ssn"], c: ["t.email"] })
