@@ -95,6 +95,37 @@ describe("ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE", () => {
       await expect(finderSystemPrompt({ ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE: file }, repo.path)).rejects.toThrow("inside the git work tree")
   })
 
+  test("an outside alias that resolves through a link in the work tree and back out is refused", async () => {
+    await using repo = await tmpdir({ git: true })
+    await using outside = await tmpdir()
+    const targetDir = path.join(outside.path, "target")
+    await fs.mkdir(targetDir)
+    await fs.writeFile(path.join(targetDir, "p.md"), "RUNNER FILE")
+    // The PR controls `repo/hop`, which points back outside; the configured alias points at it.
+    await fs.symlink(targetDir, path.join(repo.path, "hop"))
+    const alias = path.join(outside.path, "alias")
+    await fs.symlink(path.join(repo.path, "hop"), alias)
+    // A relative link through the work tree is followed the same way.
+    const relAlias = path.join(outside.path, "rel-alias")
+    await fs.symlink(path.relative(outside.path, path.join(repo.path, "hop")), relAlias)
+    for (const file of [path.join(alias, "p.md"), path.join(relAlias, "p.md")])
+      await expect(finderSystemPrompt({ ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE: file }, repo.path)).rejects.toThrow("inside the git work tree")
+    // The same file named directly is read.
+    expect(await finderSystemPrompt({ ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE: path.join(targetDir, "p.md") }, repo.path)).toBe("RUNNER FILE")
+  })
+
+  test("a symlink loop is refused", async () => {
+    await using repo = await tmpdir({ git: true })
+    await using outside = await tmpdir()
+    const a = path.join(outside.path, "a")
+    const b = path.join(outside.path, "b")
+    await fs.symlink(b, a)
+    await fs.symlink(a, b)
+    await expect(finderSystemPrompt({ ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE: a }, repo.path)).rejects.toThrow(
+      "ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE",
+    )
+  })
+
   test("a nested checkout does not hide the enclosing work tree", async () => {
     await using repo = await tmpdir({ git: true })
     const nested = path.join(repo.path, "vendor", "dbt")
