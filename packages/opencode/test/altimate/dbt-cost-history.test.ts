@@ -578,7 +578,7 @@ describe("boundary SQL", () => {
       startBeforeMs: CUT + 1,
       startAfterMs: CUT - BOUNDARY_SPAN_MS,
       liveStartAfterMs: CUT - BOUNDARY_SPAN_MS,
-      invocationStartAfterMs: CUT - 30 * 86_400_000,
+      invocationStartAfterMs: CUT - 180 * 86_400_000,
       joinEndAtLeastMs: CUT - 60_000,
       tmpEndAtLeastMs: CUT - 600_000,
     })
@@ -624,8 +624,10 @@ describe("boundary SQL", () => {
     expect(plain).toContain("as dbt_invocation_id")
     expect(plain).not.toContain("unnest(labels) where key = 'dbt_invocation_id') in")
     const sql = bigqueryBoundarySql({ project: "p", needle: "n", window: w, invocations: ["i-1", "i'2", "i-1"] })
-    // An invocation has no span limit: its finished jobs are read from the start of the history window, not the 72-hour lookback.
-    expect(sql).toContain(`or (creation_time > timestamp_millis(${CUT - 30 * 86_400_000}) and upper(state) = 'DONE' and error_result is null and (select value from unnest(labels) where key = 'dbt_invocation_id') in ('i-1','i\\'2'))`)
+    expect(sql).toContain(`desc, (select value from unnest(labels) where key = 'dbt_invocation_id') in ('i-1','i\\'2') desc, creation_time desc limit 500`)
+    // An invocation has no span limit: its finished jobs are read as far back as JOBS keeps them (180 days), not the 72-hour lookback,
+    // and ahead of other finished jobs in the limit.
+    expect(sql).toContain(`or (creation_time > timestamp_millis(${CUT - 180 * 86_400_000}) and upper(state) = 'DONE' and error_result is null and (select value from unnest(labels) where key = 'dbt_invocation_id') in ('i-1','i\\'2'))`)
   })
 
   test("the boundary query returns the id of each statement, so the ones already read can be excluded", () => {
@@ -1144,14 +1146,33 @@ describe("checklist review: BigQuery ML, window edge, labelled pairing, target s
     expect(reserved.basis).toBe("history")
   })
 
-  test("a labelled run in the first 72 hours 10 minutes of the window, read from its start, may have earlier jobs before it: left out; later ones and unlabelled runs stay", () => {
-    const edge = { cutoff: C4, stmts: [], windowEdge: true }
-    const price = (row: Row) => priceBigquery([row], undefined, "model.s.m", {}, edge).cost
-    expect(price(inv(j("m", 60, 1, TIB, "MERGE"), "i1")).basis).toBe("none")
-    expect(price(inv(j("m", 80 * 60, 1, TIB, "MERGE"), "i1")).runs).toBe(1)
-    expect(price(j("m", 60, 1, TIB, "MERGE")).runs).toBe(1)
-    // Without the window edge (a boundary read that began later), nothing is added.
-    expect(priceBigquery([inv(j("m", 60, 1, TIB, "MERGE"), "i1")], undefined, "model.s.m", {}, { cutoff: C4, stmts: [] }).cost.runs).toBe(1)
+  test("the time fallback of a full or unknown boundary read is for unlabelled runs: a labelled run is complete when every job of its invocation was read", () => {
+    const full = { cutoff: C4, stmts: [], full: true }
+    const price = (row: Row) => priceBigquery([row], undefined, "model.s.m", {}, full).cost
+    expect(price(j("m", 60, 1, TIB, "MERGE")).basis).toBe("none")
+    expect(price(inv(j("m", 60, 1, TIB, "MERGE"), "i1")).runs).toBe(1)
+    expect(priceBigquery([j("m", 60, 1, TIB, "MERGE")], undefined, "model.s.m", {}, { cutoff: C4 }).cost.basis).toBe("none")
+    expect(priceBigquery([inv(j("m", 60, 1, TIB, "MERGE"), "i1")], undefined, "model.s.m", {}, { cutoff: C4 }).cost.runs).toBe(1)
+  })
+
+  test("a boundary or live job of another target never drops or holds a current-target run; an unnamed target meets only unnamed runs", () => {
+    const tg = (row: Row, target: string): Row => ({ ...row, target_name: target })
+    const run = [tg(j("m", 5, 1, TIB, "MERGE"), "prod")]
+    const price = (boundary: Parameters<typeof priceBigquery>[4]) => priceBigquery(run, undefined, "model.s.m", {}, boundary, { target: "prod" }).cost
+    const stmt = (target?: string) => ({ user: "a@x.com", start: C4 - 3 * MIN, end: C4 + 4.5 * MIN, ...(target !== undefined && { target }) })
+    expect(price({ cutoff: C4, stmts: [stmt("prod")] }).basis).toBe("none")
+    expect(price({ cutoff: C4, stmts: [stmt("dev")] }).runs).toBe(1)
+    expect(price({ cutoff: C4, stmts: [stmt()] }).runs).toBe(1)
+    expect(price({ cutoff: C4, stmts: [], live: [{ user: "a@x.com", start: C4 - 3 * MIN, target: "dev" }] }).runs).toBe(1)
+    expect(price({ cutoff: C4, stmts: [], live: [{ user: "a@x.com", start: C4 - 3 * MIN, target: "prod" }] }).notes).toContain("A run still in progress was left out.")
+    // The users seen live when the read was full leave out their runs of the same target only.
+    const full = (target: string) => price({ cutoff: C4, stmts: [], full: true, liveFullUsers: ["a@x.com"], live: [{ user: "a@x.com", start: C4 + 1000 * MIN, target }] })
+    expect(full("dev").notes.join(" ")).not.toContain("in progress")
+    expect(full("prod").notes).toContain("A run still in progress was left out.")
+    // A build of another target that could not be priced is not called a read-only job.
+    const unpriced = priceBigquery([tg(j("d", 0, 1, null, "MERGE"), "dev")], undefined, "model.s.m", {}, undefined, { target: "prod" }).cost
+    expect(unpriced.unknownReason).toContain("the builds found are of other targets and could not be priced")
+    expect(unpriced.unknownReason).not.toContain("only read data")
   })
 
   test("a later temporary CTAS with no build after it is still waiting for it, though an earlier build of the invocation exists", () => {

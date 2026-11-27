@@ -843,7 +843,7 @@ describe("dbt_cost_estimate cost", () => {
             table(["job_id", "user_email", "creation_time", "end_time", "statement_type"], before(jinja, /creation_time < timestamp_millis\((\d+)\)/) ? [["edge", "a@x.com", iso(start), iso(start + 5_000), "DELETE"]] : []),
         })
         const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders", history: true }, ctx)
-        // The only run is left out, so the cost is the dry run alone.
+        // The only run is left out, so the history is unknown.
         expect(result.metadata.cost.runs).toBeUndefined()
         expect(result.metadata.cost.basis).toBe("none")
         expect(result.metadata.cost.notes.join(" ")).toContain("1 run that may have started before the period read was left out.")
@@ -1020,20 +1020,50 @@ describe("dbt_cost_estimate cost", () => {
     expect(lines.some((l) => l.startsWith("Pre-run scan estimate (not the model's run history):"))).toBe(true)
   })
 
-  test("a labelled run in the first 72 hours of a window that the boundary read began at is left out: an earlier job of its invocation could precede it", async () => {
+  test("a labelled run just after the window's start is not dropped by a time rule: it is complete when every job of its invocation was read", async () => {
     await withNowAt(async (asOfMs) => {
       const edge = asOfMs - 30 * 86_400_000
       const columns = [...JOB_COLUMNS, "state", "dbt_invocation_id"]
-      const run = (offsetMs: number) => ["m", "a@x.com", iso(edge + offsetMs), iso(edge + offsetMs + 60_000), "MERGE", null, null, String(TIB), "0", null, "False", "DONE", "i1"]
-      const ask1 = async (offsetMs: number) => {
+      const run = ["m", "a@x.com", iso(edge + 3_600_000), iso(edge + 3_660_000), "MERGE", null, null, String(TIB), "0", null, "False", "DONE", "i1"]
+      useAdapter(calls, { history: async (jinja) => (jinja.includes("countif(reservation_id") ? table(["jobs", "reserved"], [["10", "0"]]) : table(columns, [run])) })
+      const cost = (await (await initTool(DbtCostEstimateTool)).execute({ model: "orders", history: true }, ctx)).metadata.cost
+      expect(cost.runs).toBe(1)
+      // The query asks for the invocation's jobs back to the 180 days JOBS keeps.
+      expect(historyLog.find((q) => q.includes("run boundary"))).toContain(`creation_time > timestamp_millis(${asOfMs - 180 * 86_400_000}) and upper(state)`)
+    })
+  })
+
+  test("a job of another target in the boundary read never drops a current-target run", async () => {
+    await withNowAt(async (asOfMs) => {
+      const edge = asOfMs - 30 * 86_400_000
+      const columns = [...JOB_COLUMNS, "state", "target_name"]
+      const run = ["m", "a@x.com", iso(edge + 80 * 3_600_000), iso(edge + 80 * 3_600_000 + 60_000), "MERGE", null, null, String(TIB), "0", null, "False", "DONE", "prod"]
+      const BC = ["job_id", "user_email", "creation_time", "end_time", "state", "statement_type", "destination_table_id", "destination_dataset_id", "dbt_invocation_id", "target_name"]
+      const ask1 = async (target: string) => {
         resetDbtAdapter()
-        useAdapter(calls, { history: async (jinja) => (jinja.includes("countif(reservation_id") ? table(["jobs", "reserved"], [["10", "0"]]) : table(columns, [run(offsetMs)])) })
+        useAdapter(calls, {
+          target: '{"project": "p1", "execution_project": null, "location": "EU", "name": "prod"}',
+          history: async (jinja) => (jinja.includes("countif(reservation_id") ? table(["jobs", "reserved"], [["10", "0"]]) : table(columns, [run])),
+          boundary: async () => table(BC, [["x", "a@x.com", iso(edge - 30_000), null, "RUNNING", "MERGE", null, null, null, target]]),
+        })
         return (await (await initTool(DbtCostEstimateTool)).execute({ model: "orders", history: true }, ctx)).metadata.cost
       }
-      const early = await ask1(3_600_000)
-      expect(early.runs).toBeUndefined()
-      expect(early.notes.join(" ")).toContain("may have started before the period read")
-      expect((await ask1(80 * 3_600_000)).runs).toBe(1)
+      expect((await ask1("dev")).runs).toBe(1)
+      expect((await ask1("prod")).notes).toContain("A run still in progress was left out.")
+      // A finished job just before the cutoff: an unlabelled prod run it could chain to is dropped only by a prod job.
+      const early = ["m", "a@x.com", iso(edge + 30_000), iso(edge + 90_000), "MERGE", null, null, String(TIB), "0", null, "False", "DONE", "prod"]
+      const ask2 = async (target: string) => {
+        resetDbtAdapter()
+        useAdapter(calls, {
+          target: '{"project": "p1", "execution_project": null, "location": "EU", "name": "prod"}',
+          history: async (jinja) => (jinja.includes("countif(reservation_id") ? table(["jobs", "reserved"], [["10", "0"]]) : table(columns, [early])),
+          boundary: async () => table(BC, [["x", "a@x.com", iso(edge - 120_000), iso(edge - 30_000), "DONE", "MERGE", null, null, null, target]]),
+        })
+        return (await (await initTool(DbtCostEstimateTool)).execute({ model: "orders", history: true }, ctx)).metadata.cost
+      }
+      expect((await ask2("dev")).runs).toBe(1)
+      expect((await ask2("prod")).notes.join(" ")).toContain("may have started before the period read")
+      expect(historyLog.find((q) => q.includes("run boundary"))).toContain("as target_name")
     })
   })
 
@@ -1116,7 +1146,7 @@ describe("dbt_cost_estimate cost", () => {
     expect(result.metadata).toMatchObject({ success: true, bytes: Math.round(4.2 * TIB), display: "4.2 TiB" })
     expect(cost.runs).toBeUndefined()
     expect(cost.lastRun).toBeUndefined()
-    // The reason is the unknownReason, or a note when the dry run could still be priced.
+    // The reason is the unknown reason, which leads the answer.
     expect([cost.unknownReason, ...cost.notes].join(" ")).toContain("could not check for runs still in progress: ")
     expect(result.output).not.toContain("Cost from")
   })
@@ -1289,7 +1319,7 @@ describe("dbt_cost_estimate cost", () => {
       })
     })
 
-    test("a full boundary read keeps the finished jobs it returned: a CTAS queued 23 hours and run for 2 chains into a merge past the boundary span", async () => {
+    test("a full boundary read keeps the finished jobs it returned: a CTAS that finished 72 hours 13 minutes after the cutoff chains into a merge past the boundary span", async () => {
       await withNow(async () => {
         const merge = 72 * HOUR + 20 * 60_000
         const ctas = ["t", "a@x.com", iso(T0 - 60_000), iso(T0 + 72 * HOUR + 13 * 60_000), "DONE", "CREATE_TABLE_AS_SELECT", "orders__dbt_tmp", "d"]
@@ -1328,7 +1358,7 @@ describe("dbt_cost_estimate cost", () => {
         })
         const oldest = ["old", "z@x.com", iso(T0), iso(T0 + 30_000), "MERGE", null, null, String(TIB), "0", null, "False", "DONE", null]
         const lit = (jinja: string, pattern: RegExp) => Number(pattern.exec(jinja)![1])
-        // Created 30 hours before the cutoff; the label branch reads from the start of the history window, so it is found.
+        // Created 30 hours before the cutoff; the label branch reads as far back as JOBS keeps jobs (180 days), so it is found.
         const earlierAt = T0 - 30 * 3_600_000
         const BC = [...BOUNDARY_COLS, "dbt_invocation_id"]
         const ask1 = async (runId: string, earlierId: string) => {
@@ -1339,7 +1369,7 @@ describe("dbt_cost_estimate cost", () => {
             boundary: async (jinja) => {
               const after = lit(jinja, /creation_time > timestamp_millis\((\d+)\) and upper\(state\) = \\?'DONE\\?' and error_result is null and \(select value/)
               // The label branch reads from the start of the history window, not from the cutoff.
-              expect(after).toBe(asOf - 30 * day)
+              expect(after).toBe(asOf - 180 * day)
               const seen = jinja.includes(`\\'${earlierId}\\'`) && earlierAt > after
               const rows = Array.from({ length: seen ? 499 : 500 }, (_, i) => [`b${i}`, `x${i}@x.com`, iso(T0 - 60_000), iso(T0 - 30_000), "DONE", "MERGE", null, null, null])
               return table(BC, seen ? [["x", "a@x.com", iso(earlierAt), iso(earlierAt + 60_000), "DONE", "MERGE", null, null, earlierId], ...rows] : rows)

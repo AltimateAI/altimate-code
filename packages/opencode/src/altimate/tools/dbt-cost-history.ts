@@ -7,6 +7,8 @@ import { loadRawManifest } from "../native/dbt/helpers"
 export const HISTORY_DAYS = 30
 export const HISTORY_LIMIT = 500
 const DAY_MS = 86_400_000
+/** INFORMATION_SCHEMA.JOBS keeps the last 180 days of jobs (BigQuery's documented retention): the furthest back any read can reach. */
+export const JOBS_RETENTION_DAYS = 180
 /** The start of a read's window: `days` before the instant the whole call reads as of. */
 export const windowStartMs = (asOfMs: number, days = HISTORY_DAYS) => asOfMs - days * DAY_MS
 /** A matched job by the same user joins the run of the job before it when it starts within this long after that job ended. */
@@ -213,7 +215,7 @@ where creation_time > timestamp_millis(${windowStartMs(input.asOfMs, 7)}) and cr
  * or script may run up to 6 hours per attempt with up to three attempts (18 hours), and a CREATE MODEL statement times out
  * at 24 hours by default, but at 48 hours for time series, AutoML and hyperparameter tuning models. The longest is the
  * batch queue plus the 48-hour CREATE MODEL: 24 + 48 = 72 hours. A job in flight longer than that (a queue timeout
- * raised in the project's settings) is not covered, unless it is still going: those are read from no further back than this span either.
+ * raised in the project's settings) is not covered, and neither is a job still going that was created longer ago than that.
  */
 const BQ_QUEUE_MAX_MS = 24 * 3_600_000
 const BQ_RUN_MAX_MS = 48 * 3_600_000
@@ -222,8 +224,9 @@ export const MAX_JOB_SPAN_MS = BQ_QUEUE_MAX_MS + BQ_RUN_MAX_MS
 /**
  * How far from the cutoff a statement can be and still belong to a run that begins after it: a job in flight for the
  * longest it can be (MAX_JOB_SPAN_MS), plus the longest gap by which one job joins the next (a temporary CTAS to its final
- * build, ten minutes; ordinary chaining is a minute). A finished job created earlier than this cannot reach a run at the
- * cutoff, and a run starting later than this after the cutoff cannot have an unread job in it.
+ * build, ten minutes; ordinary chaining is a minute). It bounds the time rules for jobs that carry no invocation label: a
+ * finished job created earlier than this cannot chain into a run at the cutoff, and an unlabelled run starting later than
+ * this after the cutoff cannot have an unread job in it. A labelled invocation has no such limit: its jobs are found by id.
  */
 export const BOUNDARY_SPAN_MS = MAX_JOB_SPAN_MS + Math.max(BQ_TMP_JOIN_MS, BQ_CHAIN_MS)
 
@@ -239,7 +242,7 @@ export type BoundaryWindow = {
   startAfterMs: number
   /** A job still going (not done, or with no end time yet) is no older than the longest job span either. */
   liveStartAfterMs: number
-  /** A finished job of an invocation read may have been created any time in the history window: invocations have no span limit. */
+  /** A finished job of an invocation read may have been created any time JOBS keeps: an invocation has no span limit. */
   invocationStartAfterMs: number
   /** A job must have ended at or after this (the cutoff less the chain window) to be able to join a run. */
   joinEndAtLeastMs: number
@@ -247,13 +250,13 @@ export type BoundaryWindow = {
   tmpEndAtLeastMs: number
 }
 
-export function boundaryWindow(cutoffMs: number, windowStart = cutoffMs - HISTORY_DAYS * DAY_MS): BoundaryWindow {
+export function boundaryWindow(cutoffMs: number, retentionStart = cutoffMs - JOBS_RETENTION_DAYS * DAY_MS): BoundaryWindow {
   const cutoff = Math.trunc(cutoffMs)
   return {
     startBeforeMs: cutoff + 1,
     startAfterMs: cutoff - BOUNDARY_SPAN_MS,
     liveStartAfterMs: cutoff - BOUNDARY_SPAN_MS,
-    invocationStartAfterMs: Math.trunc(windowStart),
+    invocationStartAfterMs: Math.trunc(retentionStart),
     joinEndAtLeastMs: cutoff - BQ_CHAIN_MS,
     tmpEndAtLeastMs: cutoff - BQ_TMP_JOIN_MS,
   }
@@ -277,10 +280,11 @@ export function bigqueryBoundarySql(input: {
   const going = `(upper(state) in ('PENDING','RUNNING') or end_time is null)`
   // An earlier job of a run's own invocation belongs to it however long before the cutoff it ended.
   const ids = [...new Set(input.invocations ?? [])]
+  const labelIn = ids.length ? `(select value from unnest(labels) where key = '${INVOCATION_LABEL}') in (${ids.map(sqlString).join(",")})` : "false"
   const sameInvocation = ids.length
-    ? `\n    or (creation_time > ${at(w.invocationStartAfterMs)} and upper(state) = 'DONE' and error_result is null and (select value from unnest(labels) where key = '${INVOCATION_LABEL}') in (${ids.map(sqlString).join(",")}))`
+    ? `\n    or (creation_time > ${at(w.invocationStartAfterMs)} and upper(state) = 'DONE' and error_result is null and ${labelIn})`
     : ""
-  return `select /* run boundary */ /* ${OWN_MARK} */ job_id, user_email, creation_time, end_time, state, statement_type, destination_table.table_id as destination_table_id, destination_table.dataset_id as destination_dataset_id, ${invocationColumn}
+  return `select /* run boundary */ /* ${OWN_MARK} */ job_id, user_email, creation_time, end_time, state, statement_type, destination_table.table_id as destination_table_id, destination_table.dataset_id as destination_dataset_id, ${invocationColumn}, ${targetColumn}
 from ${bqJobs(input.project, input.location, input.view ?? "JOBS")}
 where creation_time < ${at(w.startBeforeMs)}
   and upper(job_type) = 'QUERY'
@@ -295,7 +299,7 @@ where creation_time < ${at(w.startBeforeMs)}
   )
   and ${notOwn}
   and strpos(query, ${sqlString(input.needle)}) > 0
-order by ${going} desc, creation_time desc limit ${HISTORY_LIMIT}`
+order by ${going} desc, ${ids.length ? `${labelIn} desc, ` : ""}creation_time desc limit ${HISTORY_LIMIT}`
 }
 
 // ---- Running a query through the dbt adapter ----
@@ -368,11 +372,9 @@ export function parseTime(value: string | null | undefined): number {
  */
 export type Boundary = {
   cutoff: number
-  stmts?: { user: string | null; start: number; end: number; tmp?: boolean; dataset?: string | null; inv?: string }[]
+  stmts?: { user: string | null; start: number; end: number; tmp?: boolean; dataset?: string | null; inv?: string; target?: string }[]
   /** Jobs still going (queued, running, or with no end time) in the window, each lasting to the instant read. They leave out any run they could chain into. */
-  live?: { user: string | null; start: number; inv?: string }[]
-  /** The boundary read began at the history window's start (it was not full): an invocation may have had earlier jobs before it. */
-  windowEdge?: boolean
+  live?: { user: string | null; start: number; inv?: string; target?: string }[]
   /** The boundary read was full: it cannot say what it left out, so runs near the cutoff are not trusted besides. */
   full?: boolean
   /** The boundary read was full: every run by these users, who have a job still going, is left out. */
@@ -629,8 +631,11 @@ export function bigqueryRuns(
   const candidates = all.filter((r) => r.build)
   // Whether an unread job could belong to a run: the same invocation id when both carry one, else the user-and-time rule.
   const joins = (b: NonNullable<Boundary["stmts"]>[number], r: BqUnit) =>
-    // Labelled and unlabelled jobs are never one run (the main grouping keeps them apart): only like meets like.
-    b.inv || r.inv
+    // A job belongs to a run of its own target only (jobs naming none, to runs naming none), and labelled and unlabelled
+    // jobs are never one run (the main grouping keeps them apart): only like meets like.
+    (b.target ?? "") !== r.target
+      ? false
+      : b.inv || r.inv
       ? !!b.inv && b.inv === r.inv
       : (b.user ?? "") === r.user &&
     (b.end >= r.start - BQ_CHAIN_MS ||
@@ -639,8 +644,12 @@ export function bigqueryRuns(
   // A job before the cutoff that is still running and could join the run makes it a run in progress, not just an uncertain one.
   const liveBefore = (r: BqUnit) =>
     !!boundary &&
-    (boundary.liveFullUsers?.includes(r.user) ||
-      !!boundary.live?.some((b) => (b.inv || r.inv ? !!b.inv && b.inv === r.inv : (b.user ?? "") === r.user && r.end >= b.start - BQ_CHAIN_MS)))
+    ((!!boundary.liveFullUsers?.includes(r.user) && !!boundary.live?.some((b) => (b.user ?? "") === r.user && (b.target ?? "") === r.target)) ||
+      !!boundary.live?.some(
+        (b) =>
+          (b.target ?? "") === r.target &&
+          (b.inv || r.inv ? !!b.inv && b.inv === r.inv : (b.user ?? "") === r.user && r.end >= b.start - BQ_CHAIN_MS),
+      ))
   const live = candidates.filter((r) => !(r.pending || (asOfMs !== undefined && (r.end >= asOfMs - BQ_CHAIN_MS || (r.unpairedTmpEnd ?? Number.NEGATIVE_INFINITY) >= asOfMs - BQ_TMP_JOIN_MS)) || liveBefore(r)))
   // Unread statements before the cutoff that would have joined a run, whatever the run now pairs with: a job by the
   // run's user that ended at or after a minute before the run's start, or a temporary-relation CTAS by the same user,
@@ -649,7 +658,8 @@ export function bigqueryRuns(
   const unsure = (r: BqUnit) =>
     boundary
       ? !!boundary.stmts?.some((b) => joins(b, r)) ||
-        ((!boundary.stmts || boundary.full === true || (boundary.windowEdge === true && !!r.inv)) && r.start <= boundary.cutoff + BOUNDARY_FALLBACK_MS)
+        // The time fallback is for unlabelled runs: a labelled run is complete when every job of its invocation was read.
+        ((!boundary.stmts || boundary.full === true) && !r.inv && r.start <= boundary.cutoff + BOUNDARY_FALLBACK_MS)
       : false
   const counted = live.filter((r) => !unsure(r))
   const runs = counted.filter((r) => r.known && Number.isFinite(r.start))
@@ -752,7 +762,13 @@ export function priceBigquery(
     return {
       reserved: anyReserved,
       cost: none(
-        [`No run of ${uniqueId} found: the jobs that carry its comment only read data (for example dbt show), and none built it.`, opts.location]
+        [
+          // Builds of another target that could not be priced are not "only reads": say what is true of the current target.
+          opts.target && units.some((u) => u.build)
+            ? `No priced run of ${uniqueId} on the current target (${opts.target}) was found: the builds found are of other targets and could not be priced.`
+            : `No run of ${uniqueId} found: the jobs that carry its comment only read data (for example dbt show), and none built it.`,
+          opts.location,
+        ]
           .filter(Boolean)
           .join(" "),
         notes,
@@ -981,18 +997,17 @@ export async function loadHistory(input: {
       // The window reaches the cutoff's own instant (a statement that starts exactly at it is read: the main read takes
       // only statements after the window's start, and the oldest statement it returned is at the cutoff itself) while
       // every lookback is measured from the cutoff. The statements already read come back too and are filtered out below.
-      const found = await rows(sqlFor(boundaryWindow(cutoff, windowStart)))
+      const found = await rows(sqlFor(boundaryWindow(cutoff, windowStartMs(asOfMs, JOBS_RETENTION_DAYS))))
       const going = (r: Row) => isPending(r)
       // The cutoff's millisecond also returns statements the history already read: only unread ones are evidence.
       const readIds = new Set(read.map((r) => r.job_id))
       const unread = found.filter((r) => !readIds.has(r.job_id))
-      const live = unread.filter(going).map((r) => ({ user: r.user_email ?? null, start: parseTime(r.creation_time), inv: r.dbt_invocation_id ?? "" }))
+      const live = unread.filter(going).map((r) => ({ user: r.user_email ?? null, start: parseTime(r.creation_time), inv: r.dbt_invocation_id ?? "", target: r.target_name ?? "" }))
       // Full: the read cannot say what it left out, so the fallback applies besides all the evidence it did return, and
       // every run by a user with a job still going is left out.
       const full = found.length >= HISTORY_LIMIT
       return {
         cutoff,
-        ...(!hit && { windowEdge: true }),
         live,
         ...(full && { full, liveFullUsers: [...new Set(live.map((j) => j.user ?? ""))] }),
         stmts: unread
@@ -1004,6 +1019,7 @@ export async function loadHistory(input: {
             tmp: stmtType(r) === "CREATE_TABLE_AS_SELECT" && (r.destination_table_id ?? "").endsWith(DBT_TMP_SUFFIX),
             dataset: r.destination_dataset_id ?? null,
             inv: r.dbt_invocation_id ?? "",
+            target: r.target_name ?? "",
           })),
       }
     } catch (e) {
