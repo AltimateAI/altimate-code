@@ -833,11 +833,11 @@ describe("loadConventions hardening (round 2)", () => {
       git("init", "-q", "-b", "main")
       git("add", "-A")
       git("commit", "-q", "-m", "base")
-      const { listSymlinksAt } = await import("../../src/altimate/review/git")
+      const { listTreeAt } = await import("../../src/altimate/review/git")
       const all = await loadConventions({
         readBase: (rel) => showAtRef(dir, "HEAD", rel),
         listBase: async () => (await listFilesAt(dir, "HEAD"))!,
-        listBaseSymlinks: async () => (await listSymlinksAt(dir, "HEAD"))!,
+        listBaseSymlinks: async () => (await listTreeAt(dir, "HEAD"))!.symlinks,
         changedPaths: ["models/a.sql"],
       })
       expect(all.map((c) => [c.path, c.text])).toEqual([["AGENTS.md", "Snake case everywhere."]])

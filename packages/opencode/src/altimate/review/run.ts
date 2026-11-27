@@ -11,7 +11,7 @@ import {
   type ResolvedBase,
   gitRepoRoot,
   listFilesAt,
-  listSymlinksAt,
+  listTreeAt,
   listWorkingTreeFiles,
   grepMatchesAt,
   grepFixedAt,
@@ -484,20 +484,19 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
   // reading that commit fails the review, as it does for the policy read just before.
   // Scoped files are searched above the files this review covers (its project's files and
   // the outside Python files its AI lane may take), not every directory the PR touches.
+  // One base listing for the conventions loader: the files and the symlinks among them.
+  let baseTree: Promise<{ files: string[]; symlinks: string[] }> | undefined
+  const listBaseTree = () =>
+    (baseTree ??= listTreeAt(gitRoot, resolved!.sha).then((t) => {
+      if (!t) throw new Error(`cannot list the files of the base commit ${resolved!.sha} for the team conventions`)
+      return t
+    }))
   const conventions =
     aiOn && aiSwitches.conventions && resolved
       ? await loadConventions({
           readBase: (rel) => showAtRef(gitRoot, resolved.sha, rel),
-          listBase: async () => {
-            const files = await listFilesAt(gitRoot, resolved.sha)
-            if (!files) throw new Error(`cannot list the files of the base commit ${resolved.sha} for the team conventions`)
-            return files
-          },
-          listBaseSymlinks: async () => {
-            const links = await listSymlinksAt(gitRoot, resolved.sha)
-            if (!links) throw new Error(`cannot list the files of the base commit ${resolved.sha} for the team conventions`)
-            return links
-          },
+          listBase: async () => (await listBaseTree()).files,
+          listBaseSymlinks: async () => (await listBaseTree()).symlinks,
           changedPaths: [...changedFiles, ...aiOutsideFiles].map((f) => f.path),
         })
       : []

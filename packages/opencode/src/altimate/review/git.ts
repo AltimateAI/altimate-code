@@ -184,14 +184,13 @@ export async function listFilesAt(cwd: string, ref?: string): Promise<string[] |
   }
 }
 
-/** Every symlink at `ref` (mode 120000), repo-root relative; undefined when git can't list it. */
-export async function listSymlinksAt(cwd: string, ref?: string): Promise<string[] | undefined> {
+/** Every entry at `ref` (repo-root relative) and the symlinks among them (mode 120000), from one
+ *  `git ls-tree`; undefined when git can't list it. */
+export async function listTreeAt(cwd: string, ref?: string): Promise<{ files: string[]; symlinks: string[] } | undefined> {
   try {
-    const out = await git(["ls-tree", "-r", "-z", "--full-tree", ref || "HEAD"], cwd)
-    return out
-      .split("\0")
-      .filter((e) => e.startsWith("120000 "))
-      .map((e) => e.slice(e.indexOf("\t") + 1))
+    const entries = (await git(["ls-tree", "-r", "-z", "--full-tree", ref || "HEAD"], cwd)).split("\0").filter(Boolean)
+    const pathOf = (e: string) => e.slice(e.indexOf("\t") + 1)
+    return { files: entries.map(pathOf), symlinks: entries.filter((e) => e.startsWith("120000 ")).map(pathOf) }
   } catch {
     return undefined
   }
