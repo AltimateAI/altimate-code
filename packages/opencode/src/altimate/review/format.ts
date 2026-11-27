@@ -255,14 +255,16 @@ function bulletsFor(items: Finding[], group: boolean): Array<{ text: string; cou
       // column on one model): list each member's own values.
       const values = g.map((f) => ({ f, v: distinguishingValues(f) }))
       const differ = values.some(({ v }) => v.join("\u0000") !== values[0].v.join("\u0000"))
+      // Whole entries that fit the body budget, so a cut never lands inside a
+      // code span or drops the count of the rest.
+      const entries = values
+        .slice(0, 8)
+        .map(({ f, v }) => `\`${f.model ?? f.file}\`: ${v.map((x) => `\`${x}\``).join(", ") || "—"}`)
+      const kept = takeWhole(entries, BULLET_BODY_MAX, " · ")
+      const rest = values.length - kept.length
       const detail =
         differ && values.some(({ v }) => v.length)
-          ? `  ${bodyOf(
-              values
-                .slice(0, 8)
-                .map(({ f, v }) => `\`${f.model ?? f.file}\`: ${v.map((x) => `\`${x}\``).join(", ") || "—"}`)
-                .join(" · ") + (values.length > 8 ? ` (+${values.length - 8} more)` : ""),
-            )}  \n`
+          ? `  ${kept.join(" · ")}${rest ? `${kept.length ? " " : ""}(+${rest} more)` : ""}  \n`
           : ""
       const unverified = g.some((f) => f.degraded) ? " · _unverified_" : ""
       out.push({

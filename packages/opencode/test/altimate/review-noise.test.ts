@@ -261,6 +261,30 @@ describe("summary grouping and budget", () => {
     expect(md).toContain("`a`: `ILIKE` · `b`: `QUALIFY` · `c`: `IFF` · `c`: `NVL2`")
   })
 
+  test("a long per-member list keeps whole entries and counts the rest", () => {
+    // Nine members, each naming several long columns: the list exceeds the body budget.
+    const fs = Array.from({ length: 9 }, (_, i) =>
+      finding({
+        severity: "warning",
+        category: "sql_quality",
+        model: `model_${i}`,
+        file: `models/model_${i}.sql`,
+        title: `model_${i}: unsupported function`,
+        body: ["a", "b", "c"].map((x) => `\`${x}_${i}_${"y".repeat(30)}\``).join(", ") + " are unsupported.",
+      }),
+    )
+    const md = renderSummary(buildEnvelope({ findings: fs, tier: "lite", mode: "comment" }))
+    const detail = md.split("\n").find((l) => l.includes("`model_0`: "))!
+    expect(detail).toBeDefined()
+    // Every code span is closed, and the entries left out are counted.
+    expect((detail.match(/`/g) ?? []).length % 2).toBe(0)
+    const shown = (detail.match(/`model_\d+`: /g) ?? []).length
+    expect(shown).toBeGreaterThan(0)
+    expect(shown).toBeLessThan(9)
+    expect(detail).toContain(`(+${9 - shown} more)`)
+    expect(detail).not.toContain("…")
+  })
+
   test("findings titled by their file group like findings titled by their model", () => {
     const fs = ["a", "b", "c"].map((m) =>
       finding({
