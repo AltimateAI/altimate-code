@@ -169,6 +169,15 @@ describe("rawColumnExposures", () => {
     expect(refCovered("customers|orders.email", new Set(["customers.ssn"]))).toBe(false)
     expect(refCovered("a|b.email", new Set(["b|c.email"]))).toBe(false)
   })
+  test("`distinct on (…)` is a select prefix, not part of the first item", () => {
+    expect(asObject(rawColumnExposures("select distinct on (id) ssn, id from customers"))).toEqual({
+      ssn: ["customers.ssn"],
+      id: ["customers.id"],
+    })
+    expect(asObject(rawColumnExposures("select distinct on (date_trunc('day', ts), id) c.ssn from customers c"))).toEqual({
+      ssn: ["customers.ssn"],
+    })
+  })
   test("ignores commas and keywords inside literals and comments", () => {
     const sql = "select ssn as a, -- , email as a\n  'x, from y' as b, email as c from t"
     expect(asObject(rawColumnExposures(sql))).toEqual({ a: ["t.ssn"], c: ["t.email"] })

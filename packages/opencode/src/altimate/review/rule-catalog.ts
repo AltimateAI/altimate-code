@@ -395,11 +395,15 @@ function parseSelects(sql: string): ParsedSelects {
     const scope = scopes[scopes.length - 1]
     const branch = branches.get(scope) ?? 0
     branches.set(scope, branch + 1)
-    // The list runs from after `select [distinct|all|top n]` to the first clause
-    // keyword, `)` or `;` at its own nesting level.
+    // The list runs from after `select [distinct [on (…)]|all|top n]` to the first
+    // clause keyword, `)` or `;` at its own nesting level.
     let start = i + 6
-    const prefix = /^\s+(?:(?:distinct|all)\b|top\s+\d+\b)?/i.exec(s.slice(start))
-    if (prefix) start += prefix[0].length
+    const distinctOn = /^\s+distinct\s+on\s*\(/i.exec(s.slice(start, start + 100))
+    if (distinctOn) start = closingParen(s, start + distinctOn[0].length - 1) + 1
+    else {
+      const prefix = /^\s+(?:(?:distinct|all)\b|top\s+\d+\b)?/i.exec(s.slice(start, start + 100))
+      if (prefix) start += prefix[0].length
+    }
     let depth = 0
     let itemStart = start
     let position = 0

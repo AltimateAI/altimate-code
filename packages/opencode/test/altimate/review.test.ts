@@ -2552,6 +2552,13 @@ describe("orchestrate", () => {
       expect({ reviewers, pii: env.findings.filter((f) => f.category === "pii_exposure") }).toEqual({ reviewers, pii: [] })
   })
 
+  test("a column the base selected under `distinct on (…)` is credited as exposed", async () => {
+    const base = "select distinct on (customer_id) ssn, customer_id\nfrom customers"
+    const head = "select ssn, customer_id\nfrom customers"
+    for (const { reviewers, env } of await piiRuns(head, base, `-${base.split("\n")[0]}\n+${head.split("\n")[0]}\n`, ["ssn"]))
+      expect({ reviewers, pii: env.findings.filter((f) => f.category === "pii_exposure") }).toEqual({ reviewers, pii: [] })
+  })
+
   test("a qualified reference resolves through its own source, not any CTE with that column", async () => {
     // Base reads `home_address` masked from CTE `m`; head reads it raw from `customers c`.
     const base = [
