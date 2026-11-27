@@ -425,8 +425,10 @@ type BqUnit = {
   final: boolean
   /** The start and destination dataset of each final job a run holds. */
   finals?: { start: number; dataset: string }[]
-  /** How long after its last job ended a run can still be joined by a next one. */
-  joinGap?: number
+  /** The latest end of a temporary CTAS in the run that no final build has taken: its MERGE may still come for ten minutes. */
+  unpairedTmpEnd?: number
+  /** Set on a temporary CTAS no final build took. */
+  unpaired?: boolean
   /** A statement that builds the model's relation (see BQ_BUILD_TYPES). */
   build: boolean
   /** The job is still queued or running. */
@@ -526,7 +528,10 @@ export function bigqueryRuns(
     if (head) {
       claimed.add(head)
       atoms.get(head)!.push(t)
-    } else loose.push([t])
+    } else {
+      t.unpaired = true
+      loose.push([t])
+    }
   }
   const byUser = new Map<string, BqUnit[][]>()
   for (const atom of [...atoms.values(), ...loose]) byUser.set(atom[0].user, [...(byUser.get(atom[0].user) ?? []), atom])
@@ -552,9 +557,9 @@ export function bigqueryRuns(
     const head = g.find((u) => !u.tmp) ?? g[0]
     const finals = g.filter((u) => u.final)
     const unit = sumUnits(Math.min(...g.map((u) => u.start)), g, { user: head.user, final: finals.length > 0, dataset: head.dataset })
-    // The job that ended last is the one the next could join: a temporary CTAS can be joined for ten minutes, any other for a minute.
-    const last = g.reduce((a, b) => (b.end > a.end ? b : a))
-    return { ...unit, finals: finals.map((u) => ({ start: u.start, dataset: u.dataset })), joinGap: last.tmp ? BQ_TMP_JOIN_MS : BQ_CHAIN_MS }
+    // An unpaired temporary CTAS can still be joined by its final build for ten minutes, whatever ran after it.
+    const unpairedTmpEnd = Math.max(Number.NEGATIVE_INFINITY, ...g.filter((u) => u.unpaired).map((u) => u.end))
+    return { ...unit, finals: finals.map((u) => ({ start: u.start, dataset: u.dataset })), unpairedTmpEnd }
   })
   // Only a group with a build job is a run; a group of reads (`dbt show`) is not priced.
   const candidates = all.filter((r) => r.build)
@@ -568,7 +573,7 @@ export function bigqueryRuns(
     !!boundary &&
     (boundary.liveFullUsers?.includes(r.user) ||
       !!boundary.live?.some((b) => (b.user ?? "") === r.user && r.end >= b.start - BQ_CHAIN_MS))
-  const live = candidates.filter((r) => !(r.pending || (asOfMs !== undefined && r.end >= asOfMs - (r.joinGap ?? BQ_CHAIN_MS)) || liveBefore(r)))
+  const live = candidates.filter((r) => !(r.pending || (asOfMs !== undefined && (r.end >= asOfMs - BQ_CHAIN_MS || (r.unpairedTmpEnd ?? Number.NEGATIVE_INFINITY) >= asOfMs - BQ_TMP_JOIN_MS)) || liveBefore(r)))
   // Unread statements before the cutoff that would have joined a run, whatever the run now pairs with: a job by the
   // run's user that ended at or after a minute before the run's start, or a temporary-relation CTAS by the same user,
   // into the dataset of a final build (or any, when that build names none), that ended at or before the build's start

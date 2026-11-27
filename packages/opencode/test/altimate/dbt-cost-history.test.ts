@@ -942,6 +942,21 @@ describe("review follow-ups: read-only hooks, boundary identity and unfinished r
     expect(price([job("m", 0, 1, TIB, "MERGE")], 3).runs).toBe(1)
   })
 
+  test("a SELECT hook after an unpaired temporary CTAS does not close the CTAS's ten minutes", () => {
+    // The CTAS runs minutes 0 to 1 and a SELECT hook 1.1 to 1.5: the last job ended at 1.5, but the MERGE may still come.
+    const rows = [tmp("t", 0, "d"), job("s", 1.1, 0.4, TIB, "SELECT")]
+    const price = (minutes: number) => priceBigquery(rows, undefined, "model.s.m", {}, undefined, { asOfMs: C3 + minutes * MIN }).cost
+    expect(price(3).basis).toBe("none")
+    expect(price(3).notes).toContain("A run still in progress was left out.")
+    // More than ten minutes after the CTAS ended, with no MERGE, it is a run (the SELECT's cost is in it).
+    const done = price(12)
+    expect(done.runs).toBe(1)
+    expect(done.lastRun).toBeCloseTo(12.5, 10)
+    // A temporary CTAS a final build took does not hold the run open.
+    const paired = [tmp("t", 0, "d"), { ...job("m", 2, 1, TIB, "MERGE"), destination_dataset_id: "d" }]
+    expect(priceBigquery(paired, undefined, "model.s.m", {}, undefined, { asOfMs: C3 + 5 * MIN }).cost.runs).toBe(1)
+  })
+
   test("two runs in progress are counted in one note", () => {
     const asOf = C3 + 100 * MIN
     const rows = [job("a", 98, 1, TIB, "MERGE"), { ...job("b", 0, 1, TIB, "MERGE", { user_email: "b@x.com" }), state: "RUNNING" }, job("c", -600, 1, TIB, "MERGE")]
