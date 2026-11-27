@@ -7,7 +7,9 @@ import { MessageID, SessionID } from "@/session/schema"
 import { Log } from "@/altimate/util/log"
 import { redactSecrets } from "@/installation"
 import { Dispatcher } from "../native"
-import { readFile } from "node:fs/promises"
+import { readFile, realpath } from "node:fs/promises"
+import path from "node:path"
+import { gitRepoRoot } from "./git"
 import { type Finding, type ReviewCategory, type Severity, makeFinding, ruleId } from "./finding"
 import { readStreamText } from "../llm/stream-text"
 import { type AiVerifyEvidence, type VerifierStatus, runAiVerify } from "./ai-verify"
@@ -921,17 +923,32 @@ function buildBatchMessage(
 /**
  * The finder's system prompt: the compiled core's, or the text of the file named by
  * `ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE`, which replaces it. An unreadable or empty file is
- * an error, never a silent fallback to the core prompt.
+ * an error, never a silent fallback to the core prompt. The path must be absolute and must not
+ * resolve (symlinks followed) inside the git work tree of `cwd`: in CI that is the PR checkout,
+ * so a file there would let the PR rewrite the prompt.
  */
-export async function finderSystemPrompt(env: Record<string, string | undefined> = process.env): Promise<string | undefined> {
+export async function finderSystemPrompt(
+  env: Record<string, string | undefined> = process.env,
+  cwd: string = process.cwd(),
+): Promise<string | undefined> {
   const file = env.ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE
   if (file) {
-    const text = await readFile(file, "utf8")
-    if (!text.trim()) throw new Error(`ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE is empty: ${file}`)
+    if (!path.isAbsolute(file)) throw new Error("ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE must be an absolute path outside the repository")
+    const real = await realpath(file)
+    const tree = await gitRepoRoot(cwd)
+    if (tree && isInside(real, await realpath(tree)))
+      throw new Error("ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE is inside the git work tree; place it outside the checkout")
+    const text = await readFile(real, "utf8")
+    if (!text.trim()) throw new Error("ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE is empty")
     return text
   }
   const promptRes = await Dispatcher.call("altimate_core.review_ai_prompt", {})
   return ((promptRes.data ?? {}) as Record<string, unknown>).prompt as string | undefined
+}
+
+function isInside(p: string, dir: string): boolean {
+  const rel = path.relative(dir, p)
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel))
 }
 
 /** What the lane would send: files, the unsent rest, one message per call, and a record per file. */
