@@ -175,12 +175,15 @@ export async function reviewAllProjects(opts: ReviewPullRequestOptions): Promise
 
 /**
  * The outside-project files a project's AI lane took: those it reviewed (`scope.aiReviewedOutside`)
- * and, when the lane answered or in a dry run (which plans without a call), those in its input.
+ * and, when the lane answered or in a dry run (which plans without a call), those in its input
+ * that no failed call carried (`ai.failedFiles`).
  * A lane that errored, timed out or had no model recorded its input without reviewing it, so
  * those files stay pending for the next project.
  */
 export function outsideTaken(env: Pick<VerdictEnvelope, "ai" | "scope">, dryRun: boolean): string[] {
-  const input = env.ai?.state === "ok" || dryRun ? (env.ai?.input ?? []).map((r) => r.path) : []
+  // A lane that answered in part did not review the files only its failed calls carried.
+  const failed = new Set(dryRun ? [] : (env.ai?.failedFiles ?? []))
+  const input = env.ai?.state === "ok" || dryRun ? (env.ai?.input ?? []).map((r) => r.path).filter((p) => !failed.has(p)) : []
   return [...input, ...(env.scope?.aiReviewedOutside ?? [])]
 }
 

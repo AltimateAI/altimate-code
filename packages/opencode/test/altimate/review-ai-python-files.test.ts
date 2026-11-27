@@ -546,4 +546,11 @@ describe("--all-projects: a lane that did not answer does not take the outside f
     expect(outsideTaken({ ai: { state: "skipped", input: [rec] } } as any, true)).toEqual(["airflow/load.py"])
     expect(outsideTaken({ ai: { state: "error" }, scope: { aiReviewedOutside: ["airflow/x.py"] } } as any, false)).toEqual(["airflow/x.py"])
   })
+
+  test("a partly failed lane: a file only a failed call carried stays pending", async () => {
+    const { outsideTaken } = await import("../../src/altimate/review/multi-project")
+    const rec = (p: string) => ({ path: p, kind: AI_PYTHON_KIND, chars: 1, truncated: false, hunksSent: 1, hunksTotal: 1, card: false })
+    const env = { ai: { state: "ok", input: [rec("airflow/a.py"), rec("airflow/b.py")], failedFiles: ["airflow/b.py"] } }
+    expect(outsideTaken(env as any, false)).toEqual(["airflow/a.py"])
+  })
 })
