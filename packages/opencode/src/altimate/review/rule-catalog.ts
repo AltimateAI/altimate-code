@@ -426,9 +426,12 @@ function parseSelects(sql: string): ParsedSelects {
         ? `${parent}>${unquote(alias)}` : undefined
     let key = named
     if (!key || nestedKeys.has(key)) {
-      const n = (nestedCount.get(parent) ?? 0) + 1
+      // Numbered within the parent, skipping any key already taken (a numbered
+      // key can equal one another scope numbered under the same alias).
+      let n = nestedCount.get(parent) ?? 0
+      do key = `${named ?? parent}>sub${++n}`
+      while (nestedKeys.has(key))
       nestedCount.set(parent, n)
-      key = `${named ?? parent}>sub${n}`
     }
     nestedKeys.add(key)
     return key

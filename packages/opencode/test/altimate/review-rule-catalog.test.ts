@@ -7,6 +7,8 @@ import {
   rawColumnExposures,
   refCovered,
   selectItemColumns,
+  selectItems,
+  ROOT_SCOPE,
 } from "../../src/altimate/review/rule-catalog"
 
 describe("rule catalog (self-verifying scenario corpus)", () => {
@@ -199,6 +201,12 @@ describe("rawColumnExposures", () => {
     expect(asObject(rawColumnExposures("select distinct on (date_trunc('day', ts), id) c.ssn from customers c"))).toEqual({
       ssn: ["customers.ssn"],
     })
+  })
+  test("every nested query gets its own scope, even when a numbered key meets an aliased one", () => {
+    // Two union branches alias their subquery `s`; the first holds an unaliased subquery.
+    const sql = "select a from (select a from t where a in (select a from u)) s\nunion all\nselect a from (select a from v) s"
+    const scopes = selectItems(sql).filter((i) => i.scope !== ROOT_SCOPE).map((i) => i.scope)
+    expect(new Set(scopes).size).toBe(scopes.length)
   })
   test("ignores commas and keywords inside literals and comments", () => {
     const sql = "select ssn as a, -- , email as a\n  'x, from y' as b, email as c from t"
