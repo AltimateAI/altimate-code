@@ -2747,7 +2747,7 @@ describe("orchestrate", () => {
 
   test("a reindent inside a nested query stays a reindent when a subquery is added above it", async () => {
     // Base PII detection misses `ssn`, so only the reindent check keeps the twin quiet.
-    const runner: ReviewRunner = { ...piiRunner([]), detectPii: async () => ({ columns: [] }) }
+    const runner: ReviewRunner = piiRunner([])
     const base = [
       "with a as (select customer_id from customers)",
       "select s.customer_id, s.ssn",
