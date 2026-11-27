@@ -325,7 +325,9 @@ rubric:
   through CTEs and subqueries. A column that is hashed, masked or dropped on the
   way (`sha2(ssn)`, `right(ssn, 4)`, `* exclude (ssn)`) stays a warning; one that
   only passes through a value-preserving expression (`coalesce(ssn, '')`,
-  `max(ssn)`) still blocks.
+  `max(ssn)`) still blocks, and so does one in SQL the review cannot follow
+  (Jinja that builds the select list, lateral or scalar subqueries, unusual
+  syntax).
 
 ### Risk-tier path tokens
 
