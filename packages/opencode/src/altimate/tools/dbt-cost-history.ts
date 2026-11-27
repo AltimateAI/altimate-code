@@ -205,17 +205,20 @@ export type BoundaryWindow = {
   startBeforeMs: number
   /** ... and after this (a day of lookback). */
   startAfterMs: number
+  /** ... except a job that is not done, which may have been created anywhere in the history window and is still going. */
+  liveStartAfterMs: number
   /** A job must have ended at or after this (the cutoff less the chain window) to be able to join a run. */
   joinEndAtLeastMs: number
   /** A temporary-relation CTAS must end at or after this (the cutoff less the join window). */
   tmpEndAtLeastMs: number
 }
 
-export function boundaryWindow(cutoffMs: number): BoundaryWindow {
+export function boundaryWindow(cutoffMs: number, windowStart = cutoffMs - HISTORY_DAYS * DAY_MS): BoundaryWindow {
   const cutoff = Math.trunc(cutoffMs)
   return {
     startBeforeMs: cutoff + 1,
     startAfterMs: cutoff - BOUNDARY_LOOKBACK_DAYS * DAY_MS,
+    liveStartAfterMs: Math.trunc(windowStart),
     joinEndAtLeastMs: cutoff - BQ_CHAIN_MS,
     tmpEndAtLeastMs: cutoff - BQ_TMP_JOIN_MS,
   }
@@ -228,7 +231,8 @@ export function bigqueryBoundarySql(input: { project: string; location?: unknown
   // dbt's temporary relation that ended within ten minutes before its final build.
   return `select /* run boundary */ /* ${OWN_MARK} */ job_id, user_email, creation_time, end_time, state, statement_type, destination_table.table_id as destination_table_id, destination_table.dataset_id as destination_dataset_id
 from ${bqJobs(input.project, input.location, input.view ?? "JOBS")}
-where creation_time < ${at(w.startBeforeMs)} and creation_time > ${at(w.startAfterMs)}
+where creation_time < ${at(w.startBeforeMs)}
+  and (creation_time > ${at(w.startAfterMs)} or (upper(state) <> 'DONE' and creation_time > ${at(w.liveStartAfterMs)}))
   and upper(job_type) = 'QUERY' and ${LIVE_OR_DONE}
   and parent_job_id is null
   and (
@@ -809,7 +813,7 @@ export async function loadHistory(input: {
       // The window reaches the cutoff's own instant (a statement that starts exactly at it is read: the main read takes
       // only statements after the window's start, and the oldest statement it returned is at the cutoff itself) while
       // every lookback is measured from the cutoff. The statements already read come back too and are filtered out below.
-      const found = await rows(sqlFor(boundaryWindow(cutoff)))
+      const found = await rows(sqlFor(boundaryWindow(cutoff, windowStart)))
       if (found.length >= HISTORY_LIMIT) return { cutoff }
       // The cutoff's millisecond also returns statements the history already read: only unread ones are evidence.
       const readIds = new Set(read.map((r) => r.job_id))

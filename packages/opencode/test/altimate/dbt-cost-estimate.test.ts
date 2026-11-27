@@ -1037,6 +1037,36 @@ describe("dbt_cost_estimate cost", () => {
       })
     })
 
+    test("a job still running that was created 25 hours before the cutoff, outside the one-day lookback, leaves the run in progress", async () => {
+      await withNow(async () => {
+        // 500 statements are returned, so the cutoff is the oldest one's start, five days before the instant read.
+        const T0 = asOf - 5 * day
+        const step = 864_000
+        const rows = [
+          row("old", T0, T0 + 60_000, "MERGE", TIB),
+          ...Array.from({ length: 499 }, (_, i) => [...row(`f${i}`, T0 + (i + 1) * step, T0 + (i + 1) * step + 60_000, "MERGE", TIB)].map((v, k) => (k === 1 ? `u${i}@x.com` : v))),
+        ]
+        const lit = (jinja: string, pattern: RegExp) => Number(pattern.exec(jinja)![1])
+        const queuedAt = T0 - 25 * 3_600_000
+        useAdapter(calls, {
+          ...answer(rows),
+          // An adapter consistent with the SQL: a job is returned iff its creation and state satisfy the query's own predicates.
+          boundary: async (jinja) => {
+            const before = lit(jinja, /creation_time < timestamp_millis\((\d+)\)/)
+            const after = lit(jinja, /creation_time > timestamp_millis\((\d+)\) or/)
+            const liveAfter = /<> \\?'DONE\\?' and creation_time > timestamp_millis\((\d+)\)/.exec(jinja)
+            const seen = queuedAt < before && (queuedAt > after || (liveAfter !== null && queuedAt > Number(liveAfter[1])))
+            return table(["job_id", "user_email", "creation_time", "end_time", "state", "statement_type", "destination_table_id", "destination_dataset_id"],
+              seen ? [["queued", "a@x.com", iso(queuedAt), null, "RUNNING", "MERGE", null, null]] : [])
+          },
+        })
+        const cost = await ask()
+        // The user's old run is left out as in progress; the 499 other users' runs stay.
+        expect(cost.runs).toBe(499)
+        expect(cost.notes).toContain("A run still in progress was left out.")
+      })
+    })
+
     test("an unread temporary CTAS into another dataset does not drop a complete run, one into its dataset does", async () => {
       await withNow(async () => {
         // The window is not full, so the boundary starts at the window's edge; place the unread CTAS just before it.

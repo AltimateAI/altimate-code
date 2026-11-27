@@ -597,6 +597,7 @@ describe("boundary SQL", () => {
     expect(w).toEqual({
       startBeforeMs: CUT + 1,
       startAfterMs: CUT - 86_400_000,
+      liveStartAfterMs: CUT - 30 * 86_400_000,
       joinEndAtLeastMs: CUT - 60_000,
       tmpEndAtLeastMs: CUT - 600_000,
     })
@@ -613,6 +614,9 @@ describe("boundary SQL", () => {
     // The identity the main grouping pairs on: the destination table and dataset.
     expect(sql).toContain("destination_table.table_id as destination_table_id, destination_table.dataset_id as destination_dataset_id")
     expect(sql).toContain("user_email")
+    // A job that is not done may have been created long before: it is read from the start of the history window, still bounded.
+    expect(sql).toContain(`creation_time > timestamp_millis(${CUT - 86_400_000}) or (upper(state) <> 'DONE' and creation_time > timestamp_millis(${CUT - 30 * 86_400_000}))`)
+    expect(boundaryWindow(CUT, CUT - 5 * 86_400_000).liveStartAfterMs).toBe(CUT - 5 * 86_400_000)
     // And the CTAS into dbt's temporary relation that ended within ten minutes before it.
     expect(sql).toContain("upper(statement_type) = 'CREATE_TABLE_AS_SELECT' and ends_with(destination_table.table_id, '__dbt_tmp')")
     expect(sql).toContain(`end_time >= timestamp_millis(${CUT - 600_000})`)
