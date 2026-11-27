@@ -2843,6 +2843,12 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // An outside-project file the AI lane reviewed is not "outside the dbt project, not reviewed".
   const aiReviewedSet = new Set(aiReviewedOutside)
   const inputNotReviewed = (input.scope?.notReviewed ?? []).filter((n) => !aiReviewedSet.has(n.path))
+  // `outOfScopeFiles` drops only the reviewed files it counted (listed as outside the project).
+  const reviewedCountedOutside = new Set(
+    (input.scope?.notReviewed ?? [])
+      .filter((n) => aiReviewedSet.has(n.path) && /^outside the dbt project/.test(n.reason))
+      .map((n) => n.path),
+  ).size
   const ledger: NotReviewed[] = [
     ...inputNotReviewed,
     ...dropped,
@@ -2879,8 +2885,8 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
       input.scope || notReviewed.length
         ? {
             ...input.scope,
-            ...(aiReviewedOutside.length && input.scope?.outOfScopeFiles !== undefined
-              ? { outOfScopeFiles: Math.max(0, input.scope.outOfScopeFiles - aiReviewedOutside.length) || undefined }
+            ...(reviewedCountedOutside && input.scope?.outOfScopeFiles !== undefined
+              ? { outOfScopeFiles: Math.max(0, input.scope.outOfScopeFiles - reviewedCountedOutside) || undefined }
               : {}),
             ...(aiReviewedOutside.length ? { aiReviewedOutside } : {}),
             unverified: sortedUnverified.length ? sortedUnverified : undefined,

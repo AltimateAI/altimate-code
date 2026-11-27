@@ -32,6 +32,17 @@ const runner = {
   },
 } as ReviewRunner
 
+// Helpers for the end-to-end tests over a temp git repository.
+const git = (cwd: string, ...args: string[]) =>
+  execFileSync("git", ["-c", "commit.gpgsign=false", ...args], {
+    cwd,
+    env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" },
+  }).toString()
+const write = async (root: string, rel: string, body: string) => {
+  await fs.mkdir(path.dirname(path.join(root, rel)), { recursive: true })
+  await fs.writeFile(path.join(root, rel), body)
+}
+
 const mod = (p: string, status: ChangedFile["status"] = "modified"): ChangedFile => ({
   path: p,
   status,
@@ -221,15 +232,6 @@ describe("ALTIMATE_REVIEW_AI_PYTHON_FILES: planner", () => {
 })
 
 describe("reviewPullRequest end to end: .py files outside the dbt project reach the lane only under the flag", () => {
-  const git = (cwd: string, ...args: string[]) =>
-    execFileSync("git", ["-c", "commit.gpgsign=false", ...args], {
-      cwd,
-      env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" },
-    }).toString()
-  const write = async (root: string, rel: string, body: string) => {
-    await fs.mkdir(path.dirname(path.join(root, rel)), { recursive: true })
-    await fs.writeFile(path.join(root, rel), body)
-  }
 
   test("AI dry run: ai.input lists the outside .py file as python_file; unset it is out of scope only", async () => {
     const { reviewPullRequest } = await import("../../src/altimate/review/run")
@@ -287,40 +289,134 @@ describe("reviewPullRequest end to end: .py files outside the dbt project reach 
 })
 
 describe("a Python file renamed out of the dbt project", () => {
-  const git = (cwd: string, ...args: string[]) =>
-    execFileSync("git", ["-c", "commit.gpgsign=false", ...args], {
-      cwd,
-      env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" },
-    }).toString()
-  const write = async (root: string, rel: string, body: string) => {
-    await fs.mkdir(path.dirname(path.join(root, rel)), { recursive: true })
-    await fs.writeFile(path.join(root, rel), body)
+  const ENV = ["ALTIMATE_REVIEW_AI_REPLAY", "ALTIMATE_REVIEW_AI_VERIFY"]
+  const savedEnv = Object.fromEntries(ENV.map((k) => [k, process.env[k]]))
+  afterEach(() => {
+    for (const k of ENV) {
+      if (savedEnv[k] === undefined) delete process.env[k]
+      else process.env[k] = savedEnv[k]
+    }
+  })
+  const body = Array.from({ length: 20 }, (_, i) => `print(${i})`).join("\n") + "\n"
+  /** `<prefix>scripts/load.py` moved (and edited) to `airflow/load.py`, plus the given edits. */
+  async function movedRepo(name: string, prefix: string, files: Record<string, string>, edits: Record<string, string>) {
+    const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), name)))
+    for (const [rel, text] of Object.entries(files)) await write(root, rel, text)
+    await write(root, `${prefix}scripts/load.py`, body)
+    git(root, "init", "-q", "-b", "main")
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "-m", "base")
+    git(root, "checkout", "-q", "-b", "pr")
+    for (const [rel, text] of Object.entries(edits)) await write(root, rel, text)
+    await fs.rm(path.join(root, `${prefix}scripts/load.py`))
+    // Moved and edited: git still sees a rename.
+    await write(root, "airflow/load.py", body.replace("print(3)", "print(33)"))
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "-m", "pr")
+    for (const k of ["GITHUB_EVENT_PATH", "GITHUB_BASE_REF", "CI_MERGE_REQUEST_TARGET_BRANCH_NAME", "ALTIMATE_REVIEW_AI_DRYRUN"])
+      delete process.env[k]
+    process.env.ALTIMATE_REVIEW_AI_PYTHON_FILES = "1"
+    return root
   }
+  /** A replayed lane answers (`state: ok`) without a model call; the verifier is off. */
+  async function replayOk(root: string) {
+    const replay = path.join(root, "..", path.basename(root) + "-replay.json")
+    await fs.writeFile(replay, JSON.stringify({ findings: [], ai: { state: "ok", calls: 1 } }))
+    process.env.ALTIMATE_REVIEW_AI_REPLAY = replay
+    process.env.ALTIMATE_REVIEW_AI_VERIFY = "0"
+    return replay
+  }
+  const outsideListed = (env: { scope?: { notReviewed: Array<{ path: string; reason: string }> } }) =>
+    (env.scope?.notReviewed ?? []).filter((n) => n.reason.startsWith("outside the dbt project")).map((n) => n.path)
+  const single = (name: string) =>
+    movedRepo(name, "dbt/", { "dbt/dbt_project.yml": "name: p\n", "dbt/models/m.sql": "select 1 as id\n", "README.md": "docs\n" }, {
+      "dbt/models/m.sql": "select 1 as id, 2 as x\n",
+      "README.md": "more docs\n",
+    })
 
-  test("is offered to the AI lane at its new path (AI dry run)", async () => {
+  test("is offered to the AI lane at its new path (AI dry run), and stays listed as not reviewed", async () => {
     const { reviewPullRequest } = await import("../../src/altimate/review/run")
-    const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "review-py-moved-")))
+    const root = await single("review-py-moved-")
     try {
-      const body = Array.from({ length: 20 }, (_, i) => `print(${i})`).join("\n") + "\n"
-      await write(root, "dbt/dbt_project.yml", "name: p\n")
-      await write(root, "dbt/models/m.sql", "select 1 as id\n")
-      await write(root, "dbt/scripts/load.py", body)
-      git(root, "init", "-q", "-b", "main")
-      git(root, "add", "-A")
-      git(root, "commit", "-q", "-m", "base")
-      git(root, "checkout", "-q", "-b", "pr")
-      await write(root, "dbt/models/m.sql", "select 1 as id, 2 as x\n")
-      await fs.rm(path.join(root, "dbt/scripts/load.py"))
-      // Moved and edited: git still sees a rename.
-      await write(root, "airflow/load.py", body.replace("print(3)", "print(33)"))
-      git(root, "add", "-A")
-      git(root, "commit", "-q", "-m", "pr")
-      for (const k of ["GITHUB_EVENT_PATH", "GITHUB_BASE_REF", "CI_MERGE_REQUEST_TARGET_BRANCH_NAME"]) delete process.env[k]
       process.env.ALTIMATE_REVIEW_AI_DRYRUN = "1"
-      process.env.ALTIMATE_REVIEW_AI_PYTHON_FILES = "1"
       const env = await reviewPullRequest({ cwd: path.join(root, "dbt"), base: "main", head: "HEAD" })
       expect(env.ai?.input?.map((r) => [r.path, r.kind])).toContainEqual(["airflow/load.py", AI_PYTHON_KIND])
+      // The dry run made no model call.
+      expect(outsideListed(env)).toEqual(["README.md", "airflow/load.py"])
+      expect(env.scope?.outOfScopeFiles).toBe(2)
     } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  }, 60_000)
+
+  test("reviewed by the lane next to an unreviewed outside file: the outside count stays 1", async () => {
+    const { reviewPullRequest } = await import("../../src/altimate/review/run")
+    const root = await single("review-py-moved-ok-")
+    const replay = await replayOk(root)
+    try {
+      const env = await reviewPullRequest({ cwd: path.join(root, "dbt"), base: "main", head: "HEAD" })
+      expect(env.scope?.aiReviewedOutside).toEqual(["airflow/load.py"])
+      expect(outsideListed(env)).toEqual(["README.md"])
+      expect(env.scope?.outOfScopeFiles).toBe(1)
+    } finally {
+      await fs.rm(replay, { force: true })
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  }, 60_000)
+
+  test("the lane does not take it (`pythonFiles` off): listed as outside the project, not reviewed", async () => {
+    const { reviewPullRequest } = await import("../../src/altimate/review/run")
+    const root = await single("review-py-moved-off-")
+    const replay = await replayOk(root)
+    try {
+      process.env.ALTIMATE_REVIEW_AI_PYTHON_FILES = "0"
+      const env = await reviewPullRequest({ cwd: path.join(root, "dbt"), base: "main", head: "HEAD" })
+      expect(env.scope?.aiReviewedOutside).toBeUndefined()
+      expect(env.scope?.notReviewed.find((n) => n.path === "airflow/load.py")?.reason).toBe("outside the dbt project (dbt)")
+      expect(env.scope?.outOfScopeFiles).toBe(2)
+    } finally {
+      await fs.rm(replay, { force: true })
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  }, 60_000)
+
+  const twoProjects = (name: string) =>
+    movedRepo(
+      name,
+      "a/",
+      {
+        "a/dbt_project.yml": "name: a\n",
+        "a/models/m.sql": "select 1 as id\n",
+        "b/dbt_project.yml": "name: b\n",
+        "b/models/n.sql": "select 1 as id\n",
+      },
+      { "a/models/m.sql": "select 1 as id, 2 as x\n", "b/models/n.sql": "select 1 as id, 3 as y\n" },
+    )
+
+  test("--all-projects (AI dry run): routed to the project it left, offered once, listed as not reviewed", async () => {
+    const root = await twoProjects("review-py-mp-moved-")
+    try {
+      process.env.ALTIMATE_REVIEW_AI_DRYRUN = "1"
+      const env = await reviewAllProjects({ cwd: root, base: "main", head: "HEAD" })
+      expect(env.ai?.input?.map((r) => r.path).sort()).toEqual(["a/models/m.sql", "airflow/load.py", "b/models/n.sql"])
+      expect(env.scope?.projects?.find((p) => p.root === "a")?.files).toBe(2)
+      expect(env.scope?.notReviewed.map((n) => n.path)).toContain("airflow/load.py")
+      expect(env.scope?.outOfScopeFiles).toBe(1)
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  }, 60_000)
+
+  test("--all-projects: reviewed by the lane of the project it left, not listed", async () => {
+    const root = await twoProjects("review-py-mp-moved-ok-")
+    const replay = await replayOk(root)
+    try {
+      const env = await reviewAllProjects({ cwd: root, base: "main", head: "HEAD" })
+      expect(env.scope?.aiReviewedOutside).toEqual(["airflow/load.py"])
+      expect(env.scope?.notReviewed.map((n) => n.path)).not.toContain("airflow/load.py")
+      expect(env.scope?.outOfScopeFiles).toBeUndefined()
+    } finally {
+      await fs.rm(replay, { force: true })
       await fs.rm(root, { recursive: true, force: true })
     }
   }, 60_000)
@@ -332,7 +428,7 @@ describe("outside-project Python files the AI lane reviewed are not listed as no
     outOfScopeFiles: paths.length,
     notReviewed: paths.map((p) => ({ path: p, reason: "outside the dbt project (dbt)" })),
   })
-  async function run(state: "ok" | "error" | "partial") {
+  async function run(state: "ok" | "error" | "partial", listed = ["airflow/load.py", "README.md"]) {
     process.env.ALTIMATE_REVIEW_AI_PYTHON_FILES = "1"
     return runReview({
       changedFiles: [mod("dbt/models/m.sql")],
@@ -343,7 +439,7 @@ describe("outside-project Python files the AI lane reviewed are not listed as no
       forceTier: "full",
       layout: { root: "dbt", dirs: DEFAULT_DBT_DIRS },
       aiOutsideFiles: [mod("airflow/load.py")],
-      scope: outsideScope(["airflow/load.py", "README.md"]),
+      scope: outsideScope(listed),
       getContent: async (f, side) => (side === "old" ? undefined : `x`),
       generatedAt: "2026-11-25T00:00:00Z",
       aiReview: async () => ({
@@ -361,6 +457,12 @@ describe("outside-project Python files the AI lane reviewed are not listed as no
   test("lane answered: dropped from notReviewed, recorded as aiReviewedOutside, count lowered", async () => {
     const env = await run("ok")
     expect(env.scope?.notReviewed.map((n) => n.path)).toEqual(["README.md"])
+    expect(env.scope?.aiReviewedOutside).toEqual(["airflow/load.py"])
+    expect(env.scope?.outOfScopeFiles).toBe(1)
+  })
+
+  test("a reviewed file the outside count did not include does not lower it", async () => {
+    const env = await run("ok", ["README.md"])
     expect(env.scope?.aiReviewedOutside).toEqual(["airflow/load.py"])
     expect(env.scope?.outOfScopeFiles).toBe(1)
   })
@@ -392,15 +494,6 @@ describe("outside-project Python files the AI lane reviewed are not listed as no
 })
 
 describe("--all-projects: an outside-project Python file goes to one project's AI lane", () => {
-  const git = (cwd: string, ...args: string[]) =>
-    execFileSync("git", ["-c", "commit.gpgsign=false", ...args], {
-      cwd,
-      env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" },
-    }).toString()
-  const write = async (root: string, rel: string, body: string) => {
-    await fs.mkdir(path.dirname(path.join(root, rel)), { recursive: true })
-    await fs.writeFile(path.join(root, rel), body)
-  }
 
   test("AI dry run over two projects: the outside .py file is in one project's input", async () => {
     const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "review-py-mp-")))
@@ -479,15 +572,6 @@ describe("ai.unsent lists only files the deterministic lanes checked", () => {
 })
 
 describe("--all-projects: the outside-project handoff follows what a project actually took", () => {
-  const git = (cwd: string, ...args: string[]) =>
-    execFileSync("git", ["-c", "commit.gpgsign=false", ...args], {
-      cwd,
-      env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" },
-    }).toString()
-  const write = async (root: string, rel: string, body: string) => {
-    await fs.mkdir(path.dirname(path.join(root, rel)), { recursive: true })
-    await fs.writeFile(path.join(root, rel), body)
-  }
   const ENV = ["ALTIMATE_REVIEW_AI_REPLAY", "ALTIMATE_REVIEW_AI_VERIFY"]
   const savedEnv = Object.fromEntries(ENV.map((k) => [k, process.env[k]]))
   afterEach(() => {

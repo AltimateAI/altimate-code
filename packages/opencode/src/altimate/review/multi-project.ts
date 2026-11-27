@@ -176,7 +176,7 @@ export async function reviewAllProjects(opts: ReviewPullRequestOptions): Promise
 /**
  * The outside-project files a project's AI lane took: those it reviewed (`scope.aiReviewedOutside`)
  * and, when the lane answered or in a dry run (which plans without a call), those in its input
- * that no failed call carried (`ai.failedFiles`).
+ * except the ones carried only by failed calls (`ai.failedFiles`).
  * A lane that errored, timed out or had no model recorded its input without reviewing it, so
  * those files stay pending for the next project.
  */
@@ -222,8 +222,18 @@ export function mergeProjectEnvelopes(runs: ProjectRun[], coveredProjects?: stri
 
   // A path some project reviewed is not "outside the dbt project" for the PR.
   // So is a path outside every project that one project's AI lane reviewed.
+  // A file renamed out of a project is assigned to it but reviewed only as a deletion at its old
+  // path; that project lists the new path as outside, so the path counts only when a lane reviewed it.
   const aiReviewedOutside = [...new Set(envs.flatMap((e) => e.scope?.aiReviewedOutside ?? []))]
-  const reviewed = new Set([...runs.flatMap((r) => r.paths), ...aiReviewedOutside])
+  const listedOutside = (e: VerdictEnvelope) =>
+    new Set((e.scope?.notReviewed ?? []).filter((n) => OUTSIDE_PROJECT_RE.test(n.reason)).map((n) => n.path))
+  const reviewed = new Set([
+    ...runs.flatMap((r) => {
+      const outside = listedOutside(r.env)
+      return r.paths.filter((p) => !outside.has(p))
+    }),
+    ...aiReviewedOutside,
+  ])
   const notReviewed: Array<{ path: string; reason: string }> = []
   const seenEntry = new Set<string>()
   for (const e of envs) {

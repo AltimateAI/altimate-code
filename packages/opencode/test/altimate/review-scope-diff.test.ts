@@ -306,7 +306,10 @@ describe("scopeToProject: the dbt project being reviewed, nothing else", () => {
       { path: "projects/a/models/out.sql", status: "deleted" },
       { path: "projects/a/models/in.sql", status: "added" },
     ])
-    expect(r.outOfScope).toBe(0)
+    // The moved-out file's new path is outside this project and not reviewed here.
+    expect(r.movedOutPaths).toEqual(["projects/b/models/out.sql"])
+    expect(r.outOfScopePaths).toEqual(["projects/b/models/out.sql"])
+    expect(r.outOfScope).toBe(1)
   })
 })
 

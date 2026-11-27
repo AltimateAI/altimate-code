@@ -297,7 +297,8 @@ export interface ScopeResult {
   outOfScopePaths: string[]
   /** Paths behind `movedUnchanged`. */
   movedUnchangedPaths: string[]
-  /** Head paths of renames out of the project (scoped in as a deletion at the old path). */
+  /** Head paths of renames out of the project: scoped in as a deletion at the old path, and the
+   *  head path is also in `outOfScopePaths` (outside the project, not reviewed by its lanes). */
   movedOutPaths: string[]
 }
 
@@ -323,7 +324,8 @@ const isModel = (p: string, layout?: DbtProjectLayout) => {
  *   findings. A move across roles or layers stays in scope.
  * - A rename across the project boundary is a deletion from one project and an
  *   addition to the other: only the side inside `root` is kept, rewritten as
- *   `deleted` (old path) or `added` (new path).
+ *   `deleted` (old path) or `added` (new path). The head path of a rename out
+ *   of the project is outside it, so it is also counted out of scope.
  */
 export function scopeToProject(
   files: ChangedFile[],
@@ -349,7 +351,10 @@ export function scopeToProject(
     if (f.oldPath && inside !== oldInside) {
       const { oldPath, similarity: _similarity, ...rest } = f
       inScope.push(inside ? { ...rest, status: "added" } : { ...rest, path: oldPath, status: "deleted" })
-      if (!inside) movedOutPaths.push(f.path)
+      if (!inside) {
+        movedOutPaths.push(f.path)
+        outOfScopePaths.push(f.path)
+      }
       continue
     }
     if (
