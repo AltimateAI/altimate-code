@@ -205,6 +205,7 @@ export function bigqueryChildrenSql(input: { project: string; location?: unknown
 from ${bqJobs(input.project, input.location, input.view ?? "JOBS")}
 where creation_time >= timestamp_millis(${Math.floor(input.sinceMs)})
   and upper(job_type) = 'QUERY' and upper(state) = 'DONE' and error_result is null
+  and ${notContinuous}
   and parent_job_id in (${input.parents.map(sqlString).join(",")})
 order by creation_time desc limit ${BQ_CHILD_LIMIT}`
 }
@@ -214,7 +215,8 @@ export function bigqueryCapacitySql(input: { project: string; location?: unknown
   return `select count(*) as jobs, countif(reservation_id is not null) as reserved
 from ${bqJobs(input.project, input.location, input.view ?? "JOBS")}
 where creation_time > timestamp_millis(${windowStartMs(input.asOfMs, 7)}) and creation_time <= timestamp_millis(${input.asOfMs})
-  and upper(job_type) = 'QUERY' and upper(state) = 'DONE'`
+  and upper(job_type) = 'QUERY' and upper(state) = 'DONE'
+  and ${notContinuous}`
 }
 
 /**
@@ -530,7 +532,8 @@ function bqJob(r: Row, cfg: CostConfig, asOfMs?: number): BqUnit {
     user: r.user_email ?? "",
     // A job still running has no end yet: it lasts to the instant read, or beyond it.
     end: pending ? (asOfMs ?? Number.POSITIVE_INFINITY) : parseTime(r.end_time),
-    build: BQ_BUILD_TYPES.includes(stmtType(r)),
+    // A BigQuery ML statement counts as a build, so a run of one exists and is left out with its BigQuery ML cause.
+    build: BQ_BUILD_TYPES.includes(stmtType(r)) || ml,
     pending,
     inv: r.dbt_invocation_id ?? "",
     target: r.target_name ?? "",

@@ -1106,6 +1106,15 @@ describe("review: targets, scope, attribution, Python, permissions", () => {
     expect(costText(mixed).split("\n")[0]).toContain("attributed slot time")
   })
 
+  test("a run whose only job is a BigQuery ML statement exists and is unknown with its cause, not a run that was never found", () => {
+    const { cost } = priceBigquery([bq("h", 0, TIB, null, 0, "CREATE_MODEL", { dbt_invocation_id: "i1" })], undefined, "model.s.m", {})
+    expect(cost.basis).toBe("none")
+    expect(cost.unknownReason).toContain("a BigQuery ML job (CREATE MODEL) ran on demand")
+    expect(cost.unknownReason).not.toContain("only read data")
+    // Without a label too.
+    expect(priceBigquery([bq("h", 0, TIB, null, 0, "CREATE_MODEL")], undefined, "model.s.m", {}).cost.unknownReason).toContain("BigQuery ML")
+  })
+
   test("a script whose start does not parse is unknown with its own cause, and a manifest language is read", () => {
     const script = { ...bq("s", 0, null, null, 0, "SCRIPT"), creation_time: "not a time" }
     const { cost } = priceBigquery([script, bq("m", 500, TIB)], [{ job_id: "k", parent_job_id: "s", creation_time: "1970-01-01T00:00:10Z", statement_type: "MERGE", total_bytes_billed: "1", total_slot_ms: "0", reservation_id: null, cache_hit: "False" }], "model.s.m", {})
@@ -1250,13 +1259,15 @@ describe("checklist review: BigQuery ML, window edge, labelled pairing, target s
     expect(price([labelled("i1")]).runs).toBe(1)
   })
 
-  test("a continuous query is not a dbt run: the history, boundary and invocation reads leave it out", () => {
+  test("a continuous query is not a dbt run: all five reads leave it out", () => {
     const needle = needleFor("model.shop.orders")
     const w = boundaryWindow(C4)
     for (const sql of [
       bigqueryHistorySql({ project: "p", needle, asOfMs: ASOF }),
       bigqueryBoundarySql({ project: "p", needle, window: w }),
       bigqueryInvocationSql({ project: "p", needle, window: w, invocations: ["i1"] }),
+      bigqueryCapacitySql({ project: "p", asOfMs: ASOF }),
+      bigqueryChildrenSql({ project: "p", parents: ["a"], sinceMs: 1 }),
     ])
       expect(sql).toContain("and coalesce(continuous, false) = false")
   })
