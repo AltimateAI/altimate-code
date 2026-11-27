@@ -17,19 +17,22 @@ describe("ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE", () => {
 
   test("set: the file's text replaces the core prompt, core not asked", async () => {
     await using tmp = await tmpdir()
+    // The review's repository: a temp git repo, so the test does not depend on running inside a checkout.
+    await using repo = await tmpdir({ git: true })
     const file = path.join(tmp.path, "p.txt")
     await fs.writeFile(file, "FILE PROMPT")
     spy = spyOn(Dispatcher, "call").mockResolvedValue({ success: true, data: { prompt: "CORE" } } as any)
-    expect(await finderSystemPrompt({ ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE: file })).toBe("FILE PROMPT")
+    expect(await finderSystemPrompt({ ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE: file }, repo.path)).toBe("FILE PROMPT")
     expect(spy).not.toHaveBeenCalled()
   })
 
   test("an empty or missing file is an error, not a fallback", async () => {
     await using tmp = await tmpdir()
+    await using repo = await tmpdir({ git: true })
     const file = path.join(tmp.path, "empty.txt")
     await fs.writeFile(file, "  \n")
-    await expect(finderSystemPrompt({ ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE: file })).rejects.toThrow("is empty")
-    await expect(finderSystemPrompt({ ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE: path.join(tmp.path, "none.txt") })).rejects.toThrow()
+    await expect(finderSystemPrompt({ ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE: file }, repo.path)).rejects.toThrow("is empty")
+    await expect(finderSystemPrompt({ ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE: path.join(tmp.path, "none.txt") }, repo.path)).rejects.toThrow()
   })
 
   test("a relative path is refused: it would resolve inside the PR checkout", async () => {
