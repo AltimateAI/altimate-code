@@ -888,7 +888,24 @@ export function finalOutputs(sql: string): FinalOutputs {
   // them), a `*` passes every source's columns through, so each source is
   // resolved on its own: `select * from customers join spouses` exposes
   // `customers.ssn` and `spouses.ssn`, which a head `c.ssn` or `s.ssn` matches.
+  // Memoised like `resolveRef`: a CTE whose `*` joins the previous one twice
+  // would otherwise double the walk at every level.
+  const starMemo = new Map<string, Set<string>>()
   const starRefs = (scope: string, branch: number, qualifier: string | undefined, col: string, seen: Set<string>) => {
+    const memoKey = `${scope}#${branch}\u0000${qualifier ?? ""}\u0000${col}`
+    const hit = starMemo.get(memoKey)
+    if (hit) return hit
+    const out = starRefsUncached(scope, branch, qualifier, col, seen)
+    starMemo.set(memoKey, out)
+    return out
+  }
+  const starRefsUncached = (
+    scope: string,
+    branch: number,
+    qualifier: string | undefined,
+    col: string,
+    seen: Set<string>,
+  ): Set<string> => {
     const srcs = sources.get(`${scope}#${branch}`) ?? []
     const named = (x: Source) => x.name === qualifier || x.short === qualifier
     const picked = qualifier

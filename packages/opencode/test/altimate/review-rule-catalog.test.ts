@@ -218,6 +218,14 @@ describe("rawColumnExposures", () => {
       ssn: ["customers|spouses.ssn"],
     })
   })
+  test("`starRaw` stays fast over a chain of `*` CTEs that each join the previous one twice", () => {
+    const ctes = ["c0 as (select * from customers)"]
+    for (let i = 1; i <= 30; i++) ctes.push(`c${i} as (select * from c${i - 1} a join c${i - 1} b using (customer_id))`)
+    const sql = `with ${ctes.join(",\n")}\nselect * from c30`
+    const t0 = performance.now()
+    expect([...finalOutputs(sql).starRaw("ssn")]).toEqual(["customers.ssn"])
+    expect(performance.now() - t0).toBeLessThan(1000)
+  })
   test("`refCovered` matches an unqualified column over a join to its single-table ref", () => {
     expect(refCovered("customers|orders.email", new Set(["customers.email"]))).toBe(true)
     // The reverse is not covered: the base never said which table it read.
