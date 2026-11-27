@@ -334,6 +334,23 @@ describe("summary grouping and budget", () => {
     expect(renderSummary(env, { maxChars: Infinity })).toContain("m199: distinct issue number 199")
   })
 
+  test("a critical whose title lists hundreds of columns is still shown, its title clipped", () => {
+    const cols = Array.from({ length: 300 }, (_, i) => `column_number_${i}`)
+    const f = finding({
+      severity: "critical",
+      category: "pii_exposure",
+      title: `wide: exposes PII columns (${cols.join(", ")})`,
+      body: "Confirm masking. ".repeat(60),
+    })
+    const env = buildEnvelope({ findings: [f], tier: "full", mode: "gate" })
+    const md = renderSummary(env)
+    expect(md.length).toBeLessThanOrEqual(SUMMARY_BUDGET_CHARS)
+    expect(md).toContain("wide: exposes PII columns (column_number_0, ")
+    expect(md).not.toMatch(/more finding\(s\) not shown/)
+    // Local output keeps the whole title.
+    expect(renderSummary(env, { maxChars: Infinity })).toContain("column_number_299)")
+  })
+
   test("a critical that does not fit stops the listing: no later, shorter finding jumps ahead of it", () => {
     // Twelve criticals with long bodies (each clipped, still ~700 chars) cannot
     // all fit; the short suggestions after them must not be listed instead.

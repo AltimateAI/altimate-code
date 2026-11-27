@@ -223,6 +223,18 @@ function distinguishingValues(f: Finding): string[] {
 // A budgeted bullet's body is clipped to this, so one long finding cannot fill
 // the comment and hide the titles of the most severe findings.
 const BULLET_BODY_MAX = 600
+// As for the title (a wide model's PII title lists every column), so a single
+// bullet always fits the room the capped notes leave.
+const BULLET_TITLE_MAX = 200
+
+/** `clip`, never ending inside a code span: an unpaired backtick is cut back. */
+function clipTitle(text: string, max: number): string {
+  const clipped = clip(text, max)
+  if (clipped === text) return clipped
+  const body = clipped.slice(0, -1)
+  const ticks = (body.match(/`/g) ?? []).length
+  return ticks % 2 ? `${body.slice(0, body.lastIndexOf("`")).trimEnd()}…` : clipped
+}
 
 /** Render findings of one severity as bullets. With `group`, findings that say
  *  the same thing (same category, title and body once names are blanked) on
@@ -230,6 +242,7 @@ const BULLET_BODY_MAX = 600
 function bulletsFor(items: Finding[], group: boolean): Array<{ text: string; count: number }> {
   // Budgeted (grouped) output clips bodies; local output keeps them whole.
   const bodyOf = (text: string) => (group ? clip(text, BULLET_BODY_MAX) : text)
+  const titleOf = (text: string) => (group ? clipTitle(text, BULLET_TITLE_MAX) : text)
   const groups = new Map<string, Finding[]>()
   for (const f of items) {
     // The body is part of the key: one rule with different messages (e.g. a
@@ -269,7 +282,7 @@ function bulletsFor(items: Finding[], group: boolean): Array<{ text: string; cou
       const unverified = g.some((f) => f.degraded) ? " · _unverified_" : ""
       out.push({
         text:
-          `- **${groupKeyTitle(g[0])}** — ${g.length} findings across ${names.length} model(s): ${shown}${more}  \n` +
+          `- **${titleOf(groupKeyTitle(g[0]))}** — ${g.length} findings across ${names.length} model(s): ${shown}${more}  \n` +
           `  ${body}  \n${detail}  <sub>${g[0].category}${unverified}</sub>`,
         count: g.length,
       })
@@ -278,7 +291,7 @@ function bulletsFor(items: Finding[], group: boolean): Array<{ text: string; cou
     for (const f of g) {
       const loc = f.file + (f.startLine ? `:${f.startLine}` : "")
       out.push({
-        text: `- **${f.title}**  \n  ${bodyOf(oneLine(f.body))}  \n  <sub>\`${loc}\`${f.degraded ? " · _unverified_" : ""} · ${f.category}</sub>`,
+        text: `- **${titleOf(f.title)}**  \n  ${bodyOf(oneLine(f.body))}  \n  <sub>\`${loc}\`${f.degraded ? " · _unverified_" : ""} · ${f.category}</sub>`,
         count: 1,
       })
     }
