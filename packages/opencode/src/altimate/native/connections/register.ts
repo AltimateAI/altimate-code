@@ -318,6 +318,25 @@ export async function dbtAdapterHasLineage(): Promise<boolean> {
 }
 
 /**
+ * The running dbt adapter's note when its last parse had errors and the manifest dbt wrote is missing
+ * what failed to parse (dbt Fusion), or undefined. Asking starts nothing: with no adapter running there
+ * is no parse to ask about.
+ */
+export async function dbtPartialManifestNote(): Promise<
+  { message: string; errors: { file_path: string; message: string }[] } | undefined
+> {
+  const adapter = dbtAdapter
+  if (!adapter) return undefined
+  try {
+    const { partialManifestNote } = await import("../../../../../dbt-tools/src/partial-manifest")
+    return partialManifestNote(adapter, dbtProjectRoot ?? undefined)
+  } catch {
+    // dbt-tools not available
+    return undefined
+  }
+}
+
+/**
  * Stops the cached dbt adapter (its Python bridge and file watchers), for a server that is shutting
  * down. An attempt still starting is stopped once it settles.
  */

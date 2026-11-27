@@ -1,6 +1,7 @@
 import type { Config } from "./config"
 import { bufferLog } from "./log-buffer"
 import { recordManifest } from "./stale-manifest"
+import { recordPartialManifest } from "./partial-manifest"
 export { getRecentDbtLogs, clearDbtLogs } from "./log-buffer"
 import {
   DBTProjectIntegrationAdapter,
@@ -38,6 +39,7 @@ import type {
   DBTProjectIntegration,
   DBTDiagnosticData,
   DeferConfig,
+  ParsedManifest,
   RuntimePythonEnvironment,
 } from "@altimateai/dbt-integration"
 
@@ -231,7 +233,10 @@ export async function create(cfg: Config, options: CreateOptions = {}): Promise<
   )
 
   // Before `initialize`, whose parse is the one the commands answer from.
-  adapter.on(DBTProjectIntegrationAdapterEvents.MANIFEST_PARSED, recordManifest)
+  adapter.on(DBTProjectIntegrationAdapterEvents.MANIFEST_PARSED, (parsed: ParsedManifest) => {
+    recordManifest(parsed)
+    recordPartialManifest(adapter, parsed)
+  })
   try {
     await adapter.initialize()
   } catch (e) {

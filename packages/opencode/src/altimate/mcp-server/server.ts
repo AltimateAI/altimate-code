@@ -50,7 +50,7 @@ export async function serverInstructions(): Promise<string> {
 // text (for dbt_lineage only its header: the mappings and edges travel as data), only the lineage
 // fields are passed, and the whole is capped.
 const STRUCTURED_FIELDS: Record<string, readonly string[]> = {
-  dbt_lineage: ["model_name", "model_unique_id", "confidence", "confidence_factors", "upstream", "columns", "edges", "error"],
+  dbt_lineage: ["model_name", "model_unique_id", "confidence", "partial_manifest", "confidence_factors", "upstream", "columns", "edges", "error"],
   dbt_sql_graph: ["model", "nodes", "edges", "error"],
   impact_analysis: [
     "model",
