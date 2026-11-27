@@ -703,16 +703,22 @@ function sameTable(h: string, b: string, env?: RelationPrefixes): boolean {
  * covered by a single-table ref to one of its members. The reverse is not: a
  * base combined ref does not say which table the column came from, so a head
  * read pinned to one of them (`s.ssn`) may be new. Two combined refs match only
- * when equal. Tables compare as in `sameTable` (database/schema only within
- * one environment).
+ * when they read the same tables, member by member. Tables compare as in
+ * `sameTable` (database/schema only within one environment).
  */
 export function refCovered(ref: string, exposed: Set<string>, env?: RelationPrefixes): boolean {
   if (exposed.has(ref)) return true
   const r = splitRef(ref)
   for (const e of exposed) {
     const x = splitRef(e)
-    if (x.column !== r.column || x.tables.length !== 1) continue
-    if (r.tables.some((t) => sameTable(t, x.tables[0], env))) return true
+    if (x.column !== r.column) continue
+    if (x.tables.length === 1) {
+      if (r.tables.some((t) => sameTable(t, x.tables[0], env))) return true
+      continue
+    }
+    // Two combined refs: the same tables, member by member.
+    if (r.tables.length === x.tables.length && r.tables.every((t) => x.tables.some((b) => sameTable(t, b, env))))
+      return true
   }
   return false
 }

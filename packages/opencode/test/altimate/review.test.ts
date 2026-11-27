@@ -2596,6 +2596,12 @@ describe("orchestrate", () => {
       expect({ reviewers, pii: env.findings.filter((f) => f.category === "pii_exposure") }).toEqual({ reviewers, pii: [] })
       expect(env.verdict).not.toBe("REQUEST_CHANGES")
     }
+    // An unqualified column over a join compiled into other schemas is the same exposure.
+    const joined = (schema: string) =>
+      `select customer_id,\n  ssn\nfrom analytics.${schema}.customers c\njoin raw.crm.orders o on true`
+    const joinRuns = await piiRuns(joined("dbt_ci").replace("customer_id,", "customer_id, region,"), joined("dbt_prod"), "-select customer_id,\n+select customer_id, region,\n", ["ssn"])
+    for (const { reviewers, env } of joinRuns)
+      expect({ reviewers, pii: env.findings.filter((f) => f.category === "pii_exposure") }).toEqual({ reviewers, pii: [] })
     // An unqualified base table and a qualified head table are the same table too.
     const quiet = await piiRuns(
       "select customer_id,\n  ssn\nfrom analytics.customers",
