@@ -44,10 +44,18 @@ const ENV_FALSE = new Set(["0", "false", "off", "no"])
 /** The env override for a switch: true for `1`/`true`/`on`/`yes`, false for `0`/`false`/`off`/`no`
  *  (case-insensitive), undefined otherwise. */
 export function envSwitch(name: AiSwitchName, env: Env = process.env): boolean | undefined {
-  const v = env[AI_SWITCH_ENV[name]]?.trim().toLowerCase()
+  return envBool(env[AI_SWITCH_ENV[name]])
+}
+
+/** An env value as a boolean: `1`/`true`/`on`/`yes` true, `0`/`false`/`off`/`no` false (trimmed,
+ *  any case), undefined for anything else or unset. */
+export function envBool(raw: string | undefined): boolean | undefined {
+  const v = raw?.trim().toLowerCase()
   if (v === undefined) return undefined
   return ENV_TRUE.has(v) ? true : ENV_FALSE.has(v) ? false : undefined
 }
+
+const WARNED = new Set<string>()
 
 /** Every switch for one review: env, then the `ai:` config object, then the default. */
 export function resolveAiSwitches(cfg: Pick<ReviewConfig, "ai">, env: Env = process.env): AiSwitches {
@@ -56,7 +64,9 @@ export function resolveAiSwitches(cfg: Pick<ReviewConfig, "ai">, env: Env = proc
   for (const name of Object.keys(AI_SWITCH_ENV) as AiSwitchName[]) {
     const fromEnv = envSwitch(name, env)
     const raw = env[AI_SWITCH_ENV[name]]
-    if (fromEnv === undefined && raw?.trim())
+    // Once per value per process: `--all-projects` resolves the switches for every project.
+    const warning = `${AI_SWITCH_ENV[name]}=${raw}`
+    if (fromEnv === undefined && raw?.trim() && !WARNED.has(warning) && !!WARNED.add(warning))
       process.stderr.write(`⚠️  ignoring ${AI_SWITCH_ENV[name]}=${raw}: use 1/0 (or true/false, on/off, yes/no)\n`)
     out[name] = fromEnv ?? configured[name] ?? AI_SWITCH_DEFAULTS[name]
   }

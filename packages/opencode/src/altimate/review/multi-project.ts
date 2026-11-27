@@ -5,6 +5,7 @@ import { collectChangedFiles, gitRepoRoot, listFilesAt, listWorkingTreeFiles, re
 import { reviewPullRequest, type ReviewPullRequestOptions } from "./run"
 import { applyMode, signEnvelope, summarize, VerdictEnvelope, type RiskTier, type Verdict } from "./verdict"
 import type { ChangedFile } from "./diff-filter"
+import { aiDryRunEnabled } from "./ai-review"
 
 /**
  * Multi-project review (`altimate review --all-projects`): a PR in a mono-repo
@@ -166,10 +167,21 @@ export async function reviewAllProjects(opts: ReviewPullRequestOptions): Promise
       prRenames,
       aiOutsidePaths: [...pendingOutside],
     })
-    for (const p of [...(env.ai?.input ?? []).map((r) => r.path), ...(env.scope?.aiReviewedOutside ?? [])]) pendingOutside.delete(p)
+    for (const p of outsideTaken(env, aiDryRunEnabled())) pendingOutside.delete(p)
     runs.push({ root, paths: own.map((f) => f.path), env })
   }
   return mergeProjectEnvelopes(runs, roots)
+}
+
+/**
+ * The outside-project files a project's AI lane took: those it reviewed (`scope.aiReviewedOutside`)
+ * and, when the lane answered or in a dry run (which plans without a call), those in its input.
+ * A lane that errored, timed out or had no model recorded its input without reviewing it, so
+ * those files stay pending for the next project.
+ */
+export function outsideTaken(env: Pick<VerdictEnvelope, "ai" | "scope">, dryRun: boolean): string[] {
+  const input = env.ai?.state === "ok" || dryRun ? (env.ai?.input ?? []).map((r) => r.path) : []
+  return [...input, ...(env.scope?.aiReviewedOutside ?? [])]
 }
 
 /** `env` re-signed with `scope.coveredProjects`, so the poster may reconcile earlier reviews of those projects. */

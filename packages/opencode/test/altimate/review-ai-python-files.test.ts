@@ -535,3 +535,14 @@ describe("outside-project Python findings are classified pre-existing like in-pr
     expect(f!.preExisting).toBe(true)
   })
 })
+
+describe("--all-projects: a lane that did not answer does not take the outside files", () => {
+  test("error, timeout or no model: its input stays pending; ok, dry run or reviewed: taken", async () => {
+    const { outsideTaken } = await import("../../src/altimate/review/multi-project")
+    const rec = { path: "airflow/load.py", kind: AI_PYTHON_KIND, chars: 1, truncated: false, hunksSent: 1, hunksTotal: 1, card: false }
+    for (const state of ["error", "timeout", "skipped"] as const) expect(outsideTaken({ ai: { state, input: [rec] } } as any, false)).toEqual([])
+    expect(outsideTaken({ ai: { state: "ok", input: [rec] } } as any, false)).toEqual(["airflow/load.py"])
+    expect(outsideTaken({ ai: { state: "skipped", input: [rec] } } as any, true)).toEqual(["airflow/load.py"])
+    expect(outsideTaken({ ai: { state: "error" }, scope: { aiReviewedOutside: ["airflow/x.py"] } } as any, false)).toEqual(["airflow/x.py"])
+  })
+})

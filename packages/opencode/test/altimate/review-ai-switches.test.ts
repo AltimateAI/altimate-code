@@ -81,3 +81,18 @@ describe("`ai:` in .altimate/review.yml", () => {
     expect(() => parseReviewConfig("ai:\n  enable: false")).toThrow(/unrecognized_keys[\s\S]*"enable"/)
   })
 })
+
+describe("ignored env values (round 2)", () => {
+  test("the warning for one value is written once per process, not once per project", () => {
+    const write0 = process.stderr.write
+    let err = ""
+    ;(process.stderr as any).write = (s: string) => ((err += s), true)
+    try {
+      resolveAiSwitches({ ai: true }, { ALTIMATE_REVIEW_AI_FOCUSED: "sometimes" })
+      resolveAiSwitches({ ai: true }, { ALTIMATE_REVIEW_AI_FOCUSED: "sometimes" })
+    } finally {
+      ;(process.stderr as any).write = write0
+    }
+    expect(err.split("ALTIMATE_REVIEW_AI_FOCUSED=sometimes").length - 1).toBe(1)
+  })
+})
