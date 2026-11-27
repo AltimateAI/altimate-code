@@ -494,18 +494,26 @@ const threeWarnRunner: ReviewRunner = {
 } as ReviewRunner
 
 describe("round 2b: forced verdicts and the verdict", () => {
-  test("a verdict from a batch that stopped on budget or timeout counts as no verdict", async () => {
+  test("a budget-forced verdict is acted on for posting; a timed-out batch's verdict counts as no verdict", async () => {
     const base = await run({ switches: { verifyRules: false, rulePolicy: false }, policy: false })
-    for (const batchState of ["budget", "timeout"] as const) {
-      for (const v of ["unverifiable", "refuted"] as const) {
-        const env = await run({ verdictAt: () => v, batchState })
-        expect(env.findings).toEqual(base.findings)
-        expect(env.rulesRefuted).toBe(0)
-      }
+    // Budget: the rule run's usual mode; the refuted findings are not posted.
+    const budget = await run({ verdictAt: () => "refuted", batchState: "budget" })
+    expect(budget.rulesRefuted).toBeGreaterThan(0)
+    expect(budget.findings.length).toBeLessThan(base.findings.length)
+    // Timeout: no verdict, everything posted.
+    for (const v of ["unverifiable", "refuted"] as const) {
+      const env = await run({ verdictAt: () => v, batchState: "timeout" })
+      expect(env.findings).toEqual(base.findings)
+      expect(env.rulesRefuted).toBe(0)
     }
-    // The same verdicts from a batch that answered are acted on.
-    const answered = await run({ verdictAt: () => "refuted", batchState: "ok" })
-    expect(answered.rulesRefuted).toBeGreaterThan(0)
+  })
+
+  test("a budget-forced refuted warning is not posted but still counts in the verdict", async () => {
+    const confirmed = await run({ mode: "gate", runner: threeWarnRunner, verdictAt: () => "confirmed", batchState: "budget" })
+    const refuted = await run({ mode: "gate", runner: threeWarnRunner, verdictAt: () => "refuted", batchState: "budget" })
+    expect(refuted.findings.filter((f) => f.severity === "warning" && f.origin !== "ai").length).toBe(0)
+    expect(refuted.verdict).toBe(confirmed.verdict)
+    expect(refuted.verdict).toBe("REQUEST_CHANGES")
   })
 
   test("refuted or policy-dropped engine warnings are not posted but still block in gate mode", async () => {

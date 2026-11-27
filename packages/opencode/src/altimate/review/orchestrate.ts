@@ -2851,13 +2851,13 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
       else aiStatus = res.status
       if (aiStatus.verifyRules === "drop_refuted") {
         ruleVerifyAttempted = true
-        // A verdict from a batch that stopped on its budget or timeout was forced without the
-        // verifier's tools: it counts as no verdict, for the refuted filter and the policy alike.
+        // A batch forced to answer on its budget is the rule run's usual mode (the default budget
+        // split over batches of 8 rarely leaves a tool round), and the rule-post policy was tuned on
+        // those answers: they count. A verdict from a batch that timed out counts as no verdict.
+        // Either way these steps filter posting only, so no verdict can unblock a gate.
         const batches = aiStatus.verifier?.batches ?? []
-        for (const v of aiStatus.verifier?.ruleVerdicts ?? []) {
-          const forced = ["budget", "timeout"].includes(batches[v.batch]?.state ?? "")
-          ruleVerdicts.set(v.id, forced ? null : v.verdict)
-        }
+        for (const v of aiStatus.verifier?.ruleVerdicts ?? [])
+          ruleVerdicts.set(v.id, batches[v.batch]?.state === "timeout" ? null : v.verdict)
         ruleVerifierRan = rulePolicyApplies(aiStatus.ruleVerifier)
       }
       // A sent file counts as reviewed only when the lane answered for its call.
