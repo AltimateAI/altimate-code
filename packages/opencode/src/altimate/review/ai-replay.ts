@@ -44,6 +44,7 @@ const ReplayEnvelope = z.object({
       tokens: Tokens.optional(),
       cost: z.number().optional(),
       calls: z.number().optional(),
+      failedFiles: z.array(z.string()).optional(),
       verifier: z
         .object({
           discarded: z.number().optional(),
@@ -71,7 +72,7 @@ const ReplayEnvelope = z.object({
 
 export interface ReplayedLane {
   findings: Finding[]
-  /** The stored generator status: state, reason, model, tokens, cost, calls. */
+  /** The stored generator status: state, reason, model, tokens, cost, calls, failed files. */
   status: Omit<AiLaneStatus, "durationMs" | "verifier">
   /** Problems found while rebuilding (findings that could not be recovered). */
   warnings: string[]
@@ -95,6 +96,7 @@ export function replayFindings(raw: unknown): ReplayedLane {
     ...(ai.tokens ? { tokens: ai.tokens } : {}),
     ...(ai.cost !== undefined ? { cost: ai.cost } : {}),
     ...(ai.calls !== undefined ? { calls: ai.calls } : {}),
+    ...(ai.failedFiles?.length ? { failedFiles: ai.failedFiles } : {}),
     replayed: true,
   }
   const warnings: string[] = []

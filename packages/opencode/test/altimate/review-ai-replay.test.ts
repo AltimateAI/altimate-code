@@ -133,6 +133,11 @@ describe("replayFindings (envelope → the generator's findings)", () => {
     expect(lane.status).toEqual({ state: "ok", calls: 1, replayed: true })
   })
 
+  test("a partly failed lane keeps its failed files, so the ledger still lists them", () => {
+    const lane = replayFindings({ findings: [], ai: { state: "ok", calls: 2, reason: "1 of 2 calls failed: boom", failedFiles: ["models/b.sql"] } })
+    expect(lane.status.failedFiles).toEqual(["models/b.sql"])
+  })
+
   test("an envelope without an AI lane cannot be replayed", () => {
     expect(() => replayFindings({ findings: [] })).toThrow("no AI lane status")
   })
