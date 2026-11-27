@@ -373,6 +373,27 @@ describe("summary grouping and budget", () => {
     expect(md.length).toBeLessThanOrEqual(SUMMARY_BUDGET_CHARS)
   })
 
+  test("a grouped body shortened for its per-model detail never ends inside a code span", () => {
+    // The body's code span starts before the half-budget cut and runs past it.
+    const fs = Array.from({ length: 3 }, (_, i) =>
+      finding({
+        severity: "warning",
+        category: "sql_quality",
+        model: `model_${i}`,
+        file: `models/model_${i}.sql`,
+        // Members differ by the title's value, so a per-model detail is shown;
+        // every body is the same, so it is shown verbatim.
+        title: `model_${i}: unsupported \`fn_${i}\``,
+        body: `${"word ".repeat(55)}\`${Array.from({ length: 30 }, (_, k) => `part${k}`).join(" ")}\` is unsupported.`,
+      }),
+    )
+    const md = renderSummary(buildEnvelope({ findings: fs, tier: "lite", mode: "comment" }))
+    const start = md.indexOf("- **")
+    const body = md.slice(start).split("\n")[1]
+    expect(body).toContain("…")
+    expect((body.match(/`/g) ?? []).length % 2).toBe(0)
+  })
+
   test("a critical that does not fit stops the listing: no later, shorter finding jumps ahead of it", () => {
     // Twelve criticals with long bodies (each clipped, still ~700 chars) cannot
     // all fit; the short suggestions after them must not be listed instead.

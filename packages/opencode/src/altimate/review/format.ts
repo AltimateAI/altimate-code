@@ -230,7 +230,8 @@ const BULLET_TITLE_MAX = 200
 // BULLET_BODY_MAX, so a grouped bullet is no larger than a single one.
 const BULLET_NAMES_MAX = 200
 
-/** `clip`, never ending inside a code span: an unpaired backtick is cut back. */
+/** `clip`, never ending inside a code span: an unpaired backtick is cut back.
+ *  Used for titles and for a grouped bullet's shortened body. */
 function clipTitle(text: string, max: number): string {
   const clipped = clip(text, max)
   if (clipped === text) return clipped
@@ -278,7 +279,7 @@ function bulletsFor(items: Finding[], group: boolean): Array<{ text: string; cou
       // a per-model detail the body takes half the budget and the detail the rest.
       const same = g.every((f) => f.body === g[0].body)
       const bodyText = same ? oneLine(g[0].body) : blankNames(oneLine(g[0].body))
-      const body = hasDetail ? clip(bodyText, BULLET_BODY_MAX / 2) : bodyOf(bodyText)
+      const body = hasDetail ? clipTitle(bodyText, BULLET_BODY_MAX / 2) : bodyOf(bodyText)
       // Whole entries that fit, so a cut never lands inside a code span or drops
       // the count of the rest.
       const entries = values
