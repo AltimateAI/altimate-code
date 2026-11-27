@@ -89,6 +89,11 @@ function describeError(e: any): string {
 /** Headline of a review this bot posted (see verdictHeadline). */
 const BOT_REVIEW_RE = /(Approved|Reviewed with comments|Changes requested)\b.*\((trivial|lite|full) tier/
 
+const statusOf = (e: any): number | undefined => e?.status ?? e?.response?.status
+
+/** Wait before retrying a transient `/user` failure, so a 429 or a brief 5xx can clear. */
+const SELF_RETRY_DELAY_MS = 1000
+
 /** The token's own login, or `undefined` for a token that cannot read `/user`
  *  (an app or Actions token). A transient failure is retried once, then thrown. */
 async function authenticatedLogin(octo: Octokit): Promise<string | undefined> {
@@ -96,9 +101,10 @@ async function authenticatedLogin(octo: Octokit): Promise<string | undefined> {
     try {
       return (await octo.rest.users.getAuthenticated()).data.login
     } catch (e: any) {
-      const status = e?.status ?? e?.response?.status
+      const status = statusOf(e)
       if (status === 401 || status === 403 || status === 404) return undefined
       if (attempt > 0) throw e
+      await new Promise((resolve) => setTimeout(resolve, SELF_RETRY_DELAY_MS))
     }
   }
 }
@@ -126,15 +132,26 @@ export async function postGitHubReview(
   // comment's original author. The account is the authenticated user (a PAT);
   // an app/Actions token cannot read `/user` (401/403/404), and then only a Bot
   // account's comment counts (a person's account is never type `Bot`). Any
-  // other failure is retried once, then fails the post: guessing would create
-  // a duplicate summary and re-post every inline finding.
-  const selfLogin = await authenticatedLogin(octo)
-  const prior = existing.find(
-    (c) => c.body?.includes(REVIEW_MARKER) && (selfLogin ? c.user?.login === selfLogin : c.user?.type === "Bot"),
-  )
-  const upserted = prior
-    ? await octo.rest.issues.updateComment({ owner, repo, comment_id: prior.id, body: summary })
-    : await octo.rest.issues.createComment({ owner, repo, issue_number: prNumber, body: summary })
+  // other `/user` failure is retried once, then fails the post: guessing would
+  // create a duplicate summary. With no marker comment at all there is nothing
+  // to decide, so `/user` is not read and a transient failure there cannot
+  // lose the review.
+  const markers = existing.filter((c) => c.body?.includes(REVIEW_MARKER))
+  const selfLogin = markers.length ? await authenticatedLogin(octo) : undefined
+  const candidates = markers.filter((c) => (selfLogin ? c.user?.login === selfLogin : c.user?.type === "Bot"))
+  let upserted: { data: { id: number; user?: { login?: string } | null } } | undefined
+  for (const c of candidates) {
+    try {
+      upserted = await octo.rest.issues.updateComment({ owner, repo, comment_id: c.id, body: summary })
+      break
+    } catch (e: any) {
+      // Another Bot account's comment (403) or one deleted meanwhile (404) is
+      // not ours: try the next candidate, else create a new summary.
+      const status = statusOf(e)
+      if (status !== 403 && status !== 404) throw e
+    }
+  }
+  upserted ??= await octo.rest.issues.createComment({ owner, repo, issue_number: prNumber, body: summary })
   result.summaryCommentId = upserted.data.id
   // The account this token posts as: the summary comment's author.
   const botLogin = selfLogin ?? upserted.data.user?.login
