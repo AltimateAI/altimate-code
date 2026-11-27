@@ -279,7 +279,7 @@ describe("scoping and budget", () => {
 
 describe("loadConventions over git: the base commit, never the PR's edits", () => {
   const git = (cwd: string, ...args: string[]) =>
-    execFileSync("git", args, { cwd, env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } }).toString()
+    execFileSync("git", ["-c", "commit.gpgsign=false", ...args], { cwd, env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } }).toString()
 
   test("showAtRef + listFilesAt at the merge base read the base versions and the base Cursor rules", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "review-conventions-"))
@@ -467,7 +467,7 @@ describe("reviewPullRequest end to end (AI dry run, no model call)", () => {
     }
   })
   const git = (cwd: string, ...args: string[]) =>
-    execFileSync("git", args, { cwd, env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } }).toString()
+    execFileSync("git", ["-c", "commit.gpgsign=false", ...args], { cwd, env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } }).toString()
 
   test("on by default: the base CLAUDE.md goes into ai.conventions and the call record; `0` records nothing", async () => {
     const { reviewPullRequest } = await import("../../src/altimate/review/run")
@@ -974,6 +974,34 @@ describe("loadConventions hardening (round 2)", () => {
     expect(out).not.toContain("pip install")
     expect(out).toContain("Name models stg_*.")
     expect(out).toContain("Every model has tests.")
+  })
+
+  test("frontmatter that is not YAML: a blank or comment line inside the globs list does not end it", () => {
+    for (const sep of ["  # sql models only", ""]) {
+      const r = parseMdc(`---\ndescription: x\nglobs:\n${sep}\n  - **/*.sql\n  - models/**\nalwaysApply: false\n---\nBody.\n`)
+      expect(r.globs).toEqual(["**/*.sql", "models/**"])
+      expect(r.alwaysApply).toBe(false)
+    }
+  })
+
+  test("a one-character model is taken off its `<model>:` title prefix when grouping", () => {
+    const conv: Convention[] = [{ path: "models/CLAUDE.md", source: "claude_md", scope: "models", text: "x" }]
+    const mk = (model: string) =>
+      makeFinding({
+        severity: "warning",
+        category: "sql_quality",
+        title: `${model}: missing description`,
+        body: "Per models/CLAUDE.md.",
+        file: `models/${model}.sql`,
+        model,
+        startLine: 1,
+        endLine: 1,
+        confidence: "high",
+        evidence: { tool: "ai-review", result: {} },
+        ruleKey: "ai:sql_quality:missing description",
+        rule: "ai-review:sql-quality",
+      })
+    expect(groupConventionFindings([mk("a"), mk("b")], conv).filter((f) => f.groupedInto)).toHaveLength(1)
   })
 
   test("frontmatter that is not YAML keeps every quoted glob", () => {

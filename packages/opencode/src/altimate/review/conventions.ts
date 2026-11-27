@@ -165,6 +165,8 @@ function parseFrontmatterLines(text: string): { globs: string[]; alwaysApply: bo
       globs.push(...globList(frontmatterValue(item[1])))
       continue
     }
+    // A blank or comment line inside the list does not end it.
+    if (inGlobList && /^\s*(?:#.*)?$/.test(line)) continue
     inGlobList = false
     const kv = /^(\w+)\s*:\s*(.*)$/.exec(line)
     if (!kv) continue
@@ -562,6 +564,8 @@ function issueKey(f: Pick<Finding, "title" | "file" | "model">): string {
   const base = f.file.split("/").pop() ?? f.file
   const names = [f.model, base, base.replace(/\.[^.]+$/, "")].filter((n): n is string => !!n && n.length > 1)
   let t = f.title.toLowerCase()
+  // The `names` loop skips one-character names (it would erase that letter everywhere); a
+  // one-character model is still taken off a `<model>:` prefix.
   if (f.model && t.startsWith(f.model.toLowerCase() + ":")) t = t.slice(f.model.length + 1)
   for (const n of names) t = t.split(n.toLowerCase()).join(" ")
   // "… for <model>" leaves a dangling preposition once the name is gone.
