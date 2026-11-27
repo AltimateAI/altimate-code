@@ -627,7 +627,9 @@ describe("postGitHubReview", () => {
       listFails?: boolean
       files?: Array<{ filename: string; patch?: string }>
       reviewComments?: Array<{ body: string; user?: { login: string } }>
-      issueComments?: Array<{ id: number; body: string }>
+      issueComments?: Array<{ id: number; body: string; user?: { login: string; type?: string } }>
+      /** The token's account as `/user` reports it; unset, the call fails like an app token's. */
+      self?: string
       createReview?: (call: number) => unknown
     } = {},
   ) {
@@ -659,9 +661,17 @@ describe("postGitHubReview", () => {
             summaryCalls.push("create")
             return { data: { id: 1, user: { login: BOT } } }
           },
+          // GitHub returns the comment's original author, not the token's account.
           updateComment: async (p: { comment_id: number }) => {
             summaryCalls.push(`update ${p.comment_id}`)
-            return { data: { id: p.comment_id, user: { login: BOT } } }
+            const author = opts.issueComments?.find((c) => c.id === p.comment_id)?.user ?? { login: BOT }
+            return { data: { id: p.comment_id, user: author } }
+          },
+        },
+        users: {
+          getAuthenticated: async () => {
+            if (!opts.self) throw new Error("Resource not accessible by integration")
+            return { data: { login: opts.self } }
           },
         },
         pulls: {
@@ -692,7 +702,7 @@ describe("postGitHubReview", () => {
     const filler = (n: number) => Array.from({ length: n }, (_, i) => ({ body: `other ${i}`, user: { login: "someone" } }))
     const { octo, reviewCalls, summaryCalls } = fakeOcto({
       // Each item that matters is on page two or later.
-      issueComments: [...filler(3).map((c, i) => ({ id: 100 + i, body: c.body })), { id: 42, body: `${REVIEW_MARKER}\nold` }],
+      issueComments: [...filler(3).map((c, i) => ({ id: 100 + i, body: c.body })), { id: 42, body: `${REVIEW_MARKER}\nold`, user: { login: BOT, type: "Bot" } }],
       reviewComments: [...filler(3), { body: first.body, user: { login: BOT } }],
       files: [
         { filename: "models/x.sql", patch: PATCH },
@@ -829,6 +839,31 @@ describe("postGitHubReview", () => {
     const own = fakeOcto({ reviewComments: [{ body: first.body, user: { login: BOT } }] })
     const again = await postGitHubReview(env, target, own.octo)
     expect(again.inlineSkippedAsPosted).toBe(1)
+  })
+
+  test("a summary marker someone else posted is not this bot's summary", async () => {
+    const env = buildEnvelope({ findings: [finding({ startLine: 3, title: "m: a" })], tier: "lite", mode: "comment" })
+    const [first] = inlineComments(env, new Set(), undefined)
+    // A maintainer posts the marker first, then a comment carrying the finding's marker.
+    const planted = {
+      issueComments: [{ id: 7, body: `${REVIEW_MARKER}\nplanted`, user: { login: "maintainer", type: "User" } }],
+      reviewComments: [{ body: first.body, user: { login: "maintainer" } }],
+    }
+    const app = fakeOcto(planted)
+    const r = await postGitHubReview(env, target, app.octo)
+    expect(app.summaryCalls).toEqual(["create"])
+    expect(r.inlineSkippedAsPosted).toBe(0)
+    expect(app.reviewCalls[0].comments.map((c: { line: number }) => c.line)).toEqual([3])
+    // A PAT run: only the authenticated account's summary is updated.
+    const pat = fakeOcto({ ...planted, self: "local-dev" })
+    await postGitHubReview(env, target, pat.octo)
+    expect(pat.summaryCalls).toEqual(["create"])
+    const own = fakeOcto({
+      issueComments: [{ id: 8, body: `${REVIEW_MARKER}\nmine`, user: { login: "local-dev", type: "User" } }],
+      self: "local-dev",
+    })
+    await postGitHubReview(env, target, own.octo)
+    expect(own.summaryCalls).toEqual(["update 8"])
   })
 
   test("a deleted file gets no inline comment; a pure rename without a patch keeps its comments", async () => {

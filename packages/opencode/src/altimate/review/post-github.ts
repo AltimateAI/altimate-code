@@ -107,13 +107,26 @@ export async function postGitHubReview(
     issue_number: prNumber,
     per_page: 100,
   })
-  const prior = existing.find((c) => c.body?.includes(REVIEW_MARKER))
+  // Only a summary this token's own account posted is ours to update: anyone
+  // with edit rights can post the marker, and `updateComment` returns the
+  // comment's original author. The account is the authenticated user (a PAT);
+  // an app/Actions token cannot read `/user`, and then only a Bot account's
+  // comment counts (a person's account is never type `Bot`).
+  let selfLogin: string | undefined
+  try {
+    selfLogin = (await octo.rest.users.getAuthenticated()).data.login
+  } catch {
+    /* app or Actions token */
+  }
+  const prior = existing.find(
+    (c) => c.body?.includes(REVIEW_MARKER) && (selfLogin ? c.user?.login === selfLogin : c.user?.type === "Bot"),
+  )
   const upserted = prior
     ? await octo.rest.issues.updateComment({ owner, repo, comment_id: prior.id, body: summary })
     : await octo.rest.issues.createComment({ owner, repo, issue_number: prNumber, body: summary })
   result.summaryCommentId = upserted.data.id
   // The account this token posts as: the summary comment's author.
-  const botLogin = upserted.data.user?.login
+  const botLogin = selfLogin ?? upserted.data.user?.login
 
   // 2. Post a review. `env.verdict` arrives already mode-gated from
   //    buildEnvelope (comment mode softened REQUEST_CHANGES → COMMENT upstream);
