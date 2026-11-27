@@ -1107,6 +1107,20 @@ interface ModelContext {
   complex?: boolean
 }
 
+/**
+ * The raw (uncompiled) base cannot expose any of `names`: none appears in it as
+ * a word, no select item is a `*`, and its only Jinja expressions are `ref`,
+ * `source`, `config` or `this`. A macro (`dbt_utils.star(…)`), a variable or a
+ * `{{ col }}` loop could emit any column, so any other expression proves nothing.
+ */
+function rawBaseLacks(oldSql: string | undefined, names: string[]): boolean {
+  if (!oldSql || !names.length) return false
+  const plain = /^\{\{-?\s*(?:(?:ref|source|config)\s*\([^{}]*\)|this)\s*-?\}\}$/
+  if (!(oldSql.match(/\{\{[\s\S]*?\}\}/g) ?? []).every((e) => plain.test(e))) return false
+  if (selectItems(oldSql).some((i) => /(?:^|\.)\*(?:\s|$)/.test(i.text))) return false
+  return names.every((n) => !new RegExp(`(?<![\\w$])${n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w$])`, "i").test(oldSql))
+}
+
 export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelope> {
   const reviewable = filterChangedFiles(input.changedFiles, input.rubric.exclusions.excludeGlobs, input.layout)
   const dialect = input.config.dialect
@@ -1623,12 +1637,16 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // Without a compiled base (raw Jinja on the old side) the regex PII twins can't
   // tell a new column from one the base already exposed: report them like the
   // other PII lanes, as a warning of unknown confidence that never blocks.
+  // Unless the raw base proves the column new (`rawBaseLacks`): then the twin
+  // keeps its severity.
   for (const [i, f] of merged.entries()) {
-    const rule = (f.evidence?.result as any)?.rule
-    if (f.category !== "pii_exposure" || (rule !== "pii_into_mart" && rule !== "select-pii-columns")) continue
+    const result = (f.evidence?.result ?? {}) as { rule?: string; column?: string; alias?: string; items?: SelectItemColumn[] }
+    if (f.category !== "pii_exposure" || (result.rule !== "pii_into_mart" && result.rule !== "select-pii-columns")) continue
     const ctx = ctxByPath.get(f.file)
-    if (ctx && hasOldSide(ctx.file) && !ctx.engineOldSql)
-      merged[i] = { ...f, severity: f.severity === "critical" ? "warning" : f.severity, confidence: "unknown" }
+    if (!ctx || !hasOldSide(ctx.file) || ctx.engineOldSql) continue
+    const names = [result.column, result.alias, ...(result.items ?? []).flatMap((it) => [it.column, it.alias])]
+    if (rawBaseLacks(ctx.oldSql, names.filter((n): n is string => !!n))) continue
+    merged[i] = { ...f, severity: f.severity === "critical" ? "warning" : f.severity, confidence: "unknown" }
   }
 
   // AI reviewer lane — runs AFTER the deterministic lanes so it can be GROUNDED

@@ -3120,6 +3120,35 @@ describe("orchestrate", () => {
     }
   })
 
+  test("without a compiled base, a regex PII twin keeps its severity when the raw base cannot expose the column", async () => {
+    const files: ChangedFile[] = MARTS.map((path) => ({ path, status: "modified", diff: "+    ssn\n" }))
+    const head = "select customer_id,\n    ssn\nfrom {{ ref('customers') }}"
+    const run = (base: string) =>
+      runReview({
+        changedFiles: files,
+        config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"] },
+        rubric: DEFAULT_RUBRIC,
+        mode: "gate",
+        runner: piiRunner(["ssn"]),
+        getContent: content(head, base),
+      })
+    // The raw base names no `ssn`, reads no `*` and renders only `ref(…)`: the column is new.
+    const env = await run("select customer_id\nfrom {{ ref('customers') }}")
+    const twins = env.findings.filter(isTwin)
+    expect(twins.length).toBeGreaterThan(0)
+    expect(twins.some((f) => f.severity === "critical" && f.confidence !== "unknown")).toBe(true)
+    expect(env.verdict).toBe("REQUEST_CHANGES")
+    // A raw base that could expose it stays undecided: a `*`, or a macro that emits columns.
+    for (const base of [
+      "select *\nfrom {{ ref('customers') }}",
+      "select {{ dbt_utils.star(ref('customers')) }}\nfrom {{ ref('customers') }}",
+    ]) {
+      const undecided = await run(base)
+      expect(undecided.findings.filter(isTwin).every((f) => f.severity === "warning" && f.confidence === "unknown")).toBe(true)
+      expect(undecided.verdict).not.toBe("REQUEST_CHANGES")
+    }
+  })
+
   test("the broad PII fallback without a compiled base is an unknown-confidence warning", async () => {
     const env = await runReview({
       changedFiles: [{ path: "models/marts/dim_customers.sql", status: "modified", diff: "+    ssn\n" }],
