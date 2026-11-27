@@ -736,7 +736,8 @@ describe("dbt_cost_estimate cost", () => {
     expect(cost.basis).toBe("dry_run")
     expect(cost.runs).toBeUndefined()
     expect(cost.notes.join(" ")).toContain("A SQL input has no run history")
-    expect(cost.selectOnly).toEqual({ estimate: expect.any(Number) })
+    // 4.2 TiB from the dry run's display, at the default $6.25 per TiB.
+    expect(cost.selectOnly).toEqual({ estimate: (Math.round(4.2 * TIB) / TIB) * 6.25 })
   })
 
   test("a model name that matches two nodes is reported ambiguous and no history is read", async () => {
@@ -956,7 +957,7 @@ describe("dbt_cost_estimate cost", () => {
   })
 
   test("a configured rate the tool ignores is named, and the default is not passed off as the configured one", async () => {
-    costHistoryInternals.readCostConfig = async () => ({ bigqueryUsdPerTib: 0, bigquerySlotHourUsd: 1e308 })
+    costHistoryInternals.readCostConfig = async () => ({ bigqueryUsdPerTib: -1, bigquerySlotHourUsd: 1_000_001 })
     try {
       useAdapter(calls, { history: bigqueryHistory([job("a", "2026-05-02 10:00:00+00:00", "2026-05-02 10:01:00+00:00", TIB)]) })
       const result = await (await initTool(DbtCostEstimateTool)).execute({ model: "orders", history: true }, ctx)
@@ -1230,14 +1231,15 @@ describe("cost config", () => {
     }
   })
 
-  test("the schema rejects a rate that is zero, negative, not finite or above 1e6, and accepts a usable one", async () => {
+  test("loading the config tolerates a rate the tool will ignore: the schema has no refinement the PATCH route would skip", async () => {
     const { ConfigV1 } = await import("@opencode-ai/core/v1/config/config")
     const { Schema } = await import("effect")
     const ok = (cost: unknown) => Schema.decodeUnknownExit(ConfigV1.Info)({ cost })._tag === "Success"
     for (const key of ["bigqueryUsdPerTib", "bigquerySlotHourUsd"]) {
-      for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, 1e308, 1_000_001]) expect(ok({ [key]: bad })).toBe(false)
-      for (const good of [0.01, 6.25, 1e6]) expect(ok({ [key]: good })).toBe(true)
+      for (const value of [0, -1, 1e308, 1_000_001, 0.01, 6.25, 1e6]) expect(ok({ [key]: value })).toBe(true)
     }
     expect(ok({})).toBe(true)
+    // The text tells the user what happens to such a value.
+    expect(JSON.stringify(Schema.toJsonSchemaDocument(ConfigV1.Info))).toContain("other values are ignored and named in the output")
   })
 })

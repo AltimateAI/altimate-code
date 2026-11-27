@@ -329,14 +329,18 @@ describe("BigQuery pricing", () => {
     expect(gap(1)).toBe(2)
   })
 
-  test("a delete joins the job that starts within a minute after it ended, else is a run of its own", () => {
-    const attached = priceBigquery([bq("d", 0, TIB, null, 0, "DELETE"), { ...bq("m", 0, TIB), creation_time: new Date(MIN / 2).toISOString() }], undefined, "model.s.m", {})
+  test("a delete joins the build that starts within a minute after it ends, else is not part of its run", () => {
+    // The delete runs minutes 0 to 1; the build starts 30 s after it ends, so they are one run.
+    const build = (gapMs: number) => ({ ...bq("m", 0, TIB), creation_time: new Date(MIN + gapMs).toISOString(), end_time: new Date(2 * MIN + gapMs).toISOString() })
+    const attached = priceBigquery([bq("d", 0, TIB, null, 0, "DELETE"), build(30_000)], undefined, "model.s.m", {})
     expect(attached.cost.runs).toBe(1)
     expect(attached.cost.lastRun).toBe(12.5)
-    // Not within a minute of the build: the delete is not part of its run, and a delete alone is not a run.
-    const apart = priceBigquery([bq("d", 0, TIB, null, 0, "UPDATE"), bq("m", 5, TIB)], undefined, "model.s.m", {})
+    // More than a minute after it ends: two groups, and a delete alone is not a run, so only the build is priced.
+    const apart = priceBigquery([bq("d", 0, TIB, null, 0, "UPDATE"), build(60_001)], undefined, "model.s.m", {})
     expect(apart.cost.runs).toBe(1)
     expect(apart.cost.lastRun).toBe(6.25)
+    // Exactly a minute after it ends still joins.
+    expect(priceBigquery([bq("d", 0, TIB, null, 0, "DELETE"), build(60_000)], undefined, "model.s.m", {}).cost.lastRun).toBe(12.5)
   })
 
   test("a CTAS and an INSERT post-hook 5 s later are one run, not a $6.25 run and a near-zero one", () => {
