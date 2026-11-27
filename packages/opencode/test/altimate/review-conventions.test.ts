@@ -795,6 +795,37 @@ describe("folded findings in the PR comment", () => {
     const second = envelopeOf(groupConventionFindings([mk("models/a.sql", 1), mk("models/c.sql", 4)], conv))
     expect(inlineComments(second, posted).comments.map((c) => `${c.path}:${c.line}`)).toEqual(["models/c.sql:4"])
   })
+
+  test("re-review: a new lead does not re-list or re-mark findings an earlier lead's comment covered", async () => {
+    const { inlineComments, postedFindingIds } = await import("../../src/altimate/review/format")
+    const first = envelopeOf(groupConventionFindings([mk("models/b.sql", 1), mk("models/c.sql", 1)], conv))
+    const posted = postedFindingIds(inlineComments(first).comments.map((c) => c.body))
+    expect(posted.size).toBe(2)
+    // A later push adds the issue on a file that sorts first, so it becomes the lead.
+    const second = envelopeOf(groupConventionFindings([mk("models/a.sql", 1), mk("models/b.sql", 1), mk("models/c.sql", 1)], conv))
+    const { comments } = inlineComments(second, posted)
+    expect(comments.map((c) => c.path)).toEqual(["models/a.sql"])
+    expect(comments[0].body).not.toContain("models/b.sql")
+    expect(comments[0].body).not.toContain("models/c.sql")
+    expect(postedFindingIds([comments[0].body]).size).toBe(1)
+  })
+
+  test("a lead whose folded findings were all dropped later does not say the same applies elsewhere", async () => {
+    const { inlineComments } = await import("../../src/altimate/review/format")
+    const grouped = groupConventionFindings([mk("models/a.sql", 1), mk("models/b.sql", 1)], conv)
+    const env = envelopeOf(grouped.filter((x) => !x.groupedInto))
+    const { comments } = inlineComments(env)
+    expect(comments).toHaveLength(1)
+    expect(comments[0].body).not.toContain("The same applies to")
+  })
+
+  test("summary without inline comments, lead body over the clamp: each folded finding is still listed", async () => {
+    const { renderSummary, BODY_MAX_CHARS } = await import("../../src/altimate/review/format")
+    const long = (file: string) => ({ ...mk(file, 1), body: "Per models/CLAUDE.md. " + "x".repeat(BODY_MAX_CHARS + 100) })
+    const env = envelopeOf(groupConventionFindings([long("models/a.sql"), mk("models/b.sql", 1)], conv))
+    const summary = renderSummary(env, { maxChars: Infinity, inline: false })
+    expect(summary).toContain("`models/b.sql:1`")
+  })
 })
 
 describe("loadConventions hardening (round 2)", () => {

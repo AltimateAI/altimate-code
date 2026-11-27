@@ -490,9 +490,11 @@ function inlinePlan(
   const posting = postingPolicy(env)
   const leads = new Map(env.findings.map((f) => [f.id, f]))
   // Folded into a lead that may go inline; settled below against the budget.
+  // A finding already on the PR (listed by an earlier lead's comment) is not folded again, so a
+  // lead picked anew on a later push neither re-lists it nor re-emits its marker.
   const foldable = env.findings.filter((f) => {
     const lead = f.groupedInto ? leads.get(f.groupedInto) : undefined
-    return !!lead && !alreadyPosted.has(lead.id) && inlineEligible(lead, posting, commentable)
+    return !!lead && !alreadyPosted.has(f.id) && !alreadyPosted.has(lead.id) && inlineEligible(lead, posting, commentable)
   })
   const foldableIds = new Set(foldable.map((f) => f.id))
   const fresh = env.findings
@@ -534,7 +536,9 @@ export function inlineComments(
     // A lead's list of folded files is its own part, after the clamp: a long body must not cut it
     // while the folded findings' markers below count them as posted.
     const folded = foldedInto.get(f.id) ?? []
-    parts.push(clampBody(folded.length ? f.body.replace(SAME_APPLIES_RE, "") : f.body))
+    // The grouping's own "same applies" sentence is always replaced: it may name findings that
+    // were dropped later or are already on the PR.
+    parts.push(clampBody(f.body.replace(SAME_APPLIES_RE, "")))
     if (folded.length) parts.push(sameAppliesLine(folded.map((id) => byId.get(id)!.file)))
     const s = f.suggestion
     if (s) parts.push(suggestionBlock(s.replacement))
