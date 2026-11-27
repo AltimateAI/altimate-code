@@ -297,6 +297,8 @@ export interface ScopeResult {
   outOfScopePaths: string[]
   /** Paths behind `movedUnchanged`. */
   movedUnchangedPaths: string[]
+  /** Head paths of renames out of the project (scoped in as a deletion at the old path). */
+  movedOutPaths: string[]
 }
 
 const isModel = (p: string, layout?: DbtProjectLayout) => {
@@ -330,6 +332,7 @@ export function scopeToProject(
 ): ScopeResult {
   const outOfScopePaths: string[] = []
   const movedUnchangedPaths: string[] = []
+  const movedOutPaths: string[] = []
   const inScope: ChangedFile[] = []
   const basename = (p: string) => norm(p).split("/").pop()
   const layoutDirs = layout ? resolvedLayoutDirs(layout).map((d) => d.dir) : []
@@ -346,6 +349,7 @@ export function scopeToProject(
     if (f.oldPath && inside !== oldInside) {
       const { oldPath, similarity: _similarity, ...rest } = f
       inScope.push(inside ? { ...rest, status: "added" } : { ...rest, path: oldPath, status: "deleted" })
+      if (!inside) movedOutPaths.push(f.path)
       continue
     }
     if (
@@ -368,6 +372,7 @@ export function scopeToProject(
     movedUnchanged: movedUnchangedPaths.length,
     outOfScopePaths,
     movedUnchangedPaths,
+    movedOutPaths,
   }
 }
 

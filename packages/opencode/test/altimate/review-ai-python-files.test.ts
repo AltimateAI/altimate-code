@@ -286,6 +286,46 @@ describe("reviewPullRequest end to end: .py files outside the dbt project reach 
   }, 60_000)
 })
 
+describe("a Python file renamed out of the dbt project", () => {
+  const git = (cwd: string, ...args: string[]) =>
+    execFileSync("git", ["-c", "commit.gpgsign=false", ...args], {
+      cwd,
+      env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" },
+    }).toString()
+  const write = async (root: string, rel: string, body: string) => {
+    await fs.mkdir(path.dirname(path.join(root, rel)), { recursive: true })
+    await fs.writeFile(path.join(root, rel), body)
+  }
+
+  test("is offered to the AI lane at its new path (AI dry run)", async () => {
+    const { reviewPullRequest } = await import("../../src/altimate/review/run")
+    const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "review-py-moved-")))
+    try {
+      const body = Array.from({ length: 20 }, (_, i) => `print(${i})`).join("\n") + "\n"
+      await write(root, "dbt/dbt_project.yml", "name: p\n")
+      await write(root, "dbt/models/m.sql", "select 1 as id\n")
+      await write(root, "dbt/scripts/load.py", body)
+      git(root, "init", "-q", "-b", "main")
+      git(root, "add", "-A")
+      git(root, "commit", "-q", "-m", "base")
+      git(root, "checkout", "-q", "-b", "pr")
+      await write(root, "dbt/models/m.sql", "select 1 as id, 2 as x\n")
+      await fs.rm(path.join(root, "dbt/scripts/load.py"))
+      // Moved and edited: git still sees a rename.
+      await write(root, "airflow/load.py", body.replace("print(3)", "print(33)"))
+      git(root, "add", "-A")
+      git(root, "commit", "-q", "-m", "pr")
+      for (const k of ["GITHUB_EVENT_PATH", "GITHUB_BASE_REF", "CI_MERGE_REQUEST_TARGET_BRANCH_NAME"]) delete process.env[k]
+      process.env.ALTIMATE_REVIEW_AI_DRYRUN = "1"
+      process.env.ALTIMATE_REVIEW_AI_PYTHON_FILES = "1"
+      const env = await reviewPullRequest({ cwd: path.join(root, "dbt"), base: "main", head: "HEAD" })
+      expect(env.ai?.input?.map((r) => [r.path, r.kind])).toContainEqual(["airflow/load.py", AI_PYTHON_KIND])
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  }, 60_000)
+})
+
 describe("outside-project Python files the AI lane reviewed are not listed as not reviewed", () => {
   const outsideScope = (paths: string[]) => ({
     projectRoot: "dbt",

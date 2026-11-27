@@ -374,14 +374,19 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
   else if (!aiLaneEnabled(config)) aiDisabledReason = "disabled in .altimate/review.yml"
   const aiOn = !aiDisabledReason
   const aiSwitches = resolveAiSwitches(config)
-  // `pythonFiles`: .py files outside the dbt project skip every lane but the AI lane.
+  // `pythonFiles`: .py files outside the dbt project skip every lane but the AI lane. A file
+  // renamed out of this project belongs to it (`--all-projects` assigns it here), so it is offered
+  // at its new path whatever other projects took.
   const outside = new Set(scoped.outOfScopePaths)
+  const movedOut = new Set(scoped.movedOutPaths)
   const offered = opts.aiOutsidePaths && new Set(opts.aiOutsidePaths)
   const aiOutsideFiles =
     aiOn && aiSwitches.pythonFiles
-      ? collected.filter((f) => outside.has(f.path) && isAiPythonFile(f) && (!offered || offered.has(f.path)))
+      ? collected.filter(
+          (f) => isAiPythonFile(f) && ((outside.has(f.path) && (!offered || offered.has(f.path))) || movedOut.has(f.path)),
+        )
       : []
-  const notReviewedOutside = scoped.outOfScope - aiOutsideFiles.length
+  const notReviewedOutside = scoped.outOfScope - aiOutsideFiles.filter((f) => outside.has(f.path)).length
   if (notReviewedOutside > 0) {
     process.stderr.write(
       `ℹ️  ${notReviewedOutside} changed file(s) outside the dbt project (${projectRootRel || "."}) were not reviewed.\n`,
