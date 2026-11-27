@@ -197,7 +197,7 @@ export const ReviewCommand = cmd({
               UI.println(
                 `Posted review to ${where}` +
                   (r.inlineFellBack ? " (inline comments fell back to summary-only)" : "") +
-                  (r.inlineDropped ? ` (${r.inlineDropped} inline comment(s) dropped: lines outside the diff)` : "") +
+                  (r.inlineDropped ? ` (${r.inlineDropped} inline comment(s) on files without a known patch dropped)` : "") +
                   (r.inlineSkippedAsPosted ? ` (${r.inlineSkippedAsPosted} inline already on the PR)` : "") +
                   (r.reviewSkipped ? " (summary updated; no new review needed)" : ""),
               )
