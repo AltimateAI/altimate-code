@@ -213,6 +213,8 @@ interface RunOpts {
   runner?: ReviewRunner
   /** The finder lane's state (the rule verdicts are recorded whatever it is). */
   finderState?: "ok" | "timeout" | "error"
+  /** The rule run's single batch state (every verdict names batch 0). */
+  batchState?: "ok" | "timeout" | "error" | "budget"
   mode?: "comment" | "gate"
 }
 
@@ -272,6 +274,7 @@ function run(o: RunOpts = {}, seen: AiReviewInput[] = []) {
                   summary: 0,
                   unreviewed: 0,
                   ...(state === "skipped" ? {} : { ruleVerdicts: records }),
+                  ...(o.batchState ? { batches: [{ findings: rules.length, state: o.batchState, turns: 1, toolCalls: 0 }] } : {}),
                 },
                 ruleVerifier: {
                   state,
@@ -348,11 +351,12 @@ describe("orchestrator: rule-post policy", () => {
     const seen: AiReviewInput[] = []
     const env = await run({ runner: critRunner, verdictAt: () => "unverifiable" }, seen)
     const sent = seen[0].verifyRulesAfter!
-    const crit = sent.filter((f) => f.severity === "critical")
+    // Critical rule findings are not sent to the rule verifier at all; they are posted.
+    const crit = env.findings.filter((f) => f.severity === "critical")
     const warn = sent.filter((f) => f.severity === "warning")
     expect(crit.length).toBe(1)
+    expect(sent.some((f) => f.severity === "critical")).toBe(false)
     expect(warn.length).toBeGreaterThan(0)
-    expect(env.findings.some((f) => f.id === crit[0].id)).toBe(true)
     expect(env.findings.some((f) => warn.some((w) => w.id === f.id))).toBe(false)
     expect(env.rulePolicy?.dropped.unverifiable_high_sev).toBe(warn.length)
   })
@@ -361,10 +365,10 @@ describe("orchestrator: rule-post policy", () => {
     const seen: AiReviewInput[] = []
     const env = await run({ runner: critRunner, verdictAt: () => "refuted" }, seen)
     const sent = seen[0].verifyRulesAfter!
-    const crit = sent.filter((f) => f.severity === "critical")
-    const rest = sent.filter((f) => f.severity !== "critical")
+    const crit = env.findings.filter((f) => f.severity === "critical")
+    const rest = sent
     expect(crit.length).toBe(1)
-    expect(env.findings.some((f) => f.id === crit[0].id)).toBe(true)
+    expect(sent.some((f) => f.severity === "critical")).toBe(false)
     expect(env.findings.some((f) => rest.some((w) => w.id === f.id))).toBe(false)
     expect(env.rulesRefuted).toBe(rest.length)
   })
@@ -424,15 +428,16 @@ describe("round 2: rule noise fails open", () => {
     const seen: AiReviewInput[] = []
     const all = await run({ runner: critRunner }, seen)
     const sent = seen[0].verifyRulesAfter!
-    // The critical finding's batch answered; the warning's batch failed (no verdict), run state ok.
-    const env = await run({ runner: critRunner, verdictAt: (i) => (sent[i].severity === "critical" ? "confirmed" : undefined) })
+    // One finding's batch answered; the warnings' batch failed (no verdict), run state ok.
+    const env = await run({ runner: critRunner, verdictAt: (i) => (sent[i].severity === "warning" ? undefined : "confirmed") })
     expect(sent.some((f) => f.severity === "warning")).toBe(true)
+    expect(sent.some((f) => f.severity !== "warning")).toBe(true)
     expect(env.rulePolicy?.applied).toBe(true)
     expect(env.findings).toEqual(all.findings)
     expect(env.rulePolicy?.dropped.unverifiable_high_sev).toBe(0)
   })
 
-  test("verdict: refuted engine warnings no longer count toward the warning block; a critical one still blocks", async () => {
+  test("verdict: a refuted critical rule finding is posted and still blocks", async () => {
     const gate = { mode: "gate" as const }
     const confirmed = await run({ ...gate, runner: critRunner, verdictAt: () => "confirmed" })
     expect(confirmed.verdict).toBe("REQUEST_CHANGES")
@@ -470,5 +475,55 @@ describe("round 2: suppressed rule findings are visible", () => {
     }
     expect(events[0]).toMatchObject({ ai_rule_verify_state: "ok", rules_refuted: env.rulesRefuted, rule_policy_dropped: 0 })
     expect(events[0].rules_off_dropped).toBe(0)
+  })
+})
+
+// Three error-severity engine issues on different rules: three warning rule findings, no critical.
+const threeWarnRunner: ReviewRunner = {
+  ...runner,
+  async check() {
+    return {
+      issues: [
+        { rule: "ambiguous-column", severity: "error", category: "correctness", message: "ambiguous column status", line: 3 },
+        { rule: "implicit-cartesian", severity: "error", category: "correctness", message: "implicit cross join", line: 2 },
+        { rule: "order-by-ordinal", severity: "error", category: "correctness", message: "order by ordinal", line: 4 },
+      ],
+      ran: true,
+    }
+  },
+} as ReviewRunner
+
+describe("round 2b: forced verdicts and the verdict", () => {
+  test("a verdict from a batch that stopped on budget or timeout counts as no verdict", async () => {
+    const base = await run({ switches: { verifyRules: false, rulePolicy: false }, policy: false })
+    for (const batchState of ["budget", "timeout"] as const) {
+      for (const v of ["unverifiable", "refuted"] as const) {
+        const env = await run({ verdictAt: () => v, batchState })
+        expect(env.findings).toEqual(base.findings)
+        expect(env.rulesRefuted).toBe(0)
+      }
+    }
+    // The same verdicts from a batch that answered are acted on.
+    const answered = await run({ verdictAt: () => "refuted", batchState: "ok" })
+    expect(answered.rulesRefuted).toBeGreaterThan(0)
+  })
+
+  test("refuted or policy-dropped engine warnings are not posted but still block in gate mode", async () => {
+    const seen: AiReviewInput[] = []
+    const kept = await run({ mode: "gate", runner: threeWarnRunner, verdictAt: () => "confirmed" }, seen)
+    expect(seen[0].verifyRulesAfter!.filter((f) => f.severity === "warning").length).toBeGreaterThanOrEqual(3)
+    expect(kept.verdict).toBe("REQUEST_CHANGES")
+    for (const v of ["refuted", "unverifiable"] as const) {
+      const env = await run({ mode: "gate", runner: threeWarnRunner, verdictAt: () => v })
+      expect(env.findings.filter((f) => f.severity === "warning" && f.origin !== "ai").length).toBe(0)
+      expect(env.verdict).toBe("REQUEST_CHANGES")
+    }
+  })
+
+  test("critical rule findings are not sent to the rule verifier", async () => {
+    const seen: AiReviewInput[] = []
+    const env = await run({ runner: critRunner }, seen)
+    expect(env.findings.some((f) => f.severity === "critical")).toBe(true)
+    expect(seen[0].verifyRulesAfter!.some((f) => f.severity === "critical")).toBe(false)
   })
 })

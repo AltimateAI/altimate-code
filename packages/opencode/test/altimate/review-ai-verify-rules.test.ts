@@ -587,3 +587,13 @@ describe("round 2: credential-like paths", () => {
     expect(files.has("models/secrets.yml")).toBe(false)
   })
 })
+
+describe("round 2b: critical rule findings", () => {
+  test("runRuleVerify skips critical findings: only critical ones means nothing to verify", async () => {
+    const llm = scriptModels([], /x/)
+    const crit = { ...ruleFinding(1), severity: "critical" as const }
+    const res = await runRuleVerify({ files: [FILE], grounding: [], evidence: evidence() }, [crit])
+    expect(res.status.verifier).toMatchObject({ state: "skipped", reason: NO_RULE_FINDINGS_REASON })
+    expect(llm).not.toHaveBeenCalled()
+  })
+})

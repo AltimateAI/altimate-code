@@ -2820,7 +2820,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
             (f) => SEVERITY_ORDER[f.severity] >= SEVERITY_ORDER[input.config.severityThreshold] && findingOrigin(f) !== "ai",
           ),
           input.rulesOff,
-        ).kept.filter((f) => !mayHoldCredentials(f.file))
+        ).kept.filter((f) => f.severity !== "critical" && !mayHoldCredentials(f.file))
       : undefined
     try {
       const res = await input.aiReview({
@@ -2843,7 +2843,13 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
       else aiStatus = res.status
       if (aiStatus.verifyRules === "drop_refuted") {
         ruleVerifyAttempted = true
-        for (const v of aiStatus.verifier?.ruleVerdicts ?? []) ruleVerdicts.set(v.id, v.verdict)
+        // A verdict from a batch that stopped on its budget or timeout was forced without the
+        // verifier's tools: it counts as no verdict, for the refuted filter and the policy alike.
+        const batches = aiStatus.verifier?.batches ?? []
+        for (const v of aiStatus.verifier?.ruleVerdicts ?? []) {
+          const forced = ["budget", "timeout"].includes(batches[v.batch]?.state ?? "")
+          ruleVerdicts.set(v.id, forced ? null : v.verdict)
+        }
         ruleVerifierRan = rulePolicyApplies(aiStatus.ruleVerifier)
       }
       // A sent file counts as reviewed only when the lane answered for its call.
@@ -2873,8 +2879,9 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
 
   // Rule noise, only when the AI lane ran and answered (fail-open otherwise, like the
   // verifier): rule types off, then rule findings the verifier refuted, then the rule-post
-  // policy. A finding not posted does not count toward the verdict either; an unmerged instance
-  // takes the verdict of its merged group. AI findings and critical rule findings are never
+  // policy. These steps filter posting only: the verdict counts every rule finding, so neither a
+  // model verdict nor author text the verifier reads (the PR description) can unblock a gate. An
+  // unmerged instance takes the verdict of its merged group. AI findings and critical rule findings are never
   // dropped by these steps. A merged repeat group with an AI member is left alone too, so a
   // rule finding it was merged with cannot take the AI finding down with it.
   const aiLaneRan = lanes.has("ai_review") && !!input.aiReview && aiStatus?.state === "ok"
@@ -2899,14 +2906,12 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     offDropped = r.dropped
     return r.kept
   })
-  verdictFindings = ruleStep(verdictFindings, (list) => offStep(list).kept)
   const verdictOf = (f: Finding) => ruleVerdicts.get(f.id) ?? ruleVerdicts.get(repeatGroupId(f))
   const refuted = (f: Finding) =>
     findingOrigin(f) !== "ai" && !inMixed(f) && f.severity !== "critical" && verdictOf(f) === "refuted"
   const rulesRefuted = aiLaneRan && ruleVerifyAttempted ? findings.filter(refuted).length : undefined
   if (aiLaneRan && ruleVerdicts.size) {
     findings = findings.filter((f) => !refuted(f))
-    verdictFindings = verdictFindings.filter((f) => !refuted(f))
   }
   let rulePolicy: { applied: boolean; dropped: RulePolicyDrops } | undefined
   if (aiLaneRan && input.rulePolicy && ruleVerifyAttempted) {
@@ -2918,7 +2923,6 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
         postedDropped = r.dropped
         return r.kept
       })
-      verdictFindings = ruleStep(verdictFindings, (list) => dropByRulePolicy(list, byId(list), input.rulePolicy).kept)
       rulePolicy = { applied: true, dropped: postedDropped }
     } else rulePolicy = { applied: false, dropped: { unverifiable_high_sev: 0, noisy_type_not_confirmed: 0 } }
   }

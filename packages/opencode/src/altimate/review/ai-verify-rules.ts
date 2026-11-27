@@ -50,7 +50,8 @@ export async function runRuleVerify(
   })
   const skip = (reason: string) => done({ state: "skipped", reason, verifier: skippedVerifier(reason, rules.length) })
   if (!input.evidence) return skip("the verifier's evidence is unavailable")
-  if (!rules.length) return skip(NO_RULE_FINDINGS_REASON)
+  const candidates = rules.filter((f) => f.severity !== "critical")
+  if (!candidates.length) return skip(NO_RULE_FINDINGS_REASON)
   if (aiDryRunEnabled(env)) return skip("dry run (ALTIMATE_REVIEW_AI_DRYRUN=1): no model call")
   let model: Provider.Model
   try {
@@ -61,16 +62,16 @@ export async function runRuleVerify(
   }
   const max = Number(env.ALTIMATE_REVIEW_AI_VERIFY_RULES_MAX_FINDINGS)
   const cap = Number.isInteger(max) && max > 0 ? max : RULE_VERIFY_MAX_FINDINGS
-  // Most severe first, so the warnings the policy acts on are verified before suggestions.
+  // Critical findings are never dropped, so they are not verified; warnings first, since the policy acts on them.
   const order = { critical: 2, warning: 1, suggestion: 0 } as const
-  const sent = [...rules].sort((a, b) => order[b.severity] - order[a.severity]).slice(0, cap)
+  const sent = [...candidates].sort((a, b) => order[b.severity] - order[a.severity]).slice(0, cap)
   log.info("verifying rule findings", { findings: sent.length, total: rules.length })
   const v = await runAiVerify(
     { findings: sent, grounding: input.grounding, evidence: input.evidence, model, rulesOnly: true },
     { env, ...(deps.llm ? { llm: deps.llm } : {}) },
   )
-  const over = rules.length - sent.length
-  const note = `${over} of ${rules.length} rule findings over the per-PR ceiling of ${cap} were not verified`
+  const over = candidates.length - sent.length
+  const note = `${over} of ${candidates.length} rule findings over the per-PR ceiling of ${cap} were not verified`
   const verifier = over ? { ...v.status, reason: v.status.reason ? `${v.status.reason}; ${note}` : note } : v.status
   return done({ state: "ok", model: `${model.providerID}/${model.id}`, verifier })
 }

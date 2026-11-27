@@ -198,7 +198,8 @@ describe("orchestrator: rule types off", () => {
     const on = await run({ seen: onSeen, rulesOff: new Set([target, "dbt-patterns:not-in-this-pr"]) })
     expect(on.findings).toEqual(base.findings.filter((f) => f.rule !== target))
     expect(on.rulesOff).toEqual({ [target]: n })
-    expect(on.summary.warning + on.summary.critical + on.summary.suggestion).toBe(base.findings.length - n)
+    // The summary tallies the verdict's findings, which rule-noise steps do not filter.
+    expect(on.summary).toEqual(base.summary)
     // The finder's grounding is the same as without the list.
     expect(onSeen[0]).toEqual(offSeen[0])
 
