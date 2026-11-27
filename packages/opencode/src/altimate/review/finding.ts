@@ -285,11 +285,6 @@ function repeatLabel(f: Finding, first: Finding): string {
   return f.startLine ? `${label} (line ${f.startLine})` : label
 }
 
-/**
- * Merge repeats of one rule within one file (one finding per column of a grain
- * test, one per join onto the same kind of key) into a single finding that
- * lists every instance. Critical findings stay separate: each one can block.
- */
 /** The key `mergeRepeats` groups a finding by. */
 function repeatKey(f: Finding): string {
   return [f.file, f.category, f.severity, !!f.degraded, !!f.preExisting, groupKeyTitle(f)].join("|")
@@ -300,6 +295,11 @@ export function repeatGroupId(f: Finding): string {
   return "f_" + createHash("sha256").update(`merged ${repeatKey(f)}`).digest("hex").slice(0, 16)
 }
 
+/**
+ * Merge repeats of one rule within one file (one finding per column of a grain
+ * test, one per join onto the same kind of key) into a single finding that
+ * lists every instance. Critical findings stay separate: each one can block.
+ */
 export function mergeRepeats(findings: Finding[]): Finding[] {
   const groups = new Map<string, Finding[]>()
   const out: Finding[] = []

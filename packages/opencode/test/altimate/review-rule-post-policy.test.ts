@@ -442,3 +442,33 @@ describe("round 2: rule noise fails open", () => {
     expect(refuted.verdict).toBe("REQUEST_CHANGES")
   })
 })
+
+describe("round 2: suppressed rule findings are visible", () => {
+  test("the PR comment says how many rule findings were not posted, by step", async () => {
+    const { renderSummary } = await import("../../src/altimate/review/format")
+    const env = await run({ verdictAt: (i) => (i === 0 ? "refuted" : "unverifiable") })
+    const refuted = env.rulesRefuted ?? 0
+    const policy = (env.rulePolicy?.dropped.unverifiable_high_sev ?? 0) + (env.rulePolicy?.dropped.noisy_type_not_confirmed ?? 0)
+    expect(refuted + policy).toBeGreaterThan(0)
+    const text = renderSummary(env, { allowSilent: false, maxChars: Infinity })
+    expect(text).toContain(`${refuted + policy} rule finding(s) not posted`)
+  })
+
+  test("telemetry carries the rule verifier's state and spend and the drop counts", async () => {
+    const { spyOn } = await import("bun:test")
+    const { emitReviewRun } = await import("../../src/altimate/review/telemetry")
+    const { Telemetry } = await import("../../src/altimate/telemetry")
+    const env = await run({ verdictAt: () => "refuted", rulesOff: new Set(["x:y"]) })
+    const events: any[] = []
+    const spy = spyOn(Telemetry, "track").mockImplementation((e: any) => {
+      events.push(e)
+    })
+    try {
+      emitReviewRun({ invocation: "cli", durationMs: 1, sessionID: "", envelope: env })
+    } finally {
+      spy.mockRestore()
+    }
+    expect(events[0]).toMatchObject({ ai_rule_verify_state: "ok", rules_refuted: env.rulesRefuted, rule_policy_dropped: 0 })
+    expect(events[0].rules_off_dropped).toBe(0)
+  })
+})

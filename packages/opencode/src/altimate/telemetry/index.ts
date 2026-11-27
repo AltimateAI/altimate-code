@@ -1679,6 +1679,15 @@ export namespace Telemetry {
         /** AI findings the verifier kept and discarded; `kept` includes those moved to the summary (summary and unreviewed counts are not emitted). */
         ai_verify_kept?: number
         ai_verify_discarded?: number
+        /** The rule verifier's run (`verifyRules`): state, tokens (input incl. cached plus output), cost, findings reviewed. */
+        ai_rule_verify_state?: string
+        ai_rule_verify_tokens_total?: number
+        ai_rule_verify_cost?: number
+        ai_rule_verify_reviewed?: number
+        /** Rule findings not posted by rule types off, the refuted filter and the rule-post policy. */
+        rules_off_dropped?: number
+        rules_refuted?: number
+        rule_policy_dropped?: number
         /** Where the review base came from (flag, github_event, default_branch, …). */
         base_source?: string
         /** Changed files outside the dbt project that no lane reviewed (outside-project Python files the AI lane reviewed are not counted; see `ai_reviewed_outside_files`). */

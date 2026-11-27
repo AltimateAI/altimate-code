@@ -318,6 +318,14 @@ export function coverageNotes(env: VerdictEnvelope): string[] {
       `${aiUnsent.length} file(s) were not sent to the advisory AI review (file quota); the deterministic checks still ran on them: ${head}${more}.`,
     )
   }
+  // Rule findings the rule-noise steps withheld (rule types off, refuted, the rule-post policy).
+  const offCount = Object.values(env.rulesOff ?? {}).reduce((a, b) => a + b, 0)
+  const refutedCount = env.rulesRefuted ?? 0
+  const policyCount = env.rulePolicy ? env.rulePolicy.dropped.unverifiable_high_sev + env.rulePolicy.dropped.noisy_type_not_confirmed : 0
+  if (offCount + refutedCount + policyCount)
+    notes.push(
+      `${offCount + refutedCount + policyCount} rule finding(s) not posted (rule types off: ${offCount}, refuted by the verifier: ${refutedCount}, rule-post policy: ${policyCount}); the envelope lists the counts.`,
+    )
   const out = notes.length ? [...notes.map((n) => `> ℹ️ ${n}`), ""] : []
   return [...out, ...ledgerBlock(ledger)]
 }

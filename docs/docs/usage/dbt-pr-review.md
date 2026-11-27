@@ -676,29 +676,38 @@ across 12 dialects all plan; anything still unrecognized stays *undecidable*, ne
    text such as `env_var('DBT_PASSWORD')` examples is left as written. The verifier reads a
    convention file's base-branch text, not the PR's edit of it.
    When the AI lane runs and answers, the rule findings are filtered too. 36 rule
-   types that were almost never real defects on public dbt PRs are not posted
-   (`ai.rulesOff: false` or `ALTIMATE_REVIEW_RULES_OFF=0`/`off`/`false` keeps them,
-   `ai.rulesOn: [ids]` keeps single types, `ALTIMATE_REVIEW_RULES_OFF=<path>.json`
-   replaces the list with a JSON list of rule ids; rule ids match in either
-   spelling, `dbt_patterns:self_join` or `dbt-patterns:self-join`). With the
-   verifier on (`ai.verify`), the rule findings that would be posted are verified
-   too and refuted ones are dropped (`ai.verifyRules: false` or
-   `ALTIMATE_REVIEW_AI_VERIFY_RULES=off`; `ai.verify: false` turns it off too). Then
-   a rule finding is not posted when the verifier could not check it and it is a
-   warning, or when its type is one of 7 noisy types and the verifier did not
-   confirm it (`ai.rulePolicy: false` or `ALTIMATE_REVIEW_RULE_POLICY=0`). Critical
-   rule findings are never dropped by any of these steps, nor is a repeat-merged
-   comment that includes an AI finding. When the AI lane is skipped or fails (no
-   model, dry run, provider error), none of the steps applies and every rule
-   finding is posted as before; when only the rule verifier did not run, the rule
-   types off still apply and every other rule finding is posted unchanged. The
-   envelope counts what each step dropped (`rulesOff`, `rulesRefuted`, `rulePolicy`).
+   types that were almost never real defects on public dbt PRs are not posted on
+   files the AI lane reviewed (`ai.rulesOff: false` or
+   `ALTIMATE_REVIEW_RULES_OFF=0`/`off`/`false` keeps them, `ai.rulesOn: [ids]` keeps
+   single types, `ALTIMATE_REVIEW_RULES_OFF=<path>.json` replaces the list with a
+   JSON list of rule ids; the path must be absolute and outside the repository
+   checkout, and a missing, unreadable or malformed list file stops the review
+   before any lane runs; rule ids match in either spelling, `dbt_patterns:self_join`
+   or `dbt-patterns:self-join`). With the verifier on (`ai.verify`), the rule
+   findings that would be posted are verified too, up to 40 per PR, most severe
+   first (`ALTIMATE_REVIEW_AI_VERIFY_RULES_MAX_FINDINGS`), in a second verifier run
+   with its own token budget, and refuted ones are dropped (`ai.verifyRules: false`
+   or `ALTIMATE_REVIEW_AI_VERIFY_RULES=off`; `ai.verify: false` turns it off too).
+   Then a rule finding is not posted when the verifier answered that it could not
+   check it and it is a warning, or when its type is one of 7 noisy types and the
+   verifier did not confirm it (`ai.rulePolicy: false` or
+   `ALTIMATE_REVIEW_RULE_POLICY=0`). A rule finding that got no verdict (its batch
+   failed or timed out, or it was over the ceiling) is posted. Critical rule
+   findings are never dropped by any of these steps, nor is a repeat-merged comment
+   that includes an AI finding. When the AI lane is skipped or fails (no model, dry
+   run, provider error, timeout), the rule verifier does not run, none of the steps
+   applies and every rule finding is posted as before; when only the rule verifier
+   did not run, the rule types off still apply and every other rule finding is
+   posted unchanged. The envelope counts what each step dropped (`rulesOff`,
+   `rulesRefuted`, `rulePolicy`), and the PR comment gives the total per step.
 4. **Rubric → verdict.** Findings map to a verdict by a versioned rubric (data,
    not prompt): any blocking-category `critical` → `REQUEST_CHANGES`; ≥3 warnings
    → risk pattern → `REQUEST_CHANGES`; only suggestions → `COMMENT`; nothing →
    `APPROVE`. Only layer-1 findings reach `critical`, so only the engine can
    block (the rule verifier and the rule-post policy never drop a critical rule
-   finding). In `comment` mode, `REQUEST_CHANGES` is posted as comments rather than
+   finding). They can unblock, though: an engine warning that is refuted, turned
+   off or dropped by the policy is not posted and does not count toward the ≥3
+   warnings, so it can lower that `REQUEST_CHANGES` to `COMMENT`. In `comment` mode, `REQUEST_CHANGES` is posted as comments rather than
    blocking.
 5. **Signed envelope.** The verdict is HMAC-signed (`ALTIMATE_REVIEW_SIGNING_KEY`)
    and includes the manifest hash, so it is replayable and tamper-evident.
