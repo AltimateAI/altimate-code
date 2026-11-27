@@ -96,10 +96,21 @@ const COLUMNS_CALL = /(?<![\w$])columns\s*\(/i
 
 /**
  * The engine's own name for an unaliased expression in a SELECT list (`_1`, `_col_1`): not the warehouse's
- * name for it. A name the SQL itself writes (`amount as _1`) is a real alias.
+ * name for it. A name a SELECT list writes, in any SELECT of the SQL (`amount as _1`, `select _1 from q`), is a
+ * real column; the same name elsewhere (a table alias `from orders _1`, a WHERE column) is not.
  */
 export function engineMade(name: string, stripped: string): boolean {
-  return ENGINE_NAME.test(name) && !new RegExp(`(?<![\\w$])${name}(?![\\w$])`, "i").test(stripped)
+  return ENGINE_NAME.test(name) && !writtenNames(stripped).has(name.toLowerCase())
+}
+
+const writtenCache = new Map<string, Set<string>>()
+
+/** The output names the SELECT lists of literal- and comment-stripped SQL write (aliases and bare columns), lower-cased. */
+function writtenNames(stripped: string): Set<string> {
+  return remember(writtenCache, hash("written", stripped), () => {
+    const names = everySelectItems(stripped).flat().map(itemName)
+    return new Set(names.filter((name): name is string => !!name && name !== "*"))
+  })
 }
 
 /**
@@ -145,13 +156,52 @@ export function selectItems(stripped: string): string[] {
     if (ch === ",") {
       items.push(stripped.slice(from, i).trim())
       from = i + 1
-    } else if (boundary && word && /^(from|into|where|union|intersect|except|group|order|limit|qualify|having|window)$/.test(word)) {
+    } else if (boundary && word && LIST_ENDS.test(word)) {
       items.push(stripped.slice(from, i).trim())
       return items.filter((one) => one !== "")
     }
   }
   if (start >= 0) items.push(stripped.slice(from).trim())
   return items.filter((one) => one !== "")
+}
+
+/** A SELECT item that is a bare column reference (`id`, `t.id`, `"T"."Id"`). */
+const BARE_REF = new RegExp(`^(?:(?:${QUOTED}|[\\w$]+)\\.)*(?:${QUOTED}|[\\w$]+)$`)
+
+/** Words that end a SELECT list. */
+const LIST_ENDS = /^(?:from|into|where|union|intersect|except|group|order|limit|qualify|having|window)$/
+
+/**
+ * The items of every SELECT list in literal- and comment-stripped SQL, in text order (so CTEs and subqueries before
+ * the outer list that reads them), each split at its own top-level commas. A list ends at a word that ends a SELECT
+ * list, or at the `)` that closes the parentheses it sits in.
+ */
+export function everySelectItems(stripped: string): string[][] {
+  const text = stripped.replace(new RegExp(QUOTED, "g"), (q) => " ".repeat(q.length))
+  const lists: string[][] = []
+  for (const m of text.matchAll(/(?<![\w$])select(?![\w$])/gi)) {
+    const start = m.index + 6 + modifierLength(text, m.index + 6)
+    const items: string[] = []
+    let from = start
+    let depth = 0
+    let i = start
+    for (; i < text.length; i++) {
+      const ch = text[i]!
+      if (ch === "(") depth++
+      else if (ch === ")") {
+        if (depth === 0) break
+        depth--
+      }
+      if (depth !== 0) continue
+      if (ch === ",") {
+        items.push(stripped.slice(from, i).trim())
+        from = i + 1
+      } else if (!/[\w$]/.test(text[i - 1] ?? " ") && LIST_ENDS.test(/^[a-z_]+/i.exec(text.slice(i))?.[0] ?? "")) break
+    }
+    items.push(stripped.slice(from, i).trim())
+    lists.push(items.filter((one) => one !== ""))
+  }
+  return lists
 }
 
 /** Words that end an expression (`x is null`, `case … end`) rather than alias it. */
@@ -584,6 +634,7 @@ export function clearLineageCaches() {
   lineageCache.clear()
   outputColumnsCache.clear()
   readsCache.clear()
+  writtenCache.clear()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -804,13 +855,29 @@ export class ProjectLineage {
     return out
   }
 
-  /** Whether a bare `*` sits beside an output that repeats a name the star brings in (`select *, val as id`). */
+  /**
+   * Whether a SELECT list with a star, the outer one or one in a CTE or subquery, names an output twice or gives an
+   * output a name the star brings in (`select *, val as id`, `select f.*, val as id`): the warehouse renames the
+   * repeat. A bare `*` brings every parent's columns. A qualified `t.*` brings a name when the model passes a column
+   * of that name on unchanged from more sources than the list's own bare references to it.
+   */
   private renamesBesideStar(id: string, stripped: string): boolean {
-    const items = selectItems(stripped)
-    if (!items.some((item) => /^\*(?:\s|$)/.test(item))) return false
-    const brought = new Set(this.parents(id).flatMap((p) => [...(this.settledColumns(p) ?? [])]))
-    const explicit = items.map(itemName).filter((name): name is string => !!name && name !== "*")
-    return new Set(explicit).size !== explicit.length || explicit.some((name) => brought.has(name))
+    const parentColumns = new Set(this.parents(id).flatMap((p) => [...(this.settledColumns(p) ?? [])]))
+    const unchanged = new Map<string, Set<string>>()
+    for (const e of this.lineage(id).edges)
+      if (e.how === "=" && e.fromCol === e.to) unchanged.set(e.to, (unchanged.get(e.to) ?? new Set()).add(`${e.from}|${e.fromCol}`))
+    for (const items of everySelectItems(stripped)) {
+      const names = items.map(itemName)
+      if (!names.includes("*")) continue
+      const explicit = names.filter((name): name is string => !!name && name !== "*")
+      if (new Set(explicit).size !== explicit.length) return true
+      const bareStar = items.some((item) => /^\*(?:\s|$)/.test(item))
+      for (const name of explicit) {
+        if (bareStar ? parentColumns.has(name) : (unchanged.get(name)?.size ?? 0) > items.filter((item, i) => names[i] === name && BARE_REF.test(item)).length)
+          return true
+      }
+    }
+    return false
   }
 
   lineage(id: string): ModelLineage {
@@ -890,24 +957,11 @@ export class ProjectLineage {
       seen.add(dedupe)
       edges.push({ from, fromCol, to, ...howOfEdge(e, fromCol, to) })
     }
-    // The engine names an unaliased expression twice: `_N`, as if the value passed through unchanged, and
-    // `_col_N`, how unknown. Keep the second; the warehouse picks the real name.
-    // A `_N` the SQL itself writes (`amount as _1`) is a real alias and stays.
-    const stripped = stripSql(raw)
-    const named = new Set(edges.filter((e) => /^_col_\d+$/.test(e.to)).map((e) => `${e.from}|${e.fromCol}|${e.to.slice(5)}`))
+    const names = warehouseNames(edges.map((e) => ({ source: `${e.from}|${e.fromCol}`, to: e.to })), stripSql(raw), this.dialect)
     for (let i = edges.length - 1; i >= 0; i--) {
-      const e = edges[i]!
-      if (/^_\d+$/.test(e.to) && engineMade(e.to, stripped) && named.has(`${e.from}|${e.fromCol}|${e.to.slice(1)}`)) edges.splice(i, 1)
-    }
-    // Postgres and Redshift name an unaliased cast of a column after the column (`amount::numeric` is `amount`).
-    if (this.dialect === "postgres" || this.dialect === "redshift") {
-      const items = selectItems(stripped)
-      for (const e of edges) {
-        // A `_col_N` the SQL writes itself (`amount::numeric as _col_1`) is that output's name: keep it.
-        const n = engineMade(e.to, stripped) ? /^_col_(\d+)$/.exec(e.to)?.[1] : undefined
-        const name = n === undefined ? null : castColumn(items[Number(n)] ?? "")
-        if (name && !edges.some((o) => o.from === e.from && o.fromCol === e.fromCol && o.to === name)) e.to = name
-      }
+      const name = names[i]
+      if (name === null) edges.splice(i, 1)
+      else edges[i]!.to = name!
     }
     const errors: unknown[] = Array.isArray(result.errors) ? result.errors : []
     const firstError = (): string => {
@@ -923,6 +977,26 @@ export class ProjectLineage {
       }
     return { edges, flags, ...(errors.length && { partial: firstError() }) }
   }
+}
+
+/**
+ * The warehouse's names for edges the engine labels, given each edge's source and target (lower-cased): null drops the
+ * edge. The engine names an unaliased expression twice: `_N`, as if the value passed through unchanged, and `_col_N`,
+ * how unknown. The `_N` of a `_col_N` from the same source goes; the warehouse picks the real name. On Postgres and
+ * Redshift a `_col_N` that is an unaliased cast of a column (`amount::numeric`) takes the column's name, unless that
+ * source already reaches the name. A `_N` or `_col_N` a SELECT list writes (`amount as _1`) is the output's name.
+ */
+export function warehouseNames(edges: { source: string; to: string }[], stripped: string, dialect: string): (string | null)[] {
+  const twins = new Set(edges.filter((e) => /^_col_\d+$/.test(e.to)).map((e) => `${e.source}|${e.to.slice(5)}`))
+  const casts = dialect === "postgres" || dialect === "redshift"
+  const items = casts ? selectItems(stripped) : []
+  const out: (string | null)[] = edges.map((e) => (/^_\d+$/.test(e.to) && engineMade(e.to, stripped) && twins.has(`${e.source}|${e.to.slice(1)}`) ? null : e.to))
+  for (const [i, e] of edges.entries()) {
+    const n = casts && out[i] !== null && engineMade(e.to, stripped) ? /^_col_(\d+)$/.exec(e.to)?.[1] : undefined
+    const name = n === undefined ? null : castColumn(items[Number(n)] ?? "")
+    if (name && !edges.some((o, j) => o.source === e.source && out[j] === name)) out[i] = name
+  }
+  return out
 }
 
 function howOfEdge(e: any, fromCol: string, to: string) {

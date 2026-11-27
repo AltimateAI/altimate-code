@@ -1444,6 +1444,59 @@ describe("both tools: names at the edges", () => {
     expect(Object.keys((folded.raw_lineage as any).column_dict ?? {}).sort()).toEqual(["id", "val", "val_1"])
   })
 
+  test("a _N written outside the SELECT lists is no alias: a table alias _1 adds no fake _1 column", () => {
+    for (const dialect of ["duckdb", "snowflake", "postgres"]) {
+      const path = write(nodes(dialect, [
+        model("orders", [], "select 1 as order_id, 2.5 as amount", ["order_id", "amount"]),
+        model("r", ["orders"], `select _1.order_id, _1.amount * 2 from ${T("orders")} _1`),
+        model("child", ["r"], `select * from ${T("r")}`),
+      ]))
+      expect(carried(columnAnswer(path, "orders", "amount"))).not.toEqual(expect.arrayContaining(["r._1"]))
+      const lineage = dbtLineage({ manifest_path: path, model: "child" })
+      expect(Object.keys((lineage.raw_lineage as any).column_dict ?? {})).not.toContain("_1")
+    }
+  })
+
+  test("a _col_N written outside the SELECT lists doesn't stop a cast from taking its column's name", () => {
+    for (const r of [`select id, amount::numeric from ${T("f")} as _col_1`, `select id, amount::numeric from ${T("f")} where _col_1 > 0`]) {
+      const path = write(nodes("postgres", [
+        model("f", [], "select 1 as id, 2.5 as amount, 3 as _col_1", ["id", "amount", "_col_1"]),
+        model("r", ["f"], r),
+      ]))
+      expect(carried(columnAnswer(path, "f", "amount"))).toEqual(["r.amount"])
+    }
+  })
+
+  test("a repeat beside a qualified or CTE-wrapped star doesn't settle, and a join that repeats nothing still does", () => {
+    for (const r of [`select f.*, val as id from ${T("f")} f`, `with q as (select *, val as id from ${T("f")}) select * from q`]) {
+      const path = write(nodes("duckdb", [
+        model("f", [], "select 1 as id, 2 as val", ["id", "val"]),
+        model("r", ["f"], r),
+        model("child", ["r"], `select id_1 as x from ${T("r")}`),
+      ]))
+      expect(() => columnReach(path, "r", "id_1")).not.toThrow()
+      expect(() => columnAnswer(path, "r", "id_1")).not.toThrow()
+    }
+    // `o.*` brings no `name`, so `c.name` repeats nothing and the model's columns stay settled.
+    const join = write(nodes("duckdb", [
+      model("orders", [], "select 1 as id, 2 as customer_id", ["id", "customer_id"]),
+      model("customers", [], "select 2 as customer_id, 'x' as name", ["customer_id", "name"]),
+      model("r", ["orders", "customers"], `select o.*, c.name from ${T("orders")} o join ${T("customers")} c on o.customer_id = c.customer_id`),
+    ]))
+    expect(() => columnReach(join, "r", "nope")).toThrow(/has no column nope/)
+  })
+
+  test("dbt_lineage names a model's own unaliased cast after its column on Postgres and Redshift, as column_answer does", () => {
+    for (const dialect of ["postgres", "redshift"]) {
+      const path = write(nodes(dialect, [
+        model("orders", [], "select 1 as order_id, 2.5 as amount", ["order_id", "amount"]),
+        model("r", ["orders"], `select order_id, amount::numeric from ${T("orders")}`),
+      ]))
+      const lineage = dbtLineage({ manifest_path: path, model: "r" })
+      expect(Object.keys((lineage.raw_lineage as any).column_dict ?? {}).sort()).toEqual(["amount", "order_id"])
+    }
+  })
+
   test("the text line says how many may-carry models are only not traced, without suggesting no effect", () => {
     const path = write(nodes("duckdb", [
       model("f", [], "select 1 as id, 2 as val", ["id", "val"]),
