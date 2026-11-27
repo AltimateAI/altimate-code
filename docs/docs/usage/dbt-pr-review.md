@@ -719,7 +719,8 @@ across 12 dialects all plan; anything still unrecognized stays *undecidable*, ne
    engine warning that is refuted, turned off or dropped by the policy is not
    posted but still counts toward the ≥3 warnings (the summary counts it too), so
    neither the verifier nor text it reads, such as the PR description, can unblock
-   a gate. When withheld findings change the verdict, the summary lists them (file
+   a gate. When withheld findings change the verdict (with `--all-projects`, the
+   merged verdict), the summary lists them (file
    and line, title, and why each was not posted; the first 10, the rest are in the
    envelope) and the envelope records them under
    `withheld`: the engine warnings that count toward a `REQUEST_CHANGES`, or every

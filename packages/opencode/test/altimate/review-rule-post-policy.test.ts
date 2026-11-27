@@ -613,6 +613,34 @@ describe("round 4: withheld findings in the comment and the merge", () => {
     expect(merged.summary.warning).toBeGreaterThan(merged.findings.filter((f) => f.severity === "warning").length)
   })
 
+  test("--all-projects: withheld lists that do not drive the merged verdict are not kept", async () => {
+    const { mergeProjectEnvelopes } = await import("../../src/altimate/review/multi-project")
+    const { renderSummary } = await import("../../src/altimate/review/format")
+    const withheldOnly = await run({ mode: "gate", runner: threeWarnRunner, verdictAt: () => "refuted" })
+    const postedCritical = await run({ mode: "gate", runner: critRunner })
+    expect(withheldOnly.withheld?.length).toBeGreaterThan(0)
+    expect(postedCritical.idealVerdict).toBe("REQUEST_CHANGES")
+    expect(postedCritical.withheld).toBeUndefined()
+    // A project whose withheld findings moved it only to COMMENT, next to one blocking on posted findings.
+    const toComment = { ...withheldOnly, verdict: "COMMENT" as const, idealVerdict: "COMMENT" as const }
+    // A project at the merged verdict that blocks on its posted findings alone: no list is kept.
+    for (const other of [toComment, withheldOnly]) {
+      const merged = mergeProjectEnvelopes([
+        { root: "a", paths: ["a/models/marts/m.sql"], env: other },
+        { root: "b", paths: ["b/models/marts/m.sql"], env: postedCritical },
+      ])
+      expect(merged.idealVerdict).toBe("REQUEST_CHANGES")
+      expect(merged.withheld).toBeUndefined()
+      expect(renderSummary(merged, { maxChars: Infinity })).not.toContain("### Withheld rule findings")
+    }
+    // A withheld-only project below the merged verdict is left out; the one at it is kept.
+    const merged = mergeProjectEnvelopes([
+      { root: "a", paths: ["a/models/marts/m.sql"], env: withheldOnly },
+      { root: "c", paths: ["c/models/marts/m.sql"], env: { ...toComment, withheld: [{ ...withheldOnly.withheld![0], id: "below" }] } },
+    ])
+    expect(merged.withheld?.map((x) => x.id).sort()).toEqual(withheldOnly.withheld!.map((x) => x.id).sort())
+  })
+
   test("posted findings already block: the withheld ones did not change the verdict and are not listed", async () => {
     const env = await run({ mode: "gate", runner: critRunner, verdictAt: () => "refuted" })
     expect(env.verdict).toBe("REQUEST_CHANGES")

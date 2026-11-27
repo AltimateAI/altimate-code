@@ -303,7 +303,7 @@ export function mergeProjectEnvelopes(runs: ProjectRun[], coveredProjects?: stri
       })),
     },
     ai: mergeAi(runs),
-    ...mergeRuleNoise(envs),
+    ...mergeRuleNoise(envs, idealVerdict),
     generatedAt: first.generatedAt,
   }
   return signEnvelope(VerdictEnvelope.parse(merged))
@@ -314,6 +314,8 @@ export function mergeProjectEnvelopes(runs: ProjectRun[], coveredProjects?: stri
  *  so the headline counts what the verdict counts. */
 function mergedSummary(findings: VerdictEnvelope["findings"], envs: VerdictEnvelope[]): VerdictEnvelope["summary"] {
   const out = summarize(findings, envs.some((e) => e.summary.degraded))
+  // Not deduplicated across projects like `withheld` is: each changed path is assigned to exactly
+  // one project (`assignToProjects`), so no instance is counted by two projects.
   for (const e of envs) {
     const posted = summarize(e.findings, false)
     for (const sev of ["critical", "warning", "suggestion"] as const) out[sev] += Math.max(0, e.summary[sev] - posted[sev])
@@ -322,9 +324,14 @@ function mergedSummary(findings: VerdictEnvelope["findings"], envs: VerdictEnvel
 }
 
 /** Rule-noise counts summed over the projects (each present only when some project has it), and
- *  every project's withheld findings: each project lists them only when they change its verdict,
- *  so the merged verdict, the worst of the projects', stays explainable from the comment. */
-function mergeRuleNoise(envs: VerdictEnvelope[]): Pick<VerdictEnvelope, "rulesOff" | "rulesRefuted" | "rulePolicy" | "withheld"> {
+ *  the withheld findings that change the merged verdict (`idealVerdict`, the worst of the
+ *  projects'). Each project lists its withheld findings only when they change its own verdict, so
+ *  a project without a list at the merged verdict blocks (or comments) on its posted findings
+ *  alone: then no list is kept. Otherwise only the lists of projects at the merged verdict are. */
+function mergeRuleNoise(
+  envs: VerdictEnvelope[],
+  idealVerdict: Verdict,
+): Pick<VerdictEnvelope, "rulesOff" | "rulesRefuted" | "rulePolicy" | "withheld"> {
   const out: Pick<VerdictEnvelope, "rulesOff" | "rulesRefuted" | "rulePolicy" | "withheld"> = {}
   if (envs.some((e) => e.rulesOff)) {
     const off: Record<string, number> = {}
@@ -341,8 +348,12 @@ function mergeRuleNoise(envs: VerdictEnvelope[]): Pick<VerdictEnvelope, "rulesOf
         noisy_type_not_confirmed: policies.reduce((n, p) => n + p.dropped.noisy_type_not_confirmed, 0),
       },
     }
+  const atMerged = envs.filter((e) => e.idealVerdict === idealVerdict)
+  const postedReach = atMerged.some((e) => !e.withheld?.length)
   const seen = new Set<string>()
-  const withheld = envs.flatMap((e) => e.withheld ?? []).filter((w) => !seen.has(w.id) && !!seen.add(w.id))
+  const withheld = postedReach
+    ? []
+    : atMerged.flatMap((e) => e.withheld ?? []).filter((w) => !seen.has(w.id) && !!seen.add(w.id))
   if (withheld.length) out.withheld = withheld
   return out
 }
