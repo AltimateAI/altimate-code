@@ -89,6 +89,20 @@ function describeError(e: any): string {
 /** Headline of a review this bot posted (see verdictHeadline). */
 const BOT_REVIEW_RE = /(Approved|Reviewed with comments|Changes requested)\b.*\((trivial|lite|full) tier/
 
+/** The token's own login, or `undefined` for a token that cannot read `/user`
+ *  (an app or Actions token). A transient failure is retried once, then thrown. */
+async function authenticatedLogin(octo: Octokit): Promise<string | undefined> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return (await octo.rest.users.getAuthenticated()).data.login
+    } catch (e: any) {
+      const status = e?.status ?? e?.response?.status
+      if (status === 401 || status === 403 || status === 404) return undefined
+      if (attempt > 0) throw e
+    }
+  }
+}
+
 export async function postGitHubReview(
   env: VerdictEnvelope,
   target: GitHubTarget,
@@ -110,14 +124,11 @@ export async function postGitHubReview(
   // Only a summary this token's own account posted is ours to update: anyone
   // with edit rights can post the marker, and `updateComment` returns the
   // comment's original author. The account is the authenticated user (a PAT);
-  // an app/Actions token cannot read `/user`, and then only a Bot account's
-  // comment counts (a person's account is never type `Bot`).
-  let selfLogin: string | undefined
-  try {
-    selfLogin = (await octo.rest.users.getAuthenticated()).data.login
-  } catch {
-    /* app or Actions token */
-  }
+  // an app/Actions token cannot read `/user` (401/403/404), and then only a Bot
+  // account's comment counts (a person's account is never type `Bot`). Any
+  // other failure is retried once, then fails the post: guessing would create
+  // a duplicate summary and re-post every inline finding.
+  const selfLogin = await authenticatedLogin(octo)
   const prior = existing.find(
     (c) => c.body?.includes(REVIEW_MARKER) && (selfLogin ? c.user?.login === selfLogin : c.user?.type === "Bot"),
   )

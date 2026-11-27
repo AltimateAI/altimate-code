@@ -645,8 +645,10 @@ describe("postGitHubReview", () => {
       files?: Array<{ filename: string; patch?: string }>
       reviewComments?: Array<{ body: string; user?: { login: string } }>
       issueComments?: Array<{ id: number; body: string; user?: { login: string; type?: string } }>
-      /** The token's account as `/user` reports it; unset, the call fails like an app token's. */
+      /** The token's account as `/user` reports it; unset, the call fails like an app token's (403). */
       self?: string
+      /** Statuses `/user` fails with first, one per call, before answering as above. */
+      selfErrors?: number[]
       createReview?: (call: number) => unknown
     } = {},
   ) {
@@ -687,7 +689,8 @@ describe("postGitHubReview", () => {
         },
         users: {
           getAuthenticated: async () => {
-            if (!opts.self) throw new Error("Resource not accessible by integration")
+            const status = opts.selfErrors?.shift() ?? (opts.self ? undefined : 403)
+            if (status) throw Object.assign(new Error(status === 403 ? "Resource not accessible by integration" : "Bad gateway"), { status })
             return { data: { login: opts.self } }
           },
         },
@@ -881,6 +884,20 @@ describe("postGitHubReview", () => {
     })
     await postGitHubReview(env, target, own.octo)
     expect(own.summaryCalls).toEqual(["update 8"])
+  })
+
+  test("a transient `/user` failure retries once, then fails the post rather than duplicating the summary", async () => {
+    const env = buildEnvelope({ findings: [finding({ startLine: 3, title: "m: a" })], tier: "lite", mode: "comment" })
+    const mine = { issueComments: [{ id: 8, body: `${REVIEW_MARKER}\nmine`, user: { login: "local-dev", type: "User" } }], self: "local-dev" }
+    // One 502, then the PAT's own login: its summary is updated in place.
+    const once = fakeOcto({ ...mine, selfErrors: [502] })
+    await postGitHubReview(env, target, once.octo)
+    expect(once.summaryCalls).toEqual(["update 8"])
+    // Two failures: nothing is created or posted.
+    const twice = fakeOcto({ ...mine, selfErrors: [502, 503] })
+    await expect(postGitHubReview(env, target, twice.octo)).rejects.toThrow()
+    expect(twice.summaryCalls).toEqual([])
+    expect(twice.reviewCalls).toEqual([])
   })
 
   test("a deleted file gets no inline comment; a pure rename without a patch keeps its comments", async () => {
