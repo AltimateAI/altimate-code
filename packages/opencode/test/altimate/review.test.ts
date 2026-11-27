@@ -2657,6 +2657,21 @@ describe("orchestrate", () => {
     )
   })
 
+  test("a table moved to another schema: quiet as an environment change, reported when the base read that schema", async () => {
+    // One schema on each side (`analytics` → `raw_restricted`): indistinguishable
+    // from a base compiled into another environment, so not new exposure.
+    const base = "select customer_id,\n  ssn\nfrom analytics.customers"
+    const head = base.replace("analytics.customers", "raw_restricted.customers")
+    const diff = "-from analytics.customers\n+from raw_restricted.customers\n"
+    for (const { reviewers, env } of await piiRuns(head, base, diff, ["ssn"]))
+      expect({ reviewers, pii: env.findings.filter((f) => f.category === "pii_exposure") }).toEqual({ reviewers, pii: [] })
+    // The base already read `raw_restricted`: moving `customers` there is a swap.
+    const baseBoth = "select c.customer_id,\n  c.ssn\nfrom analytics.customers c\njoin raw_restricted.orders o using (customer_id)"
+    const headBoth = baseBoth.replace("analytics.customers", "raw_restricted.customers")
+    const diffBoth = "-from analytics.customers c\n+from raw_restricted.customers c\n"
+    expectReportedPii(await piiRuns(headBoth, baseBoth, diffBoth, ["ssn"]), ["ssn"], "none")
+  })
+
   test("a head column pinned to one table is new when the base read it unqualified over a join", async () => {
     // Base `ssn` over customers ⋈ spouses does not say which table it came from.
     const base = "select customer_id,\n  ssn\nfrom customers c\njoin spouses s using (customer_id)"
@@ -3161,6 +3176,27 @@ describe("orchestrate", () => {
       const undecided = await run(base)
       expect(undecided.findings.filter(isTwin).every((f) => f.severity === "warning" && f.confidence === "unknown")).toBe(true)
       expect(undecided.verdict).not.toBe("REQUEST_CHANGES")
+    }
+  })
+
+  test("without a compiled base, an added `c.ssn` over a raw base with no `ssn` still blocks", async () => {
+    for (const reviewers of [[], ["dbt_patterns"]]) {
+      const env = await runReview({
+        changedFiles: MARTS.map((path) => ({ path, status: "modified" as const, diff: "-select c.customer_id\n+select c.customer_id,\n+  c.ssn\n" })),
+        config: { ...DEFAULT_REVIEW_CONFIG, reviewers },
+        rubric: DEFAULT_RUBRIC,
+        mode: "gate",
+        runner: piiRunner(["ssn"]),
+        getContent: content(
+          "select c.customer_id,\n  c.ssn\nfrom {{ ref('customers') }} c",
+          "select c.customer_id\nfrom {{ ref('customers') }} c",
+        ),
+      })
+      expect({ reviewers, critical: env.findings.some((f) => f.category === "pii_exposure" && f.severity === "critical") }).toEqual({
+        reviewers,
+        critical: true,
+      })
+      expect({ reviewers, verdict: env.verdict }).toEqual({ reviewers, verdict: "REQUEST_CHANGES" })
     }
   })
 
