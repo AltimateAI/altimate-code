@@ -601,7 +601,7 @@ export interface FinalOutputs {
   reads: Map<string, Set<string>>
 }
 
-interface ScopeOutputs extends Omit<FinalOutputs, "passthrough"> {
+interface ScopeOutputs extends Omit<FinalOutputs, "passthrough" | "starRaw"> {
   /** `*` items, whose columns pass through unnamed (`select * from customers`). */
   stars: Array<{ branch: number; qualifier?: string }>
   /** Every item's text, and that of every scope it reads. */
