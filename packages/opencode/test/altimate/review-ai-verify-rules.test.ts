@@ -93,6 +93,8 @@ const ENV_KEYS = [
   "ALTIMATE_REVIEW_RULES_OFF",
   "ALTIMATE_REVIEW_RULE_POLICY",
   "ALTIMATE_REVIEW_AI_TEST_GAP",
+  // The 40-finding ceiling test reads it from process.env.
+  "ALTIMATE_REVIEW_AI_VERIFY_RULES_MAX_FINDINGS",
 ]
 let saved: Record<string, string | undefined> = {}
 beforeEach(() => {
