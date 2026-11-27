@@ -1112,10 +1112,36 @@ describe("dbt_cost_estimate cost", () => {
       })
     })
 
-    test("a full boundary read keeps the finished jobs it returned: a CTAS queued 23 hours and run for 2 chains into a merge past the 42 hours", async () => {
+    test("a full boundary read leaves out a run 42 hours 1 minute after the cutoff, within the longest job span plus the join gap", async () => {
       await withNow(async () => {
-        const merge = 42 * HOUR + 5 * 60_000
-        const ctas = ["t", "a@x.com", iso(T0 - 60_000), iso(T0 + 42 * HOUR + 3 * 60_000), "DONE", "CREATE_TABLE_AS_SELECT", "orders__dbt_tmp", "d"]
+        useAdapter(calls, { ...answer(rowsWithMerge(42 * HOUR + 60_000)), boundary: fullBoundaryWith([]) })
+        expect((await ask()).highest).toBeLessThanOrEqual(6.25 + 1e-9)
+      })
+    })
+
+    test("a CTAS created 42 hours 5 minutes before the cutoff that finished 7 minutes before it joins a merge a minute after it: the run is left out", async () => {
+      await withNow(async () => {
+        const edge = asOf - 30 * day
+        const lit = (jinja: string, pattern: RegExp) => Number(pattern.exec(jinja)![1])
+        const created = edge - 42 * HOUR - 5 * 60_000
+        useAdapter(calls, {
+          ...answer([row("m", edge + 60_000, edge + 120_000, "MERGE", TIB, "DONE", "d")]),
+          // An adapter consistent with the SQL: the finished CTAS is returned iff it was created after the lookback's start.
+          boundary: async (jinja) => {
+            const after = lit(jinja, /creation_time > timestamp_millis\((\d+)\) and upper\(state\) = \\?'DONE/)
+            return table(BOUNDARY_COLS, created > after ? [["t", "a@x.com", iso(created), iso(edge - 7 * 60_000), "DONE", "CREATE_TABLE_AS_SELECT", "orders__dbt_tmp", "d"]] : [])
+          },
+        })
+        const cost = await ask()
+        expect(cost.runs).toBeUndefined()
+        expect(cost.notes.join(" ")).toContain("1 run that may have started before the period read was left out.")
+      })
+    })
+
+    test("a full boundary read keeps the finished jobs it returned: a CTAS queued 23 hours and run for 2 chains into a merge past the boundary span", async () => {
+      await withNow(async () => {
+        const merge = 42 * HOUR + 20 * 60_000
+        const ctas = ["t", "a@x.com", iso(T0 - 60_000), iso(T0 + 42 * HOUR + 13 * 60_000), "DONE", "CREATE_TABLE_AS_SELECT", "orders__dbt_tmp", "d"]
         const boundary = async () =>
           table(BOUNDARY_COLS, [ctas, ...Array.from({ length: 499 }, (_, i) => [`b${i}`, `x${i}@x.com`, iso(T0 - HOUR), iso(T0 - HOUR + 60_000), "DONE", "MERGE", null, null])])
         useAdapter(calls, { ...answer(rowsWithMerge(merge)), boundary })

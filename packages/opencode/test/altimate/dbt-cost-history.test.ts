@@ -30,6 +30,7 @@ import {
   loadHistory,
   manifestPathFor,
   modelFromManifest,
+  BOUNDARY_SPAN_MS,
   MAX_JOB_SPAN_MS,
   bigqueryBoundarySql,
   boundaryWindow,
@@ -435,7 +436,7 @@ describe("run boundary", () => {
   const at = (min: number) => new Date(C + min * MIN).toISOString()
   const boundary = (...stmts: { user: string | null; start: number; end: number; tmp?: boolean }[]) => ({ cutoff: C, stmts })
 
-  test("a boundary that could not be read drops runs starting within the longest a job can be in flight (42 h) of the cutoff and keeps later ones", () => {
+  test("a boundary that could not be read drops runs starting within the boundary span (42 h 10 min) of the cutoff and keeps later ones", () => {
     const rows = [
       { ...bq("near", 0, TIB), creation_time: at(60), end_time: at(61) },
       { ...bq("far", 0, 2 * TIB), creation_time: at(3 * 24 * 60), end_time: at(3 * 24 * 60 + 1) },
@@ -446,9 +447,9 @@ describe("run boundary", () => {
     expect(cost.notes.join(" ")).toContain("1 run that may have started before the period read was left out.")
   })
 
-  test("an unreadable boundary is measured from the cutoff itself: a run exactly 42 hours after it is dropped, one a millisecond later is kept", () => {
+  test("an unreadable boundary is measured from the cutoff itself: a run exactly the boundary span after it is dropped, one a millisecond later is kept", () => {
     const at = (ms: number) => new Date(C + ms).toISOString()
-    const day = MAX_JOB_SPAN_MS
+    const day = BOUNDARY_SPAN_MS
     const run = (offset: number) =>
       priceBigquery([{ ...bq("a", 0, TIB), creation_time: at(offset), end_time: at(offset + 1000) }], undefined, "model.s.m", {}, { cutoff: C }).cost.basis
     expect(run(day)).toBe("none")
@@ -597,7 +598,7 @@ describe("boundary SQL", () => {
   test("the window is derived from the cutoff itself: the start bound reaches it, every lookback is measured from it", () => {
     expect(w).toEqual({
       startBeforeMs: CUT + 1,
-      startAfterMs: CUT - 42 * 3_600_000,
+      startAfterMs: CUT - BOUNDARY_SPAN_MS,
       liveStartAfterMs: CUT - 30 * 86_400_000,
       joinEndAtLeastMs: CUT - 60_000,
       tmpEndAtLeastMs: CUT - 600_000,
@@ -628,11 +629,13 @@ describe("boundary SQL", () => {
     const sql = bigqueryBoundarySql({ project: "p", needle, window: boundaryWindow(CUT, CUT - 5 * 86_400_000) })
     const going = "(upper(state) in ('PENDING','RUNNING') or end_time is null)"
     expect(sql).toContain(`(${going} and creation_time > timestamp_millis(${CUT - 5 * 86_400_000}))`)
-    expect(sql).toContain(`creation_time > timestamp_millis(${CUT - 42 * 3_600_000}) and upper(state) = 'DONE' and error_result is null`)
+    expect(sql).toContain(`creation_time > timestamp_millis(${CUT - BOUNDARY_SPAN_MS}) and upper(state) = 'DONE' and error_result is null`)
     expect(sql).toContain(`order by ${going} desc, creation_time desc limit 500`)
     expect(sql).toContain("end_time, state, statement_type")
     expect(sql).not.toContain("liveStart")
     expect(MAX_JOB_SPAN_MS).toBe(42 * 3_600_000)
+    // The longest a job can be in flight plus the longest join gap (a temporary CTAS to its final build, ten minutes).
+    expect(BOUNDARY_SPAN_MS).toBe(42 * 3_600_000 + 10 * 60_000)
   })
 
   test("the boundary query returns the id of each statement, so the ones already read can be excluded", () => {

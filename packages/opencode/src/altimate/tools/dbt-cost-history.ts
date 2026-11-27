@@ -195,11 +195,18 @@ where creation_time > timestamp_millis(${windowStartMs(input.asOfMs, 7)}) and cr
  *
  * The longest a job can plausibly be in flight: BigQuery times out a query that has not started after 6 hours
  * (interactive) or 24 hours (batch) in the queue, and lets one run up to 6 hours per attempt with up to three attempts
- * (18 hours), so 24 + 18 = 42 hours. It is the boundary's lookback for finished jobs, and the span after the cutoff in
- * which a run is not trusted when the boundary read is full. A job in flight longer than that (a queue timeout raised
+ * (18 hours), so 24 + 18 = 42 hours (see BOUNDARY_SPAN_MS for the window built on it). A job in flight longer than that (a queue timeout raised
  * in the project's settings) is not covered, unless it is still going: those are read from the start of the history window.
  */
 export const MAX_JOB_SPAN_MS = 42 * 3_600_000
+
+/**
+ * How far from the cutoff a statement can be and still belong to a run that begins after it: a job in flight for the
+ * longest it can be (MAX_JOB_SPAN_MS), plus the longest gap by which one job joins the next (a temporary CTAS to its final
+ * build, ten minutes; ordinary chaining is a minute). A finished job created earlier than this cannot reach a run at the
+ * cutoff, and a run starting later than this after the cutoff cannot have an unread job in it.
+ */
+export const BOUNDARY_SPAN_MS = MAX_JOB_SPAN_MS + Math.max(BQ_TMP_JOIN_MS, BQ_CHAIN_MS)
 
 /**
  * The instants a boundary query is written with, all derived from the cutoff itself. `startBeforeMs` is one
@@ -209,7 +216,7 @@ export const MAX_JOB_SPAN_MS = 42 * 3_600_000
 export type BoundaryWindow = {
   /** Statements must start before this (the cutoff plus one millisecond). */
   startBeforeMs: number
-  /** ... and after this (the longest a job can be in flight), for a job that has finished. */
+  /** ... and after this (the boundary span), for a job that has finished. */
   startAfterMs: number
   /** A job still going (not done, or with no end time yet) may have been created anywhere in the history window. */
   liveStartAfterMs: number
@@ -223,7 +230,7 @@ export function boundaryWindow(cutoffMs: number, windowStart = cutoffMs - HISTOR
   const cutoff = Math.trunc(cutoffMs)
   return {
     startBeforeMs: cutoff + 1,
-    startAfterMs: cutoff - MAX_JOB_SPAN_MS,
+    startAfterMs: cutoff - BOUNDARY_SPAN_MS,
     liveStartAfterMs: Math.trunc(windowStart),
     joinEndAtLeastMs: cutoff - BQ_CHAIN_MS,
     tmpEndAtLeastMs: cutoff - BQ_TMP_JOIN_MS,
@@ -334,7 +341,7 @@ export type Boundary = {
 }
 
 /** When the boundary read is full or its statements are unknown, runs starting this close to the cutoff are not trusted. */
-export const BOUNDARY_FALLBACK_MS = MAX_JOB_SPAN_MS
+export const BOUNDARY_FALLBACK_MS = BOUNDARY_SPAN_MS
 
 export function median(values: number[]): number {
   const s = [...values].sort((a, b) => a - b)
