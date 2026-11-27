@@ -1,6 +1,7 @@
 // altimate_change - new file: what the AI review lane does, resolved once per review
 //
-// Each switch is set by, in order: its env variable (`1` on, `0` off), the
+// Each switch is set by, in order: its env variable (`1`/`true`/`on`/`yes` on,
+// `0`/`false`/`off`/`no` off; any other value is ignored with a warning), the
 // `ai:` object in `.altimate/review.yml` (read from the base branch), then the
 // product default. `reviewPullRequest` resolves the switches and passes them
 // down; code called without them (direct callers, unit tests) reads only the
@@ -37,18 +38,28 @@ export const AI_SWITCH_DEFAULTS: AiSwitches = {
 
 type Env = Record<string, string | undefined>
 
-/** The env override for a switch: true for `1`, false for `0`, undefined otherwise. */
+const ENV_TRUE = new Set(["1", "true", "on", "yes"])
+const ENV_FALSE = new Set(["0", "false", "off", "no"])
+
+/** The env override for a switch: true for `1`/`true`/`on`/`yes`, false for `0`/`false`/`off`/`no`
+ *  (case-insensitive), undefined otherwise. */
 export function envSwitch(name: AiSwitchName, env: Env = process.env): boolean | undefined {
-  const v = env[AI_SWITCH_ENV[name]]
-  return v === "1" ? true : v === "0" ? false : undefined
+  const v = env[AI_SWITCH_ENV[name]]?.trim().toLowerCase()
+  if (v === undefined) return undefined
+  return ENV_TRUE.has(v) ? true : ENV_FALSE.has(v) ? false : undefined
 }
 
 /** Every switch for one review: env, then the `ai:` config object, then the default. */
 export function resolveAiSwitches(cfg: Pick<ReviewConfig, "ai">, env: Env = process.env): AiSwitches {
   const configured = typeof cfg.ai === "object" ? cfg.ai : {}
   const out = { ...AI_SWITCH_DEFAULTS }
-  for (const name of Object.keys(AI_SWITCH_ENV) as AiSwitchName[])
-    out[name] = envSwitch(name, env) ?? configured[name] ?? AI_SWITCH_DEFAULTS[name]
+  for (const name of Object.keys(AI_SWITCH_ENV) as AiSwitchName[]) {
+    const fromEnv = envSwitch(name, env)
+    const raw = env[AI_SWITCH_ENV[name]]
+    if (fromEnv === undefined && raw?.trim())
+      process.stderr.write(`⚠️  ignoring ${AI_SWITCH_ENV[name]}=${raw}: use 1/0 (or true/false, on/off, yes/no)\n`)
+    out[name] = fromEnv ?? configured[name] ?? AI_SWITCH_DEFAULTS[name]
+  }
   return out
 }
 

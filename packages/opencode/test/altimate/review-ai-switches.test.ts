@@ -7,8 +7,27 @@ describe("AI switches", () => {
   test("env 1/0 override, anything else defers", () => {
     expect(envSwitch("coverage", { ALTIMATE_REVIEW_AI_COVERAGE: "1" })).toBe(true)
     expect(envSwitch("coverage", { ALTIMATE_REVIEW_AI_COVERAGE: "0" })).toBe(false)
-    expect(envSwitch("coverage", { ALTIMATE_REVIEW_AI_COVERAGE: "yes" })).toBeUndefined()
+    expect(envSwitch("coverage", { ALTIMATE_REVIEW_AI_COVERAGE: "maybe" })).toBeUndefined()
+    expect(envSwitch("coverage", { ALTIMATE_REVIEW_AI_COVERAGE: "" })).toBeUndefined()
     expect(envSwitch("coverage", {})).toBeUndefined()
+  })
+
+  test("common boolean spellings are accepted, so `=false` still turns a switch off", () => {
+    for (const v of ["true", "TRUE", "on", "yes", " 1 "]) expect(envSwitch("verify", { ALTIMATE_REVIEW_AI_VERIFY: v })).toBe(true)
+    for (const v of ["false", "False", "off", "no", "0"]) expect(envSwitch("verify", { ALTIMATE_REVIEW_AI_VERIFY: v })).toBe(false)
+    expect(resolveAiSwitches({ ai: true }, { ALTIMATE_REVIEW_AI_VERIFY: "false" }).verify).toBe(false)
+  })
+
+  test("a value that is not a boolean is ignored with a warning naming the variable", () => {
+    const write0 = process.stderr.write
+    let err = ""
+    ;(process.stderr as any).write = (s: string) => ((err += s), true)
+    try {
+      expect(resolveAiSwitches({ ai: true }, { ALTIMATE_REVIEW_AI_VERIFY: "disabled" }).verify).toBe(true)
+    } finally {
+      ;(process.stderr as any).write = write0
+    }
+    expect(err).toContain("ALTIMATE_REVIEW_AI_VERIFY=disabled")
   })
 
   test("env wins over config, config over the default", () => {

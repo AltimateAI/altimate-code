@@ -63,11 +63,12 @@ const FAKE_PW = ["SECRET", "123"].join("")
 describe("wiring", () => {
   afterEach(() => mock.restore())
 
-  test("without resolved switches only ALTIMATE_REVIEW_AI_VERIFY=1 turns the verifier on", () => {
+  test("without resolved switches only an on value of ALTIMATE_REVIEW_AI_VERIFY turns the verifier on", () => {
     expect(switchOn("verify", undefined, {})).toBe(false)
     expect(switchOn("verify", undefined, { ALTIMATE_REVIEW_AI_VERIFY: "0" })).toBe(false)
-    expect(switchOn("verify", undefined, { ALTIMATE_REVIEW_AI_VERIFY: "true" })).toBe(false)
+    expect(switchOn("verify", undefined, { ALTIMATE_REVIEW_AI_VERIFY: "maybe" })).toBe(false)
     expect(switchOn("verify", undefined, { ALTIMATE_REVIEW_AI_VERIFY: "1" })).toBe(true)
+    expect(switchOn("verify", undefined, { ALTIMATE_REVIEW_AI_VERIFY: "true" })).toBe(true)
   })
 
   test("readStreamStep keeps the SDK's tool calls and response messages for tools without execute", async () => {
