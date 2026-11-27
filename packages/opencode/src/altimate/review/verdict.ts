@@ -439,6 +439,12 @@ export function errorReason(err: unknown, max = 200): string {
 /** Prefix of the `scope.unverified` reason for a file whose review threw. */
 export const FAILED_FILE_REASON = "review failed for this file"
 
+/** Whether a `scope.notReviewed` reason marks a file outside the dbt project: one project's
+ *  `outside the dbt project (<root>)` (run.ts) or the merge's `outside the dbt projects reviewed`. */
+export function isOutsideProjectReason(reason: string): boolean {
+  return /^outside the dbt project/.test(reason)
+}
+
 /** True when some check did not run: an engine call failed, a file's review
  *  threw, a check abstained on a model, or a model had no compiled head SQL (its
  *  engine and PII checks were skipped). Missing findings then mean "not

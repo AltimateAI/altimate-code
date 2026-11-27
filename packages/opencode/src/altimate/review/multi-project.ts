@@ -3,7 +3,7 @@ import { realpath } from "node:fs/promises"
 import { createHash } from "node:crypto"
 import { collectChangedFiles, gitRepoRoot, listFilesAt, listWorkingTreeFiles, resolveReviewBase } from "./git"
 import { reviewPullRequest, type ReviewPullRequestOptions } from "./run"
-import { applyMode, signEnvelope, summarize, VerdictEnvelope, type RiskTier, type Verdict } from "./verdict"
+import { applyMode, isOutsideProjectReason, signEnvelope, summarize, VerdictEnvelope, type RiskTier, type Verdict } from "./verdict"
 import type { ChangedFile } from "./diff-filter"
 import { aiDryRunEnabled } from "./ai-review"
 
@@ -29,7 +29,6 @@ const AI_STATE_RANK: Record<AiStatus["state"], number> = { skipped: 0, ok: 1, ti
 const VERIFIER_STATE_RANK: Record<VerifierStatus["state"], number> = { skipped: 0, ok: 1, budget: 2, timeout: 3, error: 4 }
 /** Most discarded findings kept on the merged verifier record (as on one project's). */
 const VERIFIER_DROPPED_MAX = 20
-const OUTSIDE_PROJECT_RE = /^outside the dbt project/
 /** Reason for a file outside every reviewed project (the projects are listed in `scope.projects`). */
 const OUTSIDE_ALL = "outside the dbt projects reviewed"
 
@@ -226,7 +225,7 @@ export function mergeProjectEnvelopes(runs: ProjectRun[], coveredProjects?: stri
   // path; that project lists the new path as outside, so the path counts only when a lane reviewed it.
   const aiReviewedOutside = [...new Set(envs.flatMap((e) => e.scope?.aiReviewedOutside ?? []))]
   const listedOutside = (e: VerdictEnvelope) =>
-    new Set((e.scope?.notReviewed ?? []).filter((n) => OUTSIDE_PROJECT_RE.test(n.reason)).map((n) => n.path))
+    new Set((e.scope?.notReviewed ?? []).filter((n) => isOutsideProjectReason(n.reason)).map((n) => n.path))
   const reviewed = new Set([
     ...runs.flatMap((r) => {
       const outside = listedOutside(r.env)
@@ -238,7 +237,7 @@ export function mergeProjectEnvelopes(runs: ProjectRun[], coveredProjects?: stri
   const seenEntry = new Set<string>()
   for (const e of envs) {
     for (const n of e.scope?.notReviewed ?? []) {
-      const outside = OUTSIDE_PROJECT_RE.test(n.reason)
+      const outside = isOutsideProjectReason(n.reason)
       if (outside && reviewed.has(n.path)) continue
       const key = outside ? `outside\0${n.path}` : `${n.path}\0${n.reason}`
       if (seenEntry.has(key)) continue
@@ -246,7 +245,7 @@ export function mergeProjectEnvelopes(runs: ProjectRun[], coveredProjects?: stri
       notReviewed.push(outside ? { path: n.path, reason: OUTSIDE_ALL } : n)
     }
   }
-  const outsideCount = notReviewed.filter((n) => OUTSIDE_PROJECT_RE.test(n.reason)).length
+  const outsideCount = notReviewed.filter((n) => isOutsideProjectReason(n.reason)).length
   const movedCount = envs.reduce((s, e) => s + (e.scope?.movedUnchangedFiles ?? 0), 0)
   const unverified = envs.flatMap((e) => e.scope?.unverified ?? [])
 

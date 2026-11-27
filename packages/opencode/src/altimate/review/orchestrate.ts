@@ -35,6 +35,7 @@ import {
   FAILED_FILE_REASON,
   buildEnvelope,
   errorReason,
+  isOutsideProjectReason,
   signEnvelope,
 } from "./verdict"
 import { detectMacroPatterns, detectModelPatterns, detectSchemaYmlPatterns, splitDiff } from "./dbt-patterns"
@@ -2846,7 +2847,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // `outOfScopeFiles` drops only the reviewed files it counted (listed as outside the project).
   const reviewedCountedOutside = new Set(
     (input.scope?.notReviewed ?? [])
-      .filter((n) => aiReviewedSet.has(n.path) && /^outside the dbt project/.test(n.reason))
+      .filter((n) => aiReviewedSet.has(n.path) && isOutsideProjectReason(n.reason))
       .map((n) => n.path),
   ).size
   const ledger: NotReviewed[] = [

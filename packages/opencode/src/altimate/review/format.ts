@@ -1,5 +1,5 @@
 import { type Finding, type Severity, type Confidence, SEVERITY_ORDER, blankNames, groupKeyTitle, verifierDemoted } from "./finding"
-import { type VerdictEnvelope, type PostingPolicy, DEFAULT_POSTING_POLICY } from "./verdict"
+import { type VerdictEnvelope, type PostingPolicy, DEFAULT_POSTING_POLICY, isOutsideProjectReason } from "./verdict"
 
 /**
  * Render a verdict envelope for humans (PR summary markdown) and for the VCS
@@ -279,7 +279,7 @@ export function coverageNotes(env: VerdictEnvelope): string[] {
   const ledger = notReviewedLedger(env)
   const listed = new Set(ledger.map((e) => e.path))
   const scopePaths = env.scope?.notReviewed ?? []
-  if (env.scope?.outOfScopeFiles && !scopePaths.some((e) => /^outside the dbt project/.test(e.reason) && listed.has(e.path)))
+  if (env.scope?.outOfScopeFiles && !scopePaths.some((e) => isOutsideProjectReason(e.reason) && listed.has(e.path)))
     notes.push(`${env.scope.outOfScopeFiles} changed file(s) outside the dbt project were not reviewed.`)
   if (env.scope?.movedUnchangedFiles && !scopePaths.some((e) => /^moved without edits/.test(e.reason) && listed.has(e.path)))
     notes.push(
