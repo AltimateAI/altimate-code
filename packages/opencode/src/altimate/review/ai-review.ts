@@ -928,9 +928,9 @@ function buildBatchMessage(
 /**
  * The finder's system prompt: the compiled core's, or the text of the file named by
  * `ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE`, which replaces it. An unreadable or empty file is
- * an error, never a silent fallback to the core prompt. The path must be absolute and must not
- * resolve (symlinks followed) inside the review's repository or the process's work tree (in CI
- * the PR checkout), so a PR cannot rewrite the prompt (`trustedFilePath`).
+ * an error, never a silent fallback to the core prompt. The path must be absolute and must
+ * neither resolve (symlinks followed) nor be named inside the review's repository or the
+ * process's work tree (in CI the PR checkout), so a PR cannot choose the prompt (`trustedFilePath`).
  */
 export async function finderSystemPrompt(
   env: Record<string, string | undefined> = process.env,

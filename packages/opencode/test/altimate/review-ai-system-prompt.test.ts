@@ -80,6 +80,44 @@ describe("ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE", () => {
     }
   })
 
+  test("a path inside the work tree is refused even when it is a symlink to a file outside", async () => {
+    await using repo = await tmpdir({ git: true })
+    await using outside = await tmpdir()
+    const target = path.join(outside.path, "p.md")
+    await fs.writeFile(target, "RUNNER FILE")
+    // The PR commits the configured path as a link to a file outside the checkout.
+    const fileLink = path.join(repo.path, "review-prompt.md")
+    await fs.symlink(target, fileLink)
+    // ...or links a directory on the configured path to a directory outside.
+    const dirLink = path.join(repo.path, "prompts")
+    await fs.symlink(outside.path, dirLink)
+    for (const file of [fileLink, path.join(dirLink, "p.md")])
+      await expect(finderSystemPrompt({ ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE: file }, repo.path)).rejects.toThrow("inside the git work tree")
+  })
+
+  test("a nested checkout does not hide the enclosing work tree", async () => {
+    await using repo = await tmpdir({ git: true })
+    const nested = path.join(repo.path, "vendor", "dbt")
+    await fs.mkdir(path.join(nested, ".git"), { recursive: true })
+    const file = path.join(repo.path, "review-prompt.md")
+    await fs.writeFile(file, "PR PROMPT")
+    const cwd = process.cwd()
+    process.chdir(nested)
+    try {
+      await expect(finderSystemPrompt({ ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE: file }, nested)).rejects.toThrow("inside the git work tree")
+    } finally {
+      process.chdir(cwd)
+    }
+  })
+
+  test("a missing file is an error naming the variable", async () => {
+    await using tmp = await tmpdir()
+    await using repo = await tmpdir({ git: true })
+    await expect(
+      finderSystemPrompt({ ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE: path.join(tmp.path, "none.txt") }, repo.path),
+    ).rejects.toThrow("ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE")
+  })
+
   test("runReview hands the lane the review's repository", async () => {
     const { runReview } = await import("../../src/altimate/review/orchestrate")
     const { DEFAULT_REVIEW_CONFIG } = await import("../../src/altimate/review/config")
