@@ -640,9 +640,11 @@ const splitRef = (ref: string) => {
 /**
  * `ref` is one of the `exposed` source columns. An unqualified column read over
  * several tables (`customers|orders.email`, see `rawColumnExposures`) comes from
- * exactly one of them (the query would be ambiguous otherwise), so it matches a
- * single-table ref to one of its members, and the reverse. Two combined refs
- * match only when equal.
+ * exactly one of them (the query would be ambiguous otherwise), so it is
+ * covered by a single-table ref to one of its members. The reverse is not: a
+ * base combined ref does not say which table the column came from, so a head
+ * read pinned to one of them (`s.ssn`) may be new. Two combined refs match only
+ * when equal.
  */
 export function refCovered(ref: string, exposed: Set<string>): boolean {
   if (exposed.has(ref)) return true
@@ -651,7 +653,6 @@ export function refCovered(ref: string, exposed: Set<string>): boolean {
     const x = splitRef(e)
     if (x.column !== r.column) continue
     if (r.tables.length > 1 && x.tables.length === 1 && r.tables.includes(x.tables[0])) return true
-    if (r.tables.length === 1 && x.tables.length > 1 && x.tables.includes(r.tables[0])) return true
   }
   return false
 }

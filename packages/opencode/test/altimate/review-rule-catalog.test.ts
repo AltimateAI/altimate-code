@@ -185,7 +185,8 @@ describe("rawColumnExposures", () => {
   })
   test("`refCovered` matches an unqualified column over a join to its single-table ref", () => {
     expect(refCovered("customers|orders.email", new Set(["customers.email"]))).toBe(true)
-    expect(refCovered("customers.email", new Set(["customers|orders.email"]))).toBe(true)
+    // The reverse is not covered: the base never said which table it read.
+    expect(refCovered("customers.email", new Set(["customers|orders.email"]))).toBe(false)
     expect(refCovered("customers|orders.email", new Set(["spouses.email"]))).toBe(false)
     expect(refCovered("customers|orders.email", new Set(["customers.ssn"]))).toBe(false)
     expect(refCovered("a|b.email", new Set(["b|c.email"]))).toBe(false)

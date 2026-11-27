@@ -2549,6 +2549,13 @@ describe("orchestrate", () => {
     expect(broad.map((f) => (f.evidence?.result as any)?.columns)).toEqual([["email", "ssn"], ["email", "ssn"], ["email", "ssn"]])
   })
 
+  test("a head column pinned to one table is new when the base read it unqualified over a join", async () => {
+    // Base `ssn` over customers ⋈ spouses does not say which table it came from.
+    const base = "select customer_id,\n  ssn\nfrom customers c\njoin spouses s using (customer_id)"
+    const head = base.replace("  ssn\n", "  s.ssn\n")
+    expectReportedPii(await piiRuns(head, base, "-  ssn\n+  s.ssn\n", ["ssn"]), ["ssn"])
+  })
+
   test("adding a join does not make an unqualified PII column look new", async () => {
     const base = "select customer_id,\n  email\nfrom customers"
     const head = "select customer_id,\n  email\nfrom customers\njoin orders using (customer_id)"
