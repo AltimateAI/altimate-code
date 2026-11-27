@@ -475,7 +475,8 @@ describe("--all-projects: the outside-project handoff follows what a project act
       await write(root, "airflow/load.py", "print(2)\n")
       git(root, "add", "-A")
       git(root, "commit", "-q", "-m", "pr")
-      for (const k of ["GITHUB_EVENT_PATH", "GITHUB_BASE_REF", "CI_MERGE_REQUEST_TARGET_BRANCH_NAME", "ALTIMATE_REVIEW_AI_PYTHON_FILES"])
+      // Dry run returns before replay, so an exported ALTIMATE_REVIEW_AI_DRYRUN would skip the lane.
+      for (const k of ["GITHUB_EVENT_PATH", "GITHUB_BASE_REF", "CI_MERGE_REQUEST_TARGET_BRANCH_NAME", "ALTIMATE_REVIEW_AI_PYTHON_FILES", "ALTIMATE_REVIEW_AI_DRYRUN"])
         delete process.env[k]
       // A replayed lane answers (`state: ok`) without a model call; the verifier is off.
       const replay = path.join(root, "..", path.basename(root) + "-replay.json")
