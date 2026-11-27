@@ -296,6 +296,8 @@ export interface OrchestrateInput {
   aiSwitches?: Partial<AiSwitches>
   /** Changed files outside the dbt project, for the AI lane only (`pythonFiles` switch). */
   aiOutsideFiles?: ChangedFile[]
+  /** The review's repository root (`--cwd`'s git root); env-named files must be outside it. */
+  reviewDir?: string
   /** Fixed-string search over the dbt project at head, for the verifier. */
   grepProject?: AiVerifyEvidence["grepProject"]
   /** Every file the PR changes (repo-relative), including files outside the dbt project; the verifier may read them. */
@@ -2798,6 +2800,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
         ...(evidence ? { evidence } : {}),
         ...(input.aiSwitches ? { switches: input.aiSwitches } : {}),
         ...(otherChecked.size ? { checkedPaths: [...otherChecked] } : {}),
+        ...(input.reviewDir ? { reviewDir: input.reviewDir } : {}),
       })
       const aiFindings = Array.isArray(res) ? res : res.findings
       if (Array.isArray(res)) aiStatus = { state: "ok" }

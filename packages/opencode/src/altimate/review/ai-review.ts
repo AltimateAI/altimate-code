@@ -7,9 +7,8 @@ import { MessageID, SessionID } from "@/session/schema"
 import { Log } from "@/altimate/util/log"
 import { redactSecrets } from "@/installation"
 import { Dispatcher } from "../native"
-import { readFile, realpath } from "node:fs/promises"
-import path from "node:path"
-import { gitRepoRoot } from "./git"
+import { readFile } from "node:fs/promises"
+import { trustedFilePath } from "./trusted-file"
 import { type Finding, type ReviewCategory, type Severity, makeFinding, ruleId } from "./finding"
 import { readStreamText } from "../llm/stream-text"
 import { type AiVerifyEvidence, type VerifierStatus, runAiVerify } from "./ai-verify"
@@ -749,6 +748,8 @@ export interface AiReviewInput {
   /** Files of an AI-only kind (other/analysis) a deterministic lane also checked: listed in
    *  `unsent` when the quotas keep them from the model, since the coverage ledger does not list them. */
   checkedPaths?: string[]
+  /** The review's repository (`--cwd`): files named by env variables must be outside it. */
+  reviewDir?: string
 }
 
 /** What happened in the advisory lane, reported on the envelope and in the comment. */
@@ -928,31 +929,22 @@ function buildBatchMessage(
  * The finder's system prompt: the compiled core's, or the text of the file named by
  * `ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE`, which replaces it. An unreadable or empty file is
  * an error, never a silent fallback to the core prompt. The path must be absolute and must not
- * resolve (symlinks followed) inside the git work tree of `cwd`: in CI that is the PR checkout,
- * so a file there would let the PR rewrite the prompt.
+ * resolve (symlinks followed) inside the review's repository or the process's work tree (in CI
+ * the PR checkout), so a PR cannot rewrite the prompt (`trustedFilePath`).
  */
 export async function finderSystemPrompt(
   env: Record<string, string | undefined> = process.env,
-  cwd: string = process.cwd(),
+  reviewDir?: string,
 ): Promise<string | undefined> {
   const file = env.ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE
   if (file) {
-    if (!path.isAbsolute(file)) throw new Error("ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE must be an absolute path outside the repository")
-    const real = await realpath(file)
-    const tree = await gitRepoRoot(cwd)
-    if (tree && isInside(real, await realpath(tree)))
-      throw new Error("ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE is inside the git work tree; place it outside the checkout")
+    const real = trustedFilePath("ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE", file, [reviewDir])
     const text = await readFile(real, "utf8")
     if (!text.trim()) throw new Error("ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE is empty")
     return text
   }
   const promptRes = await Dispatcher.call("altimate_core.review_ai_prompt", {})
   return ((promptRes.data ?? {}) as Record<string, unknown>).prompt as string | undefined
-}
-
-function isInside(p: string, dir: string): boolean {
-  const rel = path.relative(dir, p)
-  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel))
 }
 
 /** What the lane would send: files, the unsent rest, one message per call, and a record per file. */
@@ -1025,7 +1017,7 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
   let modelLabel: string | undefined
   try {
     // The file named by ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE when set, else the compiled core's prompt.
-    const corePrompt = await finderSystemPrompt()
+    const corePrompt = await finderSystemPrompt(process.env, input.reviewDir)
     if (!corePrompt) return done([], { state: "error", reason: "the core reviewer prompt is unavailable" })
     const testGap = aiTestGapEnabled()
     const system = testGap ? corePrompt + TEST_GAP_INSTRUCTION : corePrompt

@@ -644,8 +644,9 @@ across 12 dialects all plan; anything still unrecognized stays *undecidable*, ne
    warning. `ai: false` turns the whole lane off.
    `ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE=<file>` replaces the finder's system
    prompt. The path must be absolute and outside the repository checkout (for
-   example under `$RUNNER_TEMP`); a file inside the git work tree, or a symlink to
-   one, is refused, since a PR could change it.
+   example under `$RUNNER_TEMP`); a file inside the reviewed repository or the
+   current directory's git work tree, or a symlink to one, is refused, since a PR
+   could change it, and so is any file when neither resolves to a work tree.
 4. **Rubric → verdict.** Findings map to a verdict by a versioned rubric (data,
    not prompt): any blocking-category `critical` → `REQUEST_CHANGES`; ≥3 warnings
    → risk pattern → `REQUEST_CHANGES`; only suggestions → `COMMENT`; nothing →

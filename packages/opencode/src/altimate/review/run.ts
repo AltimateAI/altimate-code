@@ -509,6 +509,7 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     aiVerify: aiSwitches.verify,
     aiSwitches,
     ...(aiOutsideFiles.length ? { aiOutsideFiles } : {}),
+    reviewDir: gitRoot,
     grepProject: (pattern, glob) => {
       // The project's dbt directories (repo-relative), or one glob inside the project.
       const dirs = layout
