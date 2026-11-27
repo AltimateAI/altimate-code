@@ -394,6 +394,31 @@ describe("summary grouping and budget", () => {
     expect((body.match(/`/g) ?? []).length % 2).toBe(0)
   })
 
+  test("a grouped body shortened inside a multi-backtick code span cuts before the span's opening run", () => {
+    // A span closes only on a run of its own length; a single backtick inside a
+    // double-backtick span does not close it.
+    const spans = [
+      `\`\`\`${Array.from({ length: 30 }, (_, k) => `part${k}`).join(" ")}\`\`\``,
+      `\`\`${Array.from({ length: 15 }, (_, k) => `part${k}`).join(" ")} \` ${Array.from({ length: 15 }, (_, k) => `more${k}`).join(" ")}\`\``,
+    ]
+    for (const span of spans) {
+      const fs = Array.from({ length: 3 }, (_, i) =>
+        finding({
+          severity: "warning",
+          category: "sql_quality",
+          model: `model_${i}`,
+          file: `models/model_${i}.sql`,
+          title: `model_${i}: unsupported \`fn_${i}\``,
+          body: `${"word ".repeat(55)}${span} is unsupported.`,
+        }),
+      )
+      const md = renderSummary(buildEnvelope({ findings: fs, tier: "lite", mode: "comment" }))
+      const start = md.indexOf("- **")
+      const body = md.slice(start).split("\n")[1]
+      expect(body.trim()).toBe(`${"word ".repeat(55).trim()}…`)
+    }
+  })
+
   test("a critical that does not fit stops the listing: no later, shorter finding jumps ahead of it", () => {
     // Twelve criticals with long bodies (each clipped, still ~700 chars) cannot
     // all fit; the short suggestions after them must not be listed instead.

@@ -230,14 +230,23 @@ const BULLET_TITLE_MAX = 200
 // BULLET_BODY_MAX, so a grouped bullet is no larger than a single one.
 const BULLET_NAMES_MAX = 200
 
-/** `clip`, never ending inside a code span: an unpaired backtick is cut back.
- *  Used for titles and for a grouped bullet's shortened body. */
+/** `clip`, never ending inside a code span: a span left open is cut back to
+ *  its opening run. A span opens on a run of backticks and closes on the next
+ *  run of the same length (a double-backtick span may hold a single backtick),
+ *  and a run the cut splits is dropped whole. Used for titles and for a grouped
+ *  bullet's shortened body. */
 function clipTitle(text: string, max: number): string {
   const clipped = clip(text, max)
   if (clipped === text) return clipped
-  const body = clipped.slice(0, -1)
-  const ticks = (body.match(/`/g) ?? []).length
-  return ticks % 2 ? `${body.slice(0, body.lastIndexOf("`")).trimEnd()}…` : clipped
+  let body = clipped.slice(0, -1)
+  if (body.endsWith("`") && text[body.length] === "`") body = body.replace(/`+$/, "")
+  let open: { len: number; at: number } | undefined
+  for (const m of body.matchAll(/`+/g)) {
+    if (!open) open = { len: m[0].length, at: m.index }
+    else if (m[0].length === open.len) open = undefined
+  }
+  if (open) body = body.slice(0, open.at)
+  return body === clipped.slice(0, -1) ? clipped : `${body.trimEnd()}…`
 }
 
 /** Render findings of one severity as bullets. With `group`, findings that say
