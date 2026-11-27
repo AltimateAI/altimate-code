@@ -191,6 +191,43 @@ describe("ALTIMATE_REVIEW_AI_OTHER_FILES: orchestrator file list", () => {
   })
 })
 
+describe("other files over their quota are reported somewhere", () => {
+  test("a YAML file a rule lane checked but the quota kept from the model is in ai.unsent; an unchecked one in the ledger", async () => {
+    const { runAiReview } = await import("../../src/altimate/review/ai-review")
+    const saved = process.env.ALTIMATE_REVIEW_AI_DRYRUN
+    process.env.ALTIMATE_REVIEW_AI_DRYRUN = "1"
+    try {
+      const ymls = Array.from({ length: 10 }, (_, i) => mod(`integration_tests/c${i}.yml`))
+      const analyses = Array.from({ length: 10 }, (_, i) => mod(`analyses/a${i}.sql`))
+      const env = await runReview({
+        changedFiles: [mod("models/marts/m.sql"), ...ymls, ...analyses],
+        config: { ...DEFAULT_REVIEW_CONFIG },
+        rubric: DEFAULT_RUBRIC,
+        mode: "comment",
+        runner,
+        forceTier: "full",
+        aiSwitches: { coverage: true, otherFiles: true },
+        getContent: async (f, side) => (side === "old" ? "a: 1\n" : "a: 2\n"),
+        generatedAt: "2026-11-27T00:00:00Z",
+        aiReview: runAiReview,
+      })
+      const sent = new Set((env.ai?.input ?? []).map((r) => r.path))
+      const unsent = new Set(env.ai?.unsent ?? [])
+      const ledger = new Set((env.scope?.notReviewed ?? []).map((n) => n.path))
+      for (const f of [...ymls, ...analyses]) {
+        if (sent.has(f.path)) continue
+        // Every changed file the model did not see is reported exactly once.
+        expect([unsent.has(f.path), ledger.has(f.path)].filter(Boolean).length).toBe(1)
+      }
+      expect(ymls.some((f) => unsent.has(f.path))).toBe(true)
+      expect(analyses.some((f) => ledger.has(f.path))).toBe(true)
+    } finally {
+      if (saved === undefined) delete process.env.ALTIMATE_REVIEW_AI_DRYRUN
+      else process.env.ALTIMATE_REVIEW_AI_DRYRUN = saved
+    }
+  })
+})
+
 describe("ALTIMATE_REVIEW_AI_OTHER_FILES: planner", () => {
   const file = (path: string, kind: string, lines = 1, status = "modified"): AiReviewFile => ({
     path,

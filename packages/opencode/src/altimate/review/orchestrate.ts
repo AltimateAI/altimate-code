@@ -2797,6 +2797,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
         prFiles,
         ...(evidence ? { evidence } : {}),
         ...(input.aiSwitches ? { switches: input.aiSwitches } : {}),
+        ...(otherChecked.size ? { checkedPaths: [...otherChecked] } : {}),
       })
       const aiFindings = Array.isArray(res) ? res : res.findings
       if (Array.isArray(res)) aiStatus = { state: "ok" }

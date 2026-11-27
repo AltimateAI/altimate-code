@@ -746,6 +746,9 @@ export interface AiReviewInput {
   prFiles?: string[]
   /** The review's resolved AI switches; without them each switch reads only its env variable. */
   switches?: Partial<AiSwitches>
+  /** Files of an AI-only kind (other/analysis) a deterministic lane also checked: listed in
+   *  `unsent` when the quotas keep them from the model, since the coverage ledger does not list them. */
+  checkedPaths?: string[]
 }
 
 /** What happened in the advisory lane, reported on the envelope and in the comment. */
@@ -773,7 +776,8 @@ export interface AiLaneStatus {
   /** What each file sent carried; recorded under coverage, context cards or dry run. */
   input?: AiInputRecord[]
   /** Sendable files left out by the coverage quotas (they still went through the deterministic lanes).
-   *  Files only the AI lane reads (other/analysis, Python) are not listed: the coverage ledger has them. */
+   *  Files only the AI lane reads (other/analysis, Python) are not listed, unless a deterministic
+   *  lane checked them (`checkedPaths`): the coverage ledger has the rest. */
   unsent?: string[]
   /** Files sent only in calls that failed while others answered (state `ok`): not reviewed by the lane. */
   failedFiles?: string[]
@@ -1001,9 +1005,10 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
   const plan = planAiInput(input)
   const { files, budget } = plan
   const dryRun = aiDryRunEnabled()
-  // Recorded only when an opt-in switch changed or inspects the input, so the default envelope is unchanged.
-  // Files only the AI lane reads are not "checked by the deterministic lanes"; the ledger lists them.
-  const unsent = plan.unsent.filter((f) => !AI_ONLY_KINDS.has(f.kind ?? "")).map((f) => f.path)
+  // Recorded under coverage, focused batching, context cards or dry run (all on by default).
+  // Files only the AI lane reads are listed by the coverage ledger, unless a deterministic lane checked them.
+  const checked = new Set(input.checkedPaths ?? [])
+  const unsent = plan.unsent.filter((f) => !AI_ONLY_KINDS.has(f.kind ?? "") || checked.has(f.path)).map((f) => f.path)
   const recorded: Pick<AiLaneStatus, "input" | "unsent"> = {
     ...(budget.coverage || dryRun || plan.focused || plan.input.some((r) => r.card) ? { input: plan.input } : {}),
     ...(budget.coverage && unsent.length ? { unsent } : {}),
