@@ -140,7 +140,8 @@ describe("dropRulesOff", () => {
   test("a finding's rule id matches the list in either spelling", () => {
     const r = dropRulesOff([finding("dbt_patterns:self_join")], new Set(["dbt-patterns:self-join"]))
     expect(r.kept).toEqual([])
-    expect(r.dropped).toEqual({ "dbt_patterns:self_join": 1 })
+    // Counted under the normalized id, so two spellings of one rule add up.
+    expect(r.dropped).toEqual({ "dbt-patterns:self-join": 1 })
   })
 })
 
@@ -253,6 +254,23 @@ describe("orchestrator: rule types off", () => {
     const withList = await run({ ai: false, rulesOff: new Set([target]) })
     expect(withList).toEqual(base)
     expect(withList.rulesOff).toBeUndefined()
+  })
+})
+
+describe("round 2: rule types off", () => {
+  test("counts are keyed by the normalized rule id, so two spellings add up", () => {
+    const a = finding("dbt_patterns:self_join", "dbt-patterns", 1)
+    const b = finding("dbt-patterns:self-join", "dbt-patterns", 2)
+    expect(dropRulesOff([a, b], new Set(["dbt-patterns:self-join"])).dropped).toEqual({ "dbt-patterns:self-join": 2 })
+  })
+
+  test("ALTIMATE_REVIEW_RULES_OFF=<file> must be absolute and outside the git work tree", async () => {
+    const on = { rulesOff: true }
+    expect(() => resolveRulesOff({ ai: true }, on, { ALTIMATE_REVIEW_RULES_OFF: "rules_off.json" })).toThrow("absolute path")
+    await using repo = await tmpdir({ git: true })
+    const inside = join(repo.path, "rules_off.json")
+    writeFileSync(inside, '["a:b"]')
+    expect(() => resolveRulesOff({ ai: true }, on, { ALTIMATE_REVIEW_RULES_OFF: inside }, repo.path)).toThrow("inside the git work tree")
   })
 })
 

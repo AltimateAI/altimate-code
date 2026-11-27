@@ -10,7 +10,8 @@
 // `ai.rulesOff: false` or `ALTIMATE_REVIEW_RULES_OFF=0|off|false` keeps every type;
 // `ai.rulesOn: [ids]` keeps single types; `ALTIMATE_REVIEW_RULES_OFF=<path>` replaces the
 // list with a JSON list of rule ids. Rule ids compare in one spelling (`normalizeRuleId`).
-import { readFileSync } from "node:fs"
+import { existsSync, readFileSync, realpathSync } from "node:fs"
+import { dirname, isAbsolute, join, relative } from "node:path"
 import { type Finding, findingOrigin, normalizeRuleId } from "./finding"
 import type { ReviewConfig } from "./config"
 import type { AiSwitches } from "./ai-switches"
@@ -28,6 +29,27 @@ export function rulesOffEnv(v: string | undefined): { on?: boolean; file?: strin
   if (/^(0|off|false)$/i.test(t)) return { on: false }
   if (/[\\/]/.test(t) || /\.json$/i.test(t)) return { on: true, file: t }
   return {}
+}
+
+/** The git work tree containing `dir` (the nearest ancestor with a `.git` entry), realpath'd; undefined outside one. */
+function workTreeOf(dir: string): string | undefined {
+  let d: string
+  try {
+    d = realpathSync(dir)
+  } catch {
+    return undefined
+  }
+  for (;;) {
+    if (existsSync(join(d, ".git"))) return d
+    const up = dirname(d)
+    if (up === d) return undefined
+    d = up
+  }
+}
+
+function isInsideDir(p: string, dir: string): boolean {
+  const rel = relative(dir, p)
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))
 }
 
 export const NOISY_RULES_OFF: readonly string[] = [
@@ -78,11 +100,24 @@ export function resolveRulesOff(
   cfg: Pick<ReviewConfig, "ai">,
   switches: Pick<AiSwitches, "rulesOff">,
   env: Record<string, string | undefined> = process.env,
+  cwd: string = process.cwd(),
 ): Set<string> | undefined {
   if (!switches.rulesOff) return undefined
   const { file } = rulesOffEnv(env.ALTIMATE_REVIEW_RULES_OFF)
   let list: readonly string[] = NOISY_RULES_OFF
   if (file) {
+    // The list decides which rule findings are posted: a file in the PR checkout would let a PR choose.
+    if (!isAbsolute(file)) throw new Error("ALTIMATE_REVIEW_RULES_OFF must name an absolute path outside the repository")
+    const tree = workTreeOf(cwd)
+    const real = (() => {
+      try {
+        return realpathSync(file)
+      } catch {
+        return file
+      }
+    })()
+    if (tree && isInsideDir(real, tree))
+      throw new Error(`ALTIMATE_REVIEW_RULES_OFF: the rule list ${file} is inside the git work tree; place it outside the checkout`)
     // Synchronous: read once per review, before it starts, from a synchronous resolver; a small local file.
     let parsed: unknown
     try {
@@ -108,8 +143,10 @@ export function dropRulesOff(findings: Finding[], off: Set<string> | undefined):
   if (!off?.size) return { kept: findings, dropped }
   const ids = new Set([...off].map(normalizeRuleId))
   const kept = findings.filter((f) => {
-    if (!f.rule || !ids.has(normalizeRuleId(f.rule)) || findingOrigin(f) === "ai" || f.severity === "critical") return true
-    dropped[f.rule] = (dropped[f.rule] ?? 0) + 1
+    if (!f.rule || findingOrigin(f) === "ai" || f.severity === "critical") return true
+    const rule = normalizeRuleId(f.rule)
+    if (!ids.has(rule)) return true
+    dropped[rule] = (dropped[rule] ?? 0) + 1
     return false
   })
   return { kept, dropped }
