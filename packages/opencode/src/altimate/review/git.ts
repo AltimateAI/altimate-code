@@ -184,6 +184,19 @@ export async function listFilesAt(cwd: string, ref?: string): Promise<string[] |
   }
 }
 
+/** Every symlink at `ref` (mode 120000), repo-root relative; undefined when git can't list it. */
+export async function listSymlinksAt(cwd: string, ref?: string): Promise<string[] | undefined> {
+  try {
+    const out = await git(["ls-tree", "-r", "-z", "--full-tree", ref || "HEAD"], cwd)
+    return out
+      .split("\0")
+      .filter((e) => e.startsWith("120000 "))
+      .map((e) => e.slice(e.indexOf("\t") + 1))
+  } catch {
+    return undefined
+  }
+}
+
 /** Files in the index plus untracked, non-ignored files (the working tree), repo-root relative; undefined when git fails. */
 export async function listWorkingTreeFiles(cwd: string): Promise<string[] | undefined> {
   try {

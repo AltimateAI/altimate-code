@@ -2,18 +2,20 @@
 import YAML from "yaml"
 import { globToRegExp } from "./diff-filter"
 import { type Finding, SEVERITY_ORDER } from "./finding"
+import { holdsCredentials } from "./credentials"
 
 /**
  * Team conventions from the repository's guideline files, read from the BASE
  * commit so a PR cannot rewrite the conventions it is reviewed under.
  *
- * Sources: `.altimate/review.md` (or `.altimate/REVIEW.md`); `REVIEW.md`, `AGENTS.md`,
+ * Sources: `.altimate/review.md` (or `.altimate/REVIEW.md`), `REVIEW.md`, `AGENTS.md`,
  * `CLAUDE.md` and `.claude/CLAUDE.md` at the root and at every ancestor directory of a
  * changed path; `.coderabbit.yaml` (`reviews.path_instructions[]`, one convention per
  * entry scoped by its glob, plus the document-level `tone_instructions`); `.cursor/rules/*.mdc`
  * (frontmatter `globs` / `alwaysApply`; rules with neither are manual and skipped);
  * `.cursorrules`; `.github/copilot-instructions.md`; `CONTRIBUTING.md` cut to its
- * dbt/SQL/test/naming sections.
+ * dbt/SQL/test/naming sections. A file that is a symlink at the base commit is skipped (git
+ * would return the link target's name), and so is any document that carries key material.
  *
  * With the `conventions` switch (`ALTIMATE_REVIEW_CONVENTIONS`, on by default) each
  * finder call carries the conventions that apply to its files, most specific first,
@@ -129,6 +131,19 @@ function frontmatterValue(raw: string): string {
   return v.replace(/\s+#.*$/, "").trim()
 }
 
+/** A frontmatter value without an inline YAML comment (a ` #` outside quotes). */
+function withoutComment(raw: string): string {
+  let quote = ""
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i]
+    if (quote) {
+      if (ch === quote) quote = ""
+    } else if (ch === '"' || ch === "'") quote = ch
+    else if (ch === "#" && (i === 0 || /\s/.test(raw[i - 1]))) return raw.slice(0, i).trim()
+  }
+  return raw.trim()
+}
+
 /** `globs` as Cursor writes it: a string (comma list, optionally `[…]`) or a YAML list. */
 function globList(value: unknown): string[] {
   if (Array.isArray(value)) return value.flatMap((v) => (typeof v === "string" ? globList(v) : []))
@@ -156,8 +171,9 @@ function parseFrontmatterLines(text: string): { globs: string[]; alwaysApply: bo
     const value = frontmatterValue(raw)
     if (key === "alwaysApply") alwaysApply = /^true$/i.test(value)
     if (key !== "globs") continue
+    // The raw value (inline comment cut): `globList` unquotes each item, so `"a", "b"` keeps both.
     if (!value) inGlobList = true
-    else globs.push(...globList(value))
+    else globs.push(...globList(withoutComment(raw)))
   }
   return { globs, alwaysApply }
 }
@@ -221,7 +237,20 @@ export function sliceContributing(text: string, max = CONTRIBUTING_CHARS): strin
   const lines = text.split(/\r?\n/)
   const kept: string[] = []
   let keepLevel = 0
+  let fence = ""
   for (const line of lines) {
+    // A `#` line inside a fenced code block is code (a shell comment), not a heading.
+    const marker = /^\s*(`{3,}|~{3,})/.exec(line)?.[1]
+    if (fence) {
+      if (marker && marker[0] === fence[0] && marker.length >= fence.length) fence = ""
+      if (keepLevel) kept.push(line)
+      continue
+    }
+    if (marker) {
+      fence = marker
+      if (keepLevel) kept.push(line)
+      continue
+    }
     const h = /^(#{1,6})\s+(.*)$/.exec(line)
     if (h) {
       const level = h[1].length
@@ -243,9 +272,14 @@ export interface LoadConventionsInput {
   readBase: (rel: string) => Promise<string | undefined>
   /** Every file at the base commit (repo-relative), listed once; throws when git fails. */
   listBase?: () => Promise<string[]>
-  /** Every path the PR changes (repo-relative): their ancestor directories are searched for scoped files. */
+  /** Symlinks at the base commit (repo-relative); skipped, since `git show` returns the target's name. */
+  listBaseSymlinks?: () => Promise<string[]>
+  /** The paths the review covers (repo-relative): their ancestor directories are searched for scoped files. */
   changedPaths: string[]
 }
+
+/** Concurrent base-commit reads at most. */
+const READ_CONCURRENCY = 8
 
 /**
  * Load the team conventions from the base commit (see the module comment for
@@ -254,17 +288,45 @@ export interface LoadConventionsInput {
  * throws, as the base-policy read does, so it cannot pass for "no conventions".
  */
 export async function loadConventions(input: LoadConventionsInput): Promise<Convention[]> {
-  const read = input.readBase
   const baseFiles = input.listBase ? await input.listBase() : []
+  // With the base listing, only paths it holds are read: no `git show` per absent candidate.
+  const exists = input.listBase ? new Set(baseFiles) : undefined
+  const links = new Set(input.listBaseSymlinks ? await input.listBaseSymlinks() : [])
+  let active = 0
+  const waiting: Array<() => void> = []
+  const limited = async <T>(fn: () => Promise<T>): Promise<T> => {
+    if (active >= READ_CONCURRENCY) await new Promise<void>((resolve) => waiting.push(resolve))
+    active++
+    try {
+      return await fn()
+    } finally {
+      active--
+      waiting.shift()?.()
+    }
+  }
+  // A document that carries key material is never sent to the model, like any other AI-lane input.
+  const read = async (rel: string): Promise<string | undefined> => {
+    if ((exists && !exists.has(rel)) || links.has(rel)) return undefined
+    const text = await limited(() => input.readBase(rel))
+    return text !== undefined && holdsCredentials(text) ? undefined : text
+  }
   const scopes = scopesOf(input.changedPaths)
-  const plain = (path: string, source: ConventionSource, scope: string, text: string | undefined): Convention[] =>
+  const wholeFile = (path: string, source: ConventionSource, scope: string, text: string | undefined): Convention[] =>
     text?.trim() ? [{ path, source, scope, text: cut(text.trim(), CONVENTION_FILE_CHARS) }] : []
 
-  let altimatePath = ".altimate/review.md"
-  let altimate = await read(altimatePath)
-  if (altimate === undefined) altimate = await read((altimatePath = ".altimate/REVIEW.md"))
+  // `.altimate/review.md` (else `.altimate/REVIEW.md`) at the root and in every scope, like the
+  // `.altimate/review.yml` policy, which a dbt project may keep in its own directory.
+  const altimate = await Promise.all(
+    scopes.map(async (scope) => {
+      for (const name of [".altimate/review.md", ".altimate/REVIEW.md"]) {
+        const text = await read(join(scope, name))
+        if (text !== undefined) return wholeFile(join(scope, name), "altimate", scope, text)
+      }
+      return []
+    }),
+  )
   const scoped = await Promise.all(
-    scopes.flatMap((scope) => SCOPED_FILES.map(async ([name, source]) => plain(join(scope, name), source, scope, await read(join(scope, name))))),
+    scopes.flatMap((scope) => SCOPED_FILES.map(async ([name, source]) => wholeFile(join(scope, name), source, scope, await read(join(scope, name))))),
   )
   let coderabbit: Convention[] = []
   for (const p of CODERABBIT_FILES) {
@@ -299,23 +361,23 @@ export async function loadConventions(input: LoadConventionsInput): Promise<Conv
   for (const p of CONTRIBUTING_FILES) {
     const text = await read(p)
     if (text === undefined) continue
-    contributing = plain(p, "contributing", "", sliceContributing(text))
+    contributing = wholeFile(p, "contributing", "", sliceContributing(text))
     break
   }
   const all = [
-    ...plain(altimatePath, "altimate", "", altimate),
+    ...altimate.flat(),
     ...scoped.flat(),
     ...coderabbit,
     ...cursor,
-    ...plain(".cursorrules", "cursorrules", "", cursorrules),
-    ...plain(".github/copilot-instructions.md", "copilot", "", copilot),
+    ...wholeFile(".cursorrules", "cursorrules", "", cursorrules),
+    ...wholeFile(".github/copilot-instructions.md", "copilot", "", copilot),
     ...contributing,
   ]
   const out: Convention[] = []
   const seen = new Set<string>()
   let left = CONVENTIONS_TOTAL_CHARS
   for (const c of all) {
-    const key = `${c.path}|${(c.globs ?? []).join(",")}|${c.text.length}`
+    const key = `${c.path}|${(c.globs ?? []).join(",")}|${c.text}`
     if (seen.has(key) || c.text.length > left) continue
     seen.add(key)
     out.push(c)
@@ -356,21 +418,25 @@ function entryChars(c: Convention): number {
   return c.path.length + appliesTo(c).length + 21 + c.text.length
 }
 
-/** Take conventions in order within `budget` characters; the first one is cut to fit when it alone is over. */
+/** Take conventions in order within `budget` characters. The first one that does not fit whole is
+ *  cut to fit, to at most half the budget while others follow, so a long file leaves room for them. */
 function withinBudget(ordered: Convention[], budget: number): Convention[] {
   const out: Convention[] = []
   let used = 0
-  for (const c of ordered) {
+  let cutOne = false
+  for (const [i, c] of ordered.entries()) {
     const cost = entryChars(c)
     if (used + cost <= budget) {
       out.push(c)
       used += cost
-    } else if (!out.length) {
+    } else if (!cutOne) {
+      cutOne = true
       // The truncation marker counts toward the budget too.
-      const room = budget - (cost - c.text.length) - TRUNCATED.length
+      const cap = i < ordered.length - 1 ? Math.floor(budget / 2) : budget
+      const room = Math.min(budget - used, cap) - (cost - c.text.length) - TRUNCATED.length
       if (room > 200) {
         out.push({ ...c, text: cut(c.text, room) })
-        used = budget
+        used += cost - c.text.length + room + TRUNCATED.length
       }
     }
   }

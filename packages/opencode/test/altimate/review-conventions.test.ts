@@ -33,6 +33,17 @@ import { makeFinding } from "../../src/altimate/review/finding"
 
 const FIXTURE = path.join(import.meta.dir, "fixtures", "review-conventions")
 
+// Credential-shaped fixtures are built at runtime from obviously fake parts, so no committed string
+// matches a secret scanner; each value still has the shape the redactor looks for.
+const charRange = (from: string, to: string) =>
+  Array.from({ length: to.charCodeAt(0) - from.charCodeAt(0) + 1 }, (_, i) => String.fromCharCode(from.charCodeAt(0) + i)).join("")
+const ALNUM = charRange("a", "z") + charRange("A", "Z") + charRange("0", "9")
+/** `n` distinct characters of ALNUM taken with a stride: mixed case and digits, enough entropy to look like a credential. */
+const fakeChars = (n: number, seed = 0) => Array.from({ length: n }, (_, i) => ALNUM[(seed + i * 7) % ALNUM.length]).join("")
+const FAKE_AWS_KEY_ID = "AKIA" + "FAKE".repeat(4)
+const PEM_BEGIN = ["-----BEGIN", "PRIVATE", "KEY-----"].join(" ")
+const PEM_END = ["-----END", "PRIVATE", "KEY-----"].join(" ")
+
 async function fixtureFiles(dir = FIXTURE, prefix = ""): Promise<string[]> {
   const out: string[] = []
   for (const e of await fs.readdir(dir, { withFileTypes: true })) {
@@ -94,7 +105,8 @@ describe("loadConventions (fixture as the base commit)", () => {
 
   test("scoped files are looked up only in ancestors of changed paths", async () => {
     const base = await fixtureBase()
-    const all = await loadConventions({ readBase: base.readBase, listBase: base.listBase, changedPaths: ["models/staging/stg_orders.sql"] })
+    // Without the base listing every candidate is probed (with it, only listed paths are read).
+    const all = await loadConventions({ readBase: base.readBase, changedPaths: ["models/staging/stg_orders.sql"] })
     expect(all.some((c) => c.path === "models/marts/CLAUDE.md")).toBe(false)
     expect(base.reads).toContain("models/staging/CLAUDE.md")
     expect(base.reads).not.toContain("models/marts/CLAUDE.md")
@@ -490,6 +502,50 @@ describe("reviewPullRequest end to end (AI dry run, no model call)", () => {
   }, 60_000)
 })
 
+describe("reviewPullRequest: conventions are searched above the files the review covers", () => {
+  const KEYS = ["ALTIMATE_REVIEW_AI_DRYRUN", "GITHUB_EVENT_PATH", "GITHUB_BASE_REF", "CI_MERGE_REQUEST_TARGET_BRANCH_NAME"]
+  const saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]))
+  afterEach(() => {
+    for (const k of KEYS) {
+      if (saved[k] === undefined) delete process.env[k]
+      else process.env[k] = saved[k]
+    }
+  })
+  const git = (cwd: string, ...args: string[]) =>
+    execFileSync("git", ["-c", "commit.gpgsign=false", ...args], { cwd, env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } }).toString()
+
+  test("a CLAUDE.md beside an unrelated changed file outside the project is not loaded", async () => {
+    const { reviewPullRequest } = await import("../../src/altimate/review/run")
+    const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "review-conventions-scope-")))
+    try {
+      for (const [rel, body] of [
+        ["dbt/dbt_project.yml", "name: p\n"],
+        ["dbt/models/m.sql", "select 1 as id\n"],
+        ["dbt/models/CLAUDE.md", "Models rule.\n"],
+        ["infra/CLAUDE.md", "Terraform rule.\n"],
+        ["infra/main.tf", "a = 1\n"],
+      ]) {
+        await fs.mkdir(path.dirname(path.join(dir, rel)), { recursive: true })
+        await fs.writeFile(path.join(dir, rel), body)
+      }
+      git(dir, "init", "-q", "-b", "main")
+      git(dir, "add", "-A")
+      git(dir, "commit", "-q", "-m", "base")
+      git(dir, "checkout", "-q", "-b", "pr")
+      await fs.writeFile(path.join(dir, "dbt/models/m.sql"), "select 1 as id, 2 as x\n")
+      await fs.writeFile(path.join(dir, "infra/main.tf"), "a = 2\n")
+      git(dir, "add", "-A")
+      git(dir, "commit", "-q", "-m", "pr")
+      for (const k of ["GITHUB_EVENT_PATH", "GITHUB_BASE_REF", "CI_MERGE_REQUEST_TARGET_BRANCH_NAME"]) delete process.env[k]
+      process.env.ALTIMATE_REVIEW_AI_DRYRUN = "1"
+      const env = await reviewPullRequest({ cwd: path.join(dir, "dbt"), base: "main", head: "HEAD" })
+      expect(env.ai?.conventions?.map((c) => c.path)).toEqual(["dbt/models/CLAUDE.md"])
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
+  }, 60_000)
+})
+
 describe("repeated convention findings become one comment", () => {
   afterEach(() => mock.restore())
   const conv: Convention[] = [
@@ -713,6 +769,132 @@ describe("folded findings in the PR comment", () => {
     const posted = postedFindingIds(inlineComments(first).comments.map((c) => c.body))
     const second = envelopeOf(groupConventionFindings([mk("models/a.sql", 1), mk("models/c.sql", 4)], conv))
     expect(inlineComments(second, posted).comments.map((c) => `${c.path}:${c.line}`)).toEqual(["models/c.sql:4"])
+  })
+})
+
+describe("loadConventions hardening (round 2)", () => {
+  test("a document holding a private key or a service-account key is never loaded", async () => {
+    const files: Record<string, string> = {
+      "CLAUDE.md": `Deploy with this key:\n${PEM_BEGIN}\nMIIE...\n${PEM_END}\n`,
+      "AGENTS.md": 'Use {"type": "service_account", "project_id": "x"} for tests.',
+      "REVIEW.md": "Snake case.",
+    }
+    const all = await loadConventions({ readBase: async (rel) => files[rel], listBase: async () => Object.keys(files), changedPaths: ["models/a.sql"] })
+    expect(all.map((c) => c.path)).toEqual(["REVIEW.md"])
+  })
+
+  test("many changed directories: only paths in the base listing are read, at most 8 at a time", async () => {
+    const changed = Array.from({ length: 150 }, (_, i) => `dir${i}/sub/file.sql`)
+    const files = ["CLAUDE.md", "dir7/sub/AGENTS.md"]
+    let active = 0
+    let peak = 0
+    const reads: string[] = []
+    const all = await loadConventions({
+      readBase: async (rel) => {
+        reads.push(rel)
+        active++
+        peak = Math.max(peak, active)
+        await new Promise((r) => setTimeout(r, 1))
+        active--
+        return files.includes(rel) ? `rule of ${rel}` : undefined
+      },
+      listBase: async () => files,
+      changedPaths: changed,
+    })
+    expect(all.map((c) => c.path).sort()).toEqual(["CLAUDE.md", "dir7/sub/AGENTS.md"])
+    expect(reads.sort()).toEqual(["CLAUDE.md", "dir7/sub/AGENTS.md"])
+    expect(peak).toBeLessThanOrEqual(8)
+  })
+
+  test("without a listing the reads are still bounded to 8 at a time", async () => {
+    let active = 0
+    let peak = 0
+    await loadConventions({
+      readBase: async () => {
+        active++
+        peak = Math.max(peak, active)
+        await new Promise((r) => setTimeout(r, 1))
+        active--
+        return undefined
+      },
+      changedPaths: Array.from({ length: 40 }, (_, i) => `d${i}/f.sql`),
+    })
+    expect(peak).toBeLessThanOrEqual(8)
+  })
+
+  test("a symlinked CLAUDE.md at the base commit is skipped, not loaded as its target's name", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "review-conventions-link-"))
+    const git = (...args: string[]) =>
+      execFileSync("git", ["-c", "commit.gpgsign=false", ...args], { cwd: dir, env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } }).toString()
+    try {
+      await fs.writeFile(path.join(dir, "AGENTS.md"), "Snake case everywhere.\n")
+      await fs.symlink("AGENTS.md", path.join(dir, "CLAUDE.md"))
+      git("init", "-q", "-b", "main")
+      git("add", "-A")
+      git("commit", "-q", "-m", "base")
+      const { listSymlinksAt } = await import("../../src/altimate/review/git")
+      const all = await loadConventions({
+        readBase: (rel) => showAtRef(dir, "HEAD", rel),
+        listBase: async () => (await listFilesAt(dir, "HEAD"))!,
+        listBaseSymlinks: async () => (await listSymlinksAt(dir, "HEAD"))!,
+        changedPaths: ["models/a.sql"],
+      })
+      expect(all.map((c) => [c.path, c.text])).toEqual([["AGENTS.md", "Snake case everywhere."]])
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("a dbt project's own .altimate/review.md is loaded, scoped to the project", async () => {
+    const files: Record<string, string> = { "analytics/.altimate/review.md": "Prefer qualify.", ".altimate/review.md": "Root rule." }
+    const all = await loadConventions({ readBase: async (rel) => files[rel], listBase: async () => Object.keys(files), changedPaths: ["analytics/models/a.sql"] })
+    expect(all.map((c) => [c.path, c.source, c.scope])).toEqual([
+      [".altimate/review.md", "altimate", ""],
+      ["analytics/.altimate/review.md", "altimate", "analytics"],
+    ])
+  })
+
+  test("two .coderabbit.yaml entries with the same glob and equal-length text are both kept", async () => {
+    const yaml = "reviews:\n  path_instructions:\n    - path: 'models/**'\n      instructions: 'Use snake.'\n    - path: 'models/**'\n      instructions: 'Use cents.'\n"
+    const all = await loadConventions({ readBase: async (rel) => (rel === ".coderabbit.yaml" ? yaml : undefined), changedPaths: ["models/a.sql"] })
+    expect(all.map((c) => c.text)).toEqual(["Use snake.", "Use cents."])
+  })
+
+  test("CONTRIBUTING: a `#` line inside a code fence is not a heading", () => {
+    const text = [
+      "# Setup",
+      "```sh",
+      "# install dbt deps",
+      "pip install x",
+      "```",
+      "# Releasing",
+      "Tag it.",
+      "# dbt models",
+      "Name models stg_*.",
+      "```sh",
+      "# activate venv",
+      "```",
+      "Every model has tests.",
+    ].join("\n")
+    const out = sliceContributing(text)
+    expect(out).not.toContain("Tag it.")
+    expect(out).not.toContain("pip install")
+    expect(out).toContain("Name models stg_*.")
+    expect(out).toContain("Every model has tests.")
+  })
+
+  test("frontmatter that is not YAML keeps every quoted glob", () => {
+    const rule = parseMdc('---\nglobs: "**/*.sql", "**/*.yml" # both\n---\nBody.')
+    expect(rule.globs).toEqual(["**/*.sql", "**/*.yml"])
+  })
+
+  test("a long nested convention leaves room for .altimate/review.md in the call", () => {
+    const all: Convention[] = [
+      { path: ".altimate/review.md", source: "altimate", scope: "", text: "Prefer qualify over subqueries." },
+      { path: "models/CLAUDE.md", source: "claude_md", scope: "models", text: "x".repeat(4_000) },
+    ]
+    const { paths } = renderConventions(all, ["models/a.sql"])
+    expect(paths).toEqual(["models/CLAUDE.md", ".altimate/review.md"])
   })
 })
 

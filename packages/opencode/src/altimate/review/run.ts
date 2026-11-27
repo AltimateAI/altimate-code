@@ -11,6 +11,7 @@ import {
   type ResolvedBase,
   gitRepoRoot,
   listFilesAt,
+  listSymlinksAt,
   listWorkingTreeFiles,
   grepMatchesAt,
   grepFixedAt,
@@ -481,6 +482,8 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
   // Repo review instructions come from the base commit, like the policy, so a PR cannot
   // change the conventions it is reviewed under; only when the AI lane runs. A git failure
   // reading that commit fails the review, as it does for the policy read just before.
+  // Scoped files are searched above the files this review covers (its project's files and
+  // the outside Python files its AI lane may take), not every directory the PR touches.
   const conventions =
     aiOn && aiSwitches.conventions && resolved
       ? await loadConventions({
@@ -490,7 +493,12 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
             if (!files) throw new Error(`cannot list the files of the base commit ${resolved.sha} for the team conventions`)
             return files
           },
-          changedPaths: opts.prFiles ?? collected.map((f) => f.path),
+          listBaseSymlinks: async () => {
+            const links = await listSymlinksAt(gitRoot, resolved.sha)
+            if (!links) throw new Error(`cannot list the files of the base commit ${resolved.sha} for the team conventions`)
+            return links
+          },
+          changedPaths: [...changedFiles, ...aiOutsideFiles].map((f) => f.path),
         })
       : []
 
