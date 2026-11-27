@@ -178,6 +178,24 @@ describe("rawColumnExposures", () => {
       f: [],
     })
   })
+  test("`reads` keeps columns named like soft keywords and array `filter(…)` arguments", () => {
+    const sql = [
+      "select first_value(c.last) over (order by c.ts nulls last) as a,",
+      "  concat(time, ' ', zone) as b,",
+      "  filter(c.phone_list, p -> p <> '') as d,",
+      "  count(*) filter (where c.active) as e,",
+      "  cast('n/a' as varchar) as f",
+      "from customers c",
+    ].join("\n")
+    const reads = Object.fromEntries([...finalOutputs(sql).reads].map(([k, v]) => [k, [...v].sort()]))
+    expect(reads.a).toEqual(["customers.last"])
+    expect(reads.b).toEqual(["customers.time", "customers.zone"])
+    expect(reads.d).toEqual(["customers.p", "customers.phone_list"])
+    expect(reads.f).toEqual([])
+    // `count(*)` reads no column but is not a constant: never "reads nothing".
+    expect(reads.e).toHaveLength(1)
+    expect(reads.e[0]).toMatch(/^\?\d+\.e$/)
+  })
   test("`starRaw` resolves a column a plain `*` passes through", () => {
     expect([...finalOutputs("select * from customers").starRaw("ssn")]).toEqual(["customers.ssn"])
     expect([...finalOutputs("select c.* from customers c join orders o on true").starRaw("ssn")]).toEqual(["customers.ssn"])

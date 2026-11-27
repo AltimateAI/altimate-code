@@ -253,6 +253,8 @@ export interface SelectItem {
   /** For an item that is not a raw column, every column reference its expression
    *  reads (outside `over (…)`, `filter (…)` and `within group (…)`). */
   reads?: Array<{ qualifier?: string; column: string }>
+  /** The item is a constant (literals, numbers, `null`/`true`/`false`, casts of them). */
+  constant?: boolean
   /** `ROOT_SCOPE` for the outermost query, the CTE name for a CTE body, and for a
    *  nested query `<parent>><alias>` or, without one, `<parent>>sub<n>`. */
   scope: string
@@ -291,7 +293,7 @@ const normalizeItem = (raw: string) =>
 
 // Words in an expression that are syntax, never a column.
 const EXPR_KEYWORDS = new Set(
-  "and or not is null true false case when then else end as in like ilike rlike regexp similar escape between distinct all any some exists over partition by order asc desc nulls first last rows range groups unbounded preceding following current row filter within group interval from for at time zone collate both leading trailing using separator respect ignore cast try_cast".split(
+  "and or not is null true false case when then else end as in like ilike rlike regexp similar escape between distinct all any some exists over partition by order asc desc nulls filter within group interval from for collate both leading trailing using separator cast try_cast".split(
     " ",
   ),
 )
@@ -299,15 +301,20 @@ const COLUMN_TOKEN = new RegExp(String.raw`(?<![\w$."\x60])${COLUMN_REF}(?![\w$"
 
 /** The column references an expression reads, from masked SQL: function names,
  *  keywords, cast/`::` target types and the clauses that only partition, order
- *  or filter rows (`over (…)`, `filter (…)`, `within group (…)`) are skipped. */
+ *  or filter rows (`over (…)`, `filter (…)`, `within group (…)` right after a
+ *  call's `)`) are skipped. A word that is only sometimes a keyword (`first`,
+ *  `time`, `row`) counts as a column unless it is in its keyword phrase. */
 function columnReads(expr: string): Array<{ qualifier?: string; column: string }> {
   let e = expr.replace(/'(?:[^']|'')*'/g, " ")
-  // `over (…)` / `filter (…)` / `within group (…)`: cut each clause to its `)`.
-  for (let m = /\b(?:over|filter|within\s+group)\s*\(/i.exec(e); m; m = /\b(?:over|filter|within\s+group)\s*\(/i.exec(e)) {
+  // `f(…) over (…)` / `filter (…)` / `within group (…)`: cut each clause to its
+  // `)`. `filter(arr, x -> …)` without a call before it is an array function.
+  const clause = /\)\s*(?:over|filter|within\s+group)\s*\(/i
+  for (let m = clause.exec(e); m; m = clause.exec(e)) {
     const open = m.index + m[0].length - 1
-    e = e.slice(0, m.index) + " " + e.slice(closingParen(e, open) + 1)
+    e = e.slice(0, m.index + 1) + " " + e.slice(closingParen(e, open) + 1)
   }
   e = e
+    .replace(/\bnulls\s+(?:first|last)\b|\bat\s+time\s+zone\b|\b(?:respect|ignore)\s+nulls\b/gi, " ")
     .replace(/::\s*\w+(?:\s*\([\d\s,]*\))?/g, " ")
     .replace(/\bas\s+\w+(?:\s+\w+)*?(?:\s*\([\d\s,]*\))?\s*(?=\))/gi, " ")
   const out: Array<{ qualifier?: string; column: string }> = []
@@ -336,14 +343,27 @@ function itemAlias(item: string): string | undefined {
   return alias ? unquote(alias) : undefined
 }
 
-function describeItem(raw: string): Pick<SelectItem, "name" | "rawColumn" | "rawQualifier" | "text" | "reads"> {
+/** Only literals, numbers, `null`/`true`/`false` and casts of them. */
+function isConstant(expr: string): boolean {
+  const rest = expr
+    .replace(/'(?:[^']|'')*'/g, " ")
+    .replace(/::\s*\w+(?:\s*\([\d\s,]*\))?/g, " ")
+    .replace(/\bas\s+\w+(?:\s+\w+)*?(?:\s*\([\d\s,]*\))?\s*(?=\))/gi, " ")
+    .replace(/\b(?:null|true|false|cast)\b/gi, " ")
+  return /^[\s\d.+\-*/(),]*$/.test(rest)
+}
+
+function describeItem(
+  raw: string,
+): Pick<SelectItem, "name" | "rawColumn" | "rawQualifier" | "text" | "reads" | "constant"> {
   const text = normalizeItem(raw)
   const { expr, alias } = splitAlias(text)
   const ref = RAW_COLUMN_EXPRS.map((re) => re.exec(expr)).find(Boolean)
   const rawColumn = ref ? unquote(ref[2]) : undefined
   const rawQualifier = ref?.[1] ? unquote(ref[1]) : undefined
   const name = alias ? unquote(alias) : rawColumn
-  return ref ? { name, rawColumn, rawQualifier, text } : { name, text, reads: columnReads(expr) }
+  if (ref) return { name, rawColumn, rawQualifier, text }
+  return { name, text, reads: columnReads(expr), constant: isConstant(expr) }
 }
 
 // Words that end a FROM clause's table list at its own nesting level.
@@ -785,6 +805,10 @@ export function finalOutputs(sql: string): FinalOutputs {
       } else {
         reads.set(name, reads.get(name) ?? new Set())
         for (const r of item.reads ?? []) addTo(reads, name, resolveRef(scope, item.branch, r.qualifier, r.column, seen).reads)
+        // An expression whose column reads parse to nothing is not known to read
+        // nothing: it is never "already exposed" by its reads (the signature may
+        // still match). Only a constant reads nothing.
+        if (!item.reads?.length && !item.constant) addTo(reads, name, unresolved(name))
       }
     }
     for (const [n, cols] of raw) if (!cols.size) raw.delete(n)

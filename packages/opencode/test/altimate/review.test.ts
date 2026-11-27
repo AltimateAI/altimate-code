@@ -2501,6 +2501,13 @@ describe("orchestrate", () => {
     for (const { env } of lowered) expect(env.findings.filter((f) => f.category === "pii_exposure")).toEqual([])
   })
 
+  test("a computed output read through an array `filter(…)` lambda is not taken as reading nothing", async () => {
+    const from = "sha2(phone) as phone"
+    const to = "array_to_string(filter(c.phone_list, p -> p <> ''), ',') as phone"
+    const sql = (item: string) => `select c.customer_id,\n  ${item}\nfrom customers c`
+    expectReportedPii(await piiRuns(sql(to), sql(from), `-  ${from}\n+  ${to}\n`, ["phone"]), ["phone"], "none")
+  })
+
   test("a changed literal in a masking expression is a different computation", async () => {
     const from = "regexp_replace(ssn, '\\d', '*') as ssn"
     const to = "regexp_replace(ssn, '^$', '*') as ssn"
