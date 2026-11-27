@@ -654,14 +654,18 @@ across 12 dialects all plan; anything still unrecognized stays *undecidable*, ne
    note that a home directory that is itself a git repository (dotfiles kept in
    git) is such a work tree, so files anywhere under it are refused.
    The repo's own review instructions go with each call, read from the base branch
-   so a PR cannot change them: `.altimate/review.md`, `REVIEW.md`, `AGENTS.md` and
-   `CLAUDE.md` (at the root and in each changed path's directories),
-   `.claude/CLAUDE.md`, `.cursor/rules/*.mdc` (rules with `globs` or `alwaysApply`;
-   manual rules with neither are skipped), `.cursorrules`,
+   so a PR cannot change them: `.altimate/review.md`, `REVIEW.md`, `AGENTS.md`,
+   `CLAUDE.md` and `.claude/CLAUDE.md` (at the root and in each directory above a
+   file the review covers, so a dbt project's own `.altimate/review.md` next to its
+   `.altimate/review.yml` applies to it), `.cursor/rules/*.mdc` (rules with `globs`
+   or `alwaysApply`; manual rules with neither are skipped), `.cursorrules`,
    `.github/copilot-instructions.md`, `.coderabbit.yaml` `path_instructions` and
    `tone_instructions`, and the dbt/SQL/test sections of `CONTRIBUTING.md`, most
-   specific first, up to 3,000 characters per call (`ai.conventions: false` or `ALTIMATE_REVIEW_CONVENTIONS=0`
-   turns this off).
+   specific first, up to 3,000 characters per call (`ai.conventions: false` or
+   `ALTIMATE_REVIEW_CONVENTIONS=0` turns this off). A file that is a symlink at the
+   base commit is skipped, and so is any instruction file that holds a private key
+   or a service-account key: it is never sent to the model. The verifier reads a
+   convention file's base-branch text, not the PR's edit of it.
 4. **Rubric → verdict.** Findings map to a verdict by a versioned rubric (data,
    not prompt): any blocking-category `critical` → `REQUEST_CHANGES`; ≥3 warnings
    → risk pattern → `REQUEST_CHANGES`; only suggestions → `COMMENT`; nothing →

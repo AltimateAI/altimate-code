@@ -25,9 +25,8 @@ export const AI_SWITCH_ENV: Record<AiSwitchName, string> = {
 
 /**
  * Product defaults when neither env nor config sets a switch: the configuration measured
- * together (wider input, related files batched, context cards, the verifier), plus the team
- * conventions (`conventions`), on by default on their own, outside that measurement. Each one
- * is opt-out with `ai: { <switch>: false }` or its env variable set to `0`.
+ * together (wider input, related files batched, context cards, the verifier, the team
+ * conventions). Each one is opt-out with `ai: { <switch>: false }` or its env variable set to `0`.
  */
 export const AI_SWITCH_DEFAULTS: AiSwitches = {
   coverage: true,

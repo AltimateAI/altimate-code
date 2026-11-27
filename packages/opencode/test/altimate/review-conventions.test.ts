@@ -112,7 +112,7 @@ describe("loadConventions (fixture as the base commit)", () => {
     expect(base.reads).not.toContain("models/marts/CLAUDE.md")
   })
 
-  test("the files #1774 read (REVIEW.md, .altimate/REVIEW.md, AGENTS.md, CLAUDE.md) are all covered", async () => {
+  test("REVIEW.md, .altimate/REVIEW.md and nested AGENTS.md/CLAUDE.md are loaded", async () => {
     const files: Record<string, string> = {
       "REVIEW.md": "Root rule.",
       ".altimate/REVIEW.md": "Altimate rule.",
