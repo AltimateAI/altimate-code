@@ -725,8 +725,8 @@ across 12 dialects all plan; anything still unrecognized stays *undecidable*, ne
    `withheld`: the engine warnings that count toward a `REQUEST_CHANGES`, or every
    withheld finding when they alone keep the verdict from `APPROVE`. With
    `--all-projects`, the merged summary shows the lists of the projects whose verdict
-   equals the merged one; a project below it has its withheld findings neither
-   listed nor counted. In `comment` mode, `REQUEST_CHANGES` is posted as comments rather than
+   equals the merged one; a project below it has its list left out, and the findings
+   on that list are not counted. In `comment` mode, `REQUEST_CHANGES` is posted as comments rather than
    blocking.
 5. **Signed envelope.** The verdict is HMAC-signed (`ALTIMATE_REVIEW_SIGNING_KEY`)
    and includes the manifest hash, so it is replayable and tamper-evident.
