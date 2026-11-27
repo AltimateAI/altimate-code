@@ -14,6 +14,7 @@ import {
   inlineComments,
   postedFindingIds,
   renderSummary,
+  REVIEW_MARKER,
   SUMMARY_BUDGET_CHARS,
 } from "../../src/altimate/review/format"
 import { buildEnvelope } from "../../src/altimate/review/verdict"
@@ -560,25 +561,47 @@ describe("postGitHubReview", () => {
       listFails?: boolean
       files?: Array<{ filename: string; patch?: string }>
       reviewComments?: Array<{ body: string; user?: { login: string } }>
+      issueComments?: Array<{ id: number; body: string }>
       createReview?: (call: number) => unknown
     } = {},
   ) {
     const reviewCalls: any[] = []
+    const summaryCalls: string[] = []
     const fail = async () => {
       throw new Error("listing failed")
     }
+    // GitHub lists in pages: each list call returns one page of PAGE items, and
+    // `paginate` walks the pages, so anything read without it sees page one only.
+    const PAGE = 2
+    const paged =
+      <T>(items: T[]) =>
+      async (p: { page?: number }) =>
+        items.slice(((p?.page ?? 1) - 1) * PAGE, (p?.page ?? 1) * PAGE)
     const octo = {
-      paginate: async (fn: (p: unknown) => unknown, p: unknown) => fn(p),
+      paginate: async (fn: (p: unknown) => Promise<unknown[]>, p: Record<string, unknown>) => {
+        const all: unknown[] = []
+        for (let page = 1; ; page++) {
+          const items = await fn({ ...p, page })
+          all.push(...items)
+          if (items.length < PAGE) return all
+        }
+      },
       rest: {
         issues: {
-          listComments: async () => [],
-          createComment: async () => ({ data: { id: 1, user: { login: BOT } } }),
-          updateComment: async () => ({ data: { id: 1, user: { login: BOT } } }),
+          listComments: paged(opts.issueComments ?? []),
+          createComment: async () => {
+            summaryCalls.push("create")
+            return { data: { id: 1, user: { login: BOT } } }
+          },
+          updateComment: async (p: { comment_id: number }) => {
+            summaryCalls.push(`update ${p.comment_id}`)
+            return { data: { id: p.comment_id, user: { login: BOT } } }
+          },
         },
         pulls: {
-          listReviewComments: opts.listFails ? fail : async () => opts.reviewComments ?? [],
-          listReviews: opts.listFails ? fail : async () => opts.reviews ?? [],
-          listFiles: opts.listFails ? fail : async () => opts.files ?? [{ filename: "models/m.sql", patch: PATCH }],
+          listReviewComments: opts.listFails ? fail : paged(opts.reviewComments ?? []),
+          listReviews: opts.listFails ? fail : paged(opts.reviews ?? []),
+          listFiles: opts.listFails ? fail : paged(opts.files ?? [{ filename: "models/m.sql", patch: PATCH }]),
           get: async () => ({ data: { head: { sha: "abc" } } }),
           createReview: async (p: any) => {
             reviewCalls.push(p)
@@ -588,10 +611,79 @@ describe("postGitHubReview", () => {
         },
       },
     }
-    return { octo: octo as any, reviewCalls }
+    return { octo: octo as any, reviewCalls, summaryCalls }
   }
 
   const noLine = buildEnvelope({ findings: [finding()], tier: "lite", mode: "comment" })
+
+  test("markers, reviews, files and the prior summary are read from every page", async () => {
+    const env = buildEnvelope({
+      findings: [finding({ startLine: 3, title: "m: a" }), finding({ file: "models/late.sql", startLine: 5, title: "late: b" })],
+      tier: "lite",
+      mode: "comment",
+    })
+    const [first] = inlineComments(env, new Set(), undefined)
+    const filler = (n: number) => Array.from({ length: n }, (_, i) => ({ body: `other ${i}`, user: { login: "someone" } }))
+    const { octo, reviewCalls, summaryCalls } = fakeOcto({
+      // Each item that matters is on page two or later.
+      issueComments: [...filler(3).map((c, i) => ({ id: 100 + i, body: c.body })), { id: 42, body: `${REVIEW_MARKER}\nold` }],
+      reviewComments: [...filler(3), { body: first.body, user: { login: BOT } }],
+      files: [
+        { filename: "models/x.sql", patch: PATCH },
+        { filename: "models/y.sql", patch: PATCH },
+        { filename: "models/m.sql", patch: PATCH },
+        { filename: "models/late.sql", patch: PATCH },
+      ],
+    })
+    const r = await postGitHubReview(env, target, octo)
+    expect(summaryCalls).toEqual(["update 42"])
+    expect(r.inlineSkippedAsPosted).toBe(1)
+    expect(reviewCalls[0].comments.map((c: { path: string; line: number }) => `${c.path}:${c.line}`)).toEqual(["models/late.sql:5"])
+    // This bot's latest review on page two carries the same headline: no new review.
+    const quiet = buildEnvelope({ findings: [finding()], tier: "lite", mode: "comment" })
+    const again = fakeOcto({ reviews: [...filler(2), { body: verdictHeadline(quiet), user: { login: BOT } }] })
+    expect((await postGitHubReview(quiet, target, again.octo)).reviewSkipped).toBe(true)
+  })
+
+  test("a file the PR does not list gets no inline comment once the file list is known", async () => {
+    const env = buildEnvelope({
+      findings: [finding({ startLine: 3, title: "m: a" }), finding({ file: "models/unlisted.sql", startLine: 3, title: "u: b" })],
+      tier: "lite",
+      mode: "comment",
+    })
+    const { octo, reviewCalls } = fakeOcto()
+    await postGitHubReview(env, target, octo)
+    expect(reviewCalls[0].comments.map((c: { path: string }) => c.path)).toEqual(["models/m.sql"])
+  })
+
+  test("a non-positioning failure of the verified-only retry is recorded", async () => {
+    const env = buildEnvelope({
+      findings: [
+        finding({ file: "models/known.sql", startLine: 3, title: "known: a" }),
+        finding({ file: "models/big.sql", startLine: 900, title: "big: b" }),
+      ],
+      tier: "lite",
+      mode: "comment",
+    })
+    const { octo, reviewCalls } = fakeOcto({
+      files: [{ filename: "models/known.sql", patch: PATCH }, { filename: "models/big.sql" }],
+      createReview: (call) => {
+        if (call === 1)
+          throw Object.assign(new Error("Unprocessable Entity"), {
+            status: 422,
+            response: { data: { errors: ["Line could not be resolved"] } },
+          })
+        if (call === 2) throw Object.assign(new Error("Server Error"), { status: 502 })
+        return undefined
+      },
+    })
+    const r = await postGitHubReview(env, target, octo)
+    expect(reviewCalls.length).toBe(3)
+    expect(reviewCalls[2].comments).toBeUndefined()
+    expect(r.reviewId).toBe(9)
+    expect(r.inlineFellBack).toBe(true)
+    expect(r.postError).toBe("502 Server Error")
+  })
 
   test("skips a new review when this bot's latest review has the same headline", async () => {
     const { octo, reviewCalls } = fakeOcto({
@@ -752,7 +844,10 @@ describe("postGitHubReview", () => {
     })
     const r = await postGitHubReview(env, target, kept.octo)
     expect(kept.reviewCalls.map(where)).toEqual([["models/known.sql:3", "models/big.sql:900"], ["models/known.sql:3"]])
-    expect(r.inlineFellBack).toBe(true)
+    // Some inline comments were posted: a partial drop, not a summary-only fallback.
+    expect(r.inlineFellBack).toBe(false)
+    expect(r.inlineDropped).toBe(1)
+    expect(classifyPostOutcome(r)).toBe("partial")
     expect(r.postError).toBeUndefined()
     expect(r.reviewId).toBe(9)
 

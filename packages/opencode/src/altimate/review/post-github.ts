@@ -57,8 +57,12 @@ export async function resolveGitHubTarget(): Promise<GitHubTarget | undefined> {
 export interface PostResult {
   summaryCommentId?: number
   reviewId?: number
-  /** True when some or all inline comments were dropped due to a 422 positioning error. */
+  /** True when every inline comment was dropped after a 422 positioning error
+   *  (the review was posted without them). */
   inlineFellBack: boolean
+  /** Inline comments dropped after a positioning 422 when the retry with only
+   *  the comments on files with a known patch succeeded. */
+  inlineDropped?: number
   /** Set when the review event could not be posted for a non-positioning reason. */
   postError?: string
   /** Inline comments not re-posted because the same finding is already on the PR. */
@@ -67,6 +71,19 @@ export interface PostResult {
    *  blocking, and this bot's latest review already carries the same headline
    *  (the summary comment was updated). */
   reviewSkipped?: boolean
+}
+
+/** Only a 422 that is actually about line POSITIONING justifies silently
+ *  dropping inline comments. A generic 422 (and any other status) is a real
+ *  error and must be reported, not masqueraded as "lines outside diff". */
+function isPositioningError(e: any): boolean {
+  const status = e?.status ?? e?.response?.status
+  const detail = `${e?.message ?? ""} ${JSON.stringify(e?.response?.data?.errors ?? e?.errors ?? "")}`.toLowerCase()
+  return status === 422 && /(position|\bline\b|diff|commit)/.test(detail)
+}
+
+function describeError(e: any): string {
+  return `${e?.status ?? e?.response?.status ?? ""} ${e?.message ?? e}`.trim()
 }
 
 /** Headline of a review this bot posted (see verdictHeadline). */
@@ -126,20 +143,21 @@ export async function postGitHubReview(
     /* listing failed: post everything rather than nothing */
   }
 
-  // Inline comments only on lines GitHub accepts (inside the PR's diff hunks).
-  // If the file list can't be read, or a file has no `patch` (GitHub omits it
-  // for large diffs), post those lines and rely on the 422 fallback.
-  let commentable: Map<string, Set<number>> | undefined
+  // Inline comments only on lines GitHub accepts (inside the PR's diff hunks),
+  // and only on files the PR lists. If the file list can't be read, or a file
+  // has no `patch` (GitHub omits it for large diffs), post those lines and rely
+  // on the 422 fallback.
+  let commentable: Map<string, Set<number> | undefined> | undefined
   try {
     const files = await octo.paginate(octo.rest.pulls.listFiles, { owner, repo, pull_number: prNumber, per_page: 100 })
-    commentable = new Map(files.filter((f) => f.patch).map((f) => [f.filename, commentableLines(f.patch)]))
+    commentable = new Map(files.map((f) => [f.filename, f.patch ? commentableLines(f.patch) : undefined]))
   } catch {
     /* fall back to the positioning retry below */
   }
-  const comments = inlineComments(env, posted, commentable)
-  // Both calls use the same `commentable`, so the difference is exactly the
-  // comments skipped because this bot already posted them.
-  result.inlineSkippedAsPosted = inlineComments(env, new Set(), commentable).length - comments.length
+  // One pass: the eligible comments, less those this bot already posted.
+  const eligible = inlineComments(env, new Set(), commentable)
+  const comments = eligible.filter((c) => ![...postedFindingIds([c.body])].some((id) => posted.has(id)))
+  result.inlineSkippedAsPosted = eligible.length - comments.length
 
   // Nothing new inline, not blocking, and this bot's latest review already says
   // the same thing: the updated summary comment covers it; another identical
@@ -176,18 +194,13 @@ export async function postGitHubReview(
     // inline comments — anchoring outside the diff hunk. Other errors (auth,
     // can't-approve-own-PR, 5xx) should NOT masquerade as "lines outside diff",
     // so we still retry event-only but record the real reason.
-    const status = e?.status ?? e?.response?.status
-    // Only a 422 that is actually about line POSITIONING justifies silently
-    // dropping inline comments. A generic 422 (and any other status) is a real
-    // error and must be reported, not masqueraded as "lines outside diff".
-    const detail = `${e?.message ?? ""} ${JSON.stringify(e?.response?.data?.errors ?? e?.errors ?? "")}`.toLowerCase()
-    const isPositioning = status === 422 && /(position|\bline\b|diff|commit)/.test(detail)
+    const isPositioning = isPositioningError(e)
     result.inlineFellBack = isPositioning
-    result.postError = isPositioning ? undefined : `${status ?? ""} ${e?.message ?? e}`.trim()
+    result.postError = isPositioning ? undefined : describeError(e)
     // Lines on files without a known hunk (no `patch`) are the likely cause of a
     // positioning 422: retry once with only the comments on verified files
     // before dropping every inline comment.
-    const verified = isPositioning && commentable ? comments.filter((c) => commentable!.has(c.path)) : []
+    const verified = isPositioning && commentable ? comments.filter((c) => commentable!.get(c.path)) : []
     if (verified.length && verified.length < comments.length) {
       try {
         const r = await octo.rest.pulls.createReview({
@@ -200,9 +213,13 @@ export async function postGitHubReview(
           comments: verified,
         })
         result.reviewId = r.data.id
+        result.inlineFellBack = false
+        result.inlineDropped = comments.length - verified.length
         return result
-      } catch {
-        /* fall through to the event-only review */
+      } catch (e3: any) {
+        // Another positioning 422 falls through to the event-only review; any
+        // other failure is recorded even if that review then succeeds.
+        if (!isPositioningError(e3)) result.postError = describeError(e3)
       }
     }
     try {
@@ -217,7 +234,7 @@ export async function postGitHubReview(
       result.reviewId = r.data.id
     } catch (e2: any) {
       // Summary comment already landed; don't fail CI on a review-post error.
-      result.postError = `${e2?.status ?? ""} ${e2?.message ?? e2}`.trim()
+      result.postError = describeError(e2)
     }
   }
   return result

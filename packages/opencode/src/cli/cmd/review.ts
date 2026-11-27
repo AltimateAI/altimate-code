@@ -188,11 +188,16 @@ export const ReviewCommand = cmd({
             emitPostOnce(classifyPostOutcome(r), postDuration())
             const where = `${target.owner}/${target.repo}#${target.prNumber}`
             if (r.postError) {
-              UI.println(`⚠️  Posted the summary comment to ${where}, but the review event failed: ${r.postError}`)
+              UI.println(
+                r.reviewId !== undefined
+                  ? `⚠️  Posted the review to ${where} without its inline comments: ${r.postError}`
+                  : `⚠️  Posted the summary comment to ${where}, but the review event failed: ${r.postError}`,
+              )
             } else {
               UI.println(
                 `Posted review to ${where}` +
                   (r.inlineFellBack ? " (inline comments fell back to summary-only)" : "") +
+                  (r.inlineDropped ? ` (${r.inlineDropped} inline comment(s) dropped: lines outside the diff)` : "") +
                   (r.inlineSkippedAsPosted ? ` (${r.inlineSkippedAsPosted} inline already on the PR)` : "") +
                   (r.reviewSkipped ? " (summary updated; no new review needed)" : ""),
               )

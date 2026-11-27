@@ -388,25 +388,27 @@ export function commentableLines(diff: string | undefined): Set<number> {
 }
 
 /**
- * Inline comments for findings with a line. With `commentable` (head-side
- * commentable lines per file, see `commentableLines`), only lines inside the
- * PR's diff hunks are kept: GitHub rejects the whole batch over one line
- * outside the diff. A file with no entry has unknown hunks (GitHub omits the
- * patch for large diffs): its lines are attempted, and the 422 fallback covers a
- * miss. The finding keeps its line in the envelope and summary.
+ * Inline comments for findings with a line. With `commentable` (every file the
+ * PR lists, mapped to its head-side commentable lines, see `commentableLines`),
+ * only lines inside the PR's diff hunks are kept: GitHub rejects the whole batch
+ * over one line outside the diff. A file listed with `undefined` lines has
+ * unknown hunks (GitHub omits the patch for large diffs): its lines are
+ * attempted, and the 422 fallback covers a miss. A file the PR does not list
+ * gets no inline comment. The finding keeps its line in the envelope and summary.
  */
 export function inlineComments(
   env: VerdictEnvelope,
   alreadyPosted: Set<string> = new Set(),
-  commentable?: Map<string, Set<number>>,
+  commentable?: Map<string, Set<number> | undefined>,
 ): InlineComment[] {
+  const onDiff = (file: string, line: number) => {
+    if (!commentable) return true
+    if (!commentable.has(file)) return false
+    const lines = commentable.get(file)
+    return !lines || lines.has(line)
+  }
   return env.findings
-    .filter(
-      (f) =>
-        typeof f.startLine === "number" &&
-        !alreadyPosted.has(f.id) &&
-        (!commentable?.has(f.file) || commentable.get(f.file)!.has(f.startLine)),
-    )
+    .filter((f) => typeof f.startLine === "number" && !alreadyPosted.has(f.id) && onDiff(f.file, f.startLine))
     .map((f) => ({
       path: f.file,
       line: f.startLine!,
