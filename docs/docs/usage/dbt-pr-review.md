@@ -687,12 +687,15 @@ across 12 dialects all plan; anything still unrecognized stays *undecidable*, ne
    or `dbt-patterns:self-join`). With the verifier on (`ai.verify`), the rule
    findings that would be posted are verified too (critical ones are never
    dropped, so they are not sent; rule types off are sent too on files the AI lane
-   does not review, where they are posted), up to 40 per PR, warnings and the noisy
+   does not send, and on a sent file whose finder call failed, since they are posted
+   there), up to 40 per reviewed dbt project (`--all-projects` verifies each project
+   on its own), warnings and the noisy
    types first (`ALTIMATE_REVIEW_AI_VERIFY_RULES_MAX_FINDINGS`); findings over the
    ceiling are posted unverified. The rule run is a second verifier run with its own
    token budget; on the default budget most of its batches answer without tools
-   (forced at the budget), and those verdicts count. Refuted ones are dropped (`ai.verifyRules: false`
-   or `ALTIMATE_REVIEW_AI_VERIFY_RULES=off`; `ai.verify: false` turns it off too).
+   (forced at the budget), and those verdicts count. Refuted ones are not posted.
+   `ai.verifyRules: false` or `ALTIMATE_REVIEW_AI_VERIFY_RULES=off` turns this step off
+   (no rule finding is verified or dropped as refuted), and so does `ai.verify: false`.
    Then a rule finding is not posted when the verifier answered that it could not
    check it and it is a warning, or when its type is one of 7 noisy types and the
    verifier did not confirm it (`ai.rulePolicy: false` or
@@ -704,8 +707,9 @@ across 12 dialects all plan; anything still unrecognized stays *undecidable*, ne
    run, provider error, timeout), the rule verifier does not run, none of the steps
    applies and every rule finding is posted as before; when only the rule verifier
    did not run, the rule types off still apply and every other rule finding is
-   posted unchanged. The envelope counts what each step dropped (`rulesOff`,
-   `rulesRefuted`, `rulePolicy`), and the PR comment gives the total per step.
+   posted unchanged. The envelope counts what each step withheld, per instance as the
+   verdict counts them (`rulesOff`, `rulesRefuted`, `rulePolicy`), and the PR comment
+   gives the total per step.
 4. **Rubric → verdict.** Findings map to a verdict by a versioned rubric (data,
    not prompt): any blocking-category `critical` → `REQUEST_CHANGES`; ≥3 warnings
    → risk pattern → `REQUEST_CHANGES`; only suggestions → `COMMENT`; nothing →
@@ -716,7 +720,8 @@ across 12 dialects all plan; anything still unrecognized stays *undecidable*, ne
    posted but still counts toward the ≥3 warnings (the summary counts it too), so
    neither the verifier nor text it reads, such as the PR description, can unblock
    a gate. When withheld findings change the verdict, the summary lists them (file
-   and line, title, and why each was not posted) and the envelope records them under
+   and line, title, and why each was not posted; the first 10, the rest are in the
+   envelope) and the envelope records them under
    `withheld`: the engine warnings that count toward a `REQUEST_CHANGES`, or every
    withheld finding when they alone keep the verdict from `APPROVE`. In `comment` mode, `REQUEST_CHANGES` is posted as comments rather than
    blocking.
