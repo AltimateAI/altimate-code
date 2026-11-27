@@ -2645,6 +2645,41 @@ describe("orchestrate", () => {
     expect(star[0].env.findings.filter((f) => f.category === "pii_exposure")).toEqual([])
   })
 
+  test("a reindent inside a nested query stays a reindent when a subquery is added above it", async () => {
+    // Base PII detection misses `ssn`, so only the reindent check keeps the twin quiet.
+    const runner: ReviewRunner = { ...piiRunner([]), detectPii: async () => ({ columns: [] }) }
+    const base = [
+      "with a as (select customer_id from customers)",
+      "select s.customer_id, s.ssn",
+      "from (",
+      "  select customer_id,",
+      "  ssn",
+      "  from customers",
+      ") s",
+    ].join("\n")
+    const heads = [
+      // A subquery added in another scope (a CTE).
+      base
+        .replace("select customer_id from customers)", "select customer_id from customers where customer_id in (select id from vip))")
+        .replace("\n  ssn\n", "\n    ssn\n"),
+      // A scalar subquery added earlier in the same scope.
+      base
+        .replace("s.ssn\n", "s.ssn, (select count(*) from orders o where o.customer_id = s.customer_id) as n\n")
+        .replace("\n  ssn\n", "\n    ssn\n"),
+    ]
+    for (const head of heads) {
+      const env = await runReview({
+        changedFiles: [{ path: "models/marts/m.sql", status: "modified", diff: "-  ssn\n+    ssn\n" }],
+        config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"] },
+        rubric: DEFAULT_RUBRIC,
+        mode: "gate",
+        runner,
+        getContent: content(head, base),
+      })
+      expect(env.findings.filter((f) => f.category === "pii_exposure")).toEqual([])
+    }
+  })
+
   test("a PII line moved from a CTE into the final select is not a reindent", async () => {
     // `    email,` leaves the CTE and the same text lands in the final select: the
     // model's output now carries `email`, though the line matches a removed one.

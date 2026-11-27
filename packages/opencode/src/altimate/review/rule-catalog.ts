@@ -227,7 +227,8 @@ export interface SelectItem {
   /** For an item that is not a raw column, every column reference its expression
    *  reads (outside `over (…)`, `filter (…)` and `within group (…)`). */
   reads?: Array<{ qualifier?: string; column: string }>
-  /** `ROOT_SCOPE` for the outermost query, the CTE name for a CTE body, `<parent>>sub<n>` for a nested query. */
+  /** `ROOT_SCOPE` for the outermost query, the CTE name for a CTE body, and for a
+   *  nested query `<parent>><alias>` or, without one, `<parent>>sub<n>`. */
   scope: string
   /** Which `UNION`/`INTERSECT`/`EXCEPT` branch of its scope (0 for the first select). */
   branch: number
@@ -372,7 +373,27 @@ function parseSelects(sql: string): ParsedSelects {
     "i",
   )
   const tableRef = new RegExp(String.raw`^\s*((?:${SEGMENT}\s*\.\s*)*${SEGMENT})`, "i")
-  let nested = 0
+  // A nested query is keyed by the alias after its `)` (`(select …) s`,
+  // `(select …) as n`), else numbered within its parent, so a subquery added
+  // elsewhere does not rename it between base and head.
+  const nestedKeys = new Set<string>()
+  const nestedCount = new Map<string, number>()
+  const subAlias = new RegExp(String.raw`^\s+(?:as\s+)?(${SEGMENT})`, "i")
+  const nestedKey = (parent: string, open: number) => {
+    const close = closingParen(s, open)
+    const alias = subAlias.exec(s.slice(close + 1, close + 200))?.[1]
+    const named =
+      alias && !NOT_A_SOURCE_ALIAS.has(unquote(alias)) && !NOT_AN_ALIAS.has(unquote(alias)) && !SELECT_LIST_END.test(alias)
+        ? `${parent}>${unquote(alias)}` : undefined
+    let key = named
+    if (!key || nestedKeys.has(key)) {
+      const n = (nestedCount.get(parent) ?? 0) + 1
+      nestedCount.set(parent, n)
+      key = `${named ?? parent}>sub${n}`
+    }
+    nestedKeys.add(key)
+    return key
+  }
   for (let i = 0; i < s.length; i++) {
     const c = s[i]
     if (c === "(") {
@@ -382,7 +403,7 @@ function parseSelects(sql: string): ParsedSelects {
       // other parenthesis (a call, a grouping) stays in its parent's scope.
       if (cte && !/^as$/i.test(cte[1])) scopes.push(unquote(cte[1]))
       else if (/^[\s(]*select\b/i.test(s.slice(i + 1, i + 200))) {
-        scopes.push(`${parent}>sub${++nested}`)
+        scopes.push(nestedKey(parent, i))
         parenScope.set(i, scopes[scopes.length - 1])
       } else scopes.push(parent)
       continue
