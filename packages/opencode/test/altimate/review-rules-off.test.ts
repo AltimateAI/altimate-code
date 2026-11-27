@@ -356,3 +356,55 @@ describe("round 2b: rules-off env and list file", () => {
     }
   })
 })
+
+describe("round 3: rules-off, verification and explainable verdicts", () => {
+  const runner: ReviewRunner = {
+    async impact() {
+      return { hasManifest: true, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 }
+    },
+    async grade() {
+      return { grade: "B" }
+    },
+    async check() {
+      return { issues: [], ran: true }
+    },
+    async equivalence() {
+      return { decided: true, equivalent: true }
+    },
+    async detectPii() {
+      return { columns: [] }
+    },
+  } as ReviewRunner
+  const SQL = "select *\nfrom raw.orders\nwhere status = 'x'\norder by 1"
+  const model = { path: "models/marts/m.sql", status: "modified" as const, diff: `@@ -1 +1,4 @@\n-select 1\n+${SQL.split("\n").join("\n+")}\n` }
+  const yml = { path: "config/extra.yml", status: "modified" as const, diff: "@@ -1 +1 @@\n-a: 1\n+a: [\n" }
+  const run = (changed: any[], rulesOff: Set<string> | undefined, seen: AiReviewInput[] = []) =>
+    runReview({
+      changedFiles: changed,
+      config: { ...DEFAULT_REVIEW_CONFIG },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner,
+      forceTier: "full",
+      aiVerify: true,
+      aiSwitches: { verifyRules: true, otherFiles: false },
+      getContent: async (f, side) => (f.endsWith(".yml") ? (side === "old" ? "a: 1\n" : "a: [\n") : side === "old" ? "select 1" : SQL),
+      generatedAt: "2026-11-27T00:00:00Z",
+      ...(rulesOff ? { rulesOff } : {}),
+      aiReview: async (input: AiReviewInput) => {
+        seen.push(input)
+        return { findings: [], status: { state: "ok" as const } }
+      },
+    })
+
+  test("a rules-off finding on a file the AI lane does not send is verified (it will be posted)", async () => {
+    const base = await run([model, yml], undefined)
+    const ymlRule = base.findings.find((f) => f.file === "config/extra.yml")?.rule
+    expect(ymlRule).toBeDefined()
+    const seen: AiReviewInput[] = []
+    await run([model, yml], new Set([ymlRule!]), seen)
+    expect(seen[0].files.map((f) => f.path)).not.toContain("config/extra.yml")
+    expect((seen[0].verifyRulesAfter ?? []).some((f) => f.file === "config/extra.yml")).toBe(true)
+  })
+
+})

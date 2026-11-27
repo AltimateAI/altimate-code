@@ -2822,13 +2822,17 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
         count: merged.length,
         list: await validateSuggestions(merged, getContent, addedLinesByFile([...input.changedFiles, ...(input.aiOutsideFiles ?? [])])),
       }
+    // Rule types off are left out only on files the AI lane sends, where rules-off will drop them;
+    // on any other file they are posted, so they are verified like the rest.
+    const sentSet = new Set(aiSentPaths)
     const verifyRulesAfter = preAiValidated
-      ? dropRulesOff(
-          cleanFindings(preAiValidated.list).filter(
+      ? (() => {
+          const posted = cleanFindings(preAiValidated.list).filter(
             (f) => SEVERITY_ORDER[f.severity] >= SEVERITY_ORDER[input.config.severityThreshold] && findingOrigin(f) !== "ai",
-          ),
-          input.rulesOff,
-        ).kept.filter((f) => f.severity !== "critical" && !mayHoldCredentials(f.file))
+          )
+          const offKept = new Set(dropRulesOff(posted.filter((f) => sentSet.has(f.file)), input.rulesOff).kept)
+          return posted.filter((f) => (!sentSet.has(f.file) || offKept.has(f)) && f.severity !== "critical" && !mayHoldCredentials(f.file))
+        })()
       : undefined
     try {
       const res = await input.aiReview({
