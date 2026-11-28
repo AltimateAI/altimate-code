@@ -6,7 +6,7 @@ import { finderSystemPrompt } from "../../src/altimate/review/ai-review"
 import { Dispatcher } from "../../src/altimate/native"
 import { tmpdir } from "../fixture/fixture"
 
-// Whether the temp directory's file system ignores case: a probe directory is found under its upper-case name.
+// Whether the temp directory's file system is case-sensitive: a probe directory is not found under its upper-case name.
 const caseSensitiveTmp = (() => {
   const probe = mkdtempSync(path.join(os.tmpdir(), "case-probe-"))
   try {
