@@ -1521,7 +1521,7 @@ describe("both tools: names at the edges", () => {
     const aliasWords = write(nodes("duckdb", [
       model("orders", [], "select 1 as id", ["id"]),
       model("group1", [], "select 2 as id, 'x' as name", ["id", "name"]),
-      model("r", ["orders", "group1"], `select start.*, 1 as name from ${T("group1")} as start cross join ${T("orders")} o`),
+      model("r", ["orders", "group1"], `select start.*, start.name from ${T("group1")} as start cross join ${T("orders")} o`),
     ]))
     expect(() => columnReach(aliasWords, "r", "name_1")).not.toThrow()
     // A UNION's branches each name their own list: two stars in two branches repeat nothing.
