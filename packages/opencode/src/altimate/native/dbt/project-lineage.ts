@@ -129,6 +129,15 @@ const unquoteName = (name: string) => name.replace(/^["`[]|["`\]]$/g, "").toLowe
 /** Literal- and comment-stripped SQL with each quoted name blanked whole, so `"from"` or `"a,b"` ends no item. */
 const blankQuoted = (stripped: string) => stripped.replace(new RegExp(QUOTED, "g"), (q) => " ".repeat(q.length))
 
+/** The word that ends before `end` in quote-blanked text, past whitespace and `(`, and where it starts. */
+function wordBefore(text: string, end: number): { word: string; start: number } {
+  let j = end - 1
+  while (j >= 0 && /[\s(]/.test(text[j]!)) j--
+  let k = j
+  while (k >= 0 && /[\w$]/.test(text[k]!)) k--
+  return { word: text.slice(k + 1, j + 1), start: k + 1 }
+}
+
 /**
  * Where each `select` keyword starts in quote-blanked text, how deep in parentheses it sits, and whether it starts a
  * later branch of a set operation (`… union all select …`), whose names the result doesn't take.
@@ -141,8 +150,10 @@ function selectKeywords(text: string): { at: number; depth: number; later: boole
     if (ch === "(") depth++
     else if (ch === ")") depth--
     else if ((ch === "s" || ch === "S") && /^select(?![\w$])/i.test(text.slice(i, i + 7)) && !/[\w$]/.test(text[i - 1] ?? " ")) {
-      // The set operator sits just before: `union all (select …`, so a short look back is enough.
-      const later = /(?<![\w$])(?:union|intersect|except|minus)(?:\s+(?:all|distinct))?\s*\(?\s*$/i.test(text.slice(Math.max(0, i - 40), i))
+      // A set operator is the word before, past whitespace and `(`, or the one before an `all` or `distinct`.
+      let before = wordBefore(text, i)
+      if (/^(?:all|distinct)$/i.test(before.word)) before = wordBefore(text, before.start)
+      const later = /^(?:union|intersect|except|minus)$/i.test(before.word)
       found.push({ at: i, depth, later })
     }
   }
@@ -908,17 +919,27 @@ export class ProjectLineage {
    * qualifier whose alias names two relations, or names no parent, gives none.
    */
   private qualifiedParent(id: string, qualifier: string, stripped: string): string | undefined {
-    const byName = new Map(this.parents(id).map((p) => [String(this.node(p)?.alias || this.node(p)?.name || "").toLowerCase(), p]))
     const part = `(?:${QUOTED}|[\\w$]+)`
+    // The one parent a relation's parts name: its own name last, then its schema and database where written; two
+    // parents of one name in different schemas stay apart.
+    const parentOf = (parts: string[]): string | undefined => {
+      const [name, schema, database] = [...parts].reverse()
+      const lower = (value: unknown) => String(value ?? "").toLowerCase()
+      const found = this.parents(id).filter((p) => {
+        const n = this.node(p)
+        return lower(n?.alias || n?.name) === name && (!schema || lower(n?.schema) === schema) && (!database || lower(n?.database) === database)
+      })
+      return found.length === 1 ? found[0] : undefined
+    }
     const relation = new RegExp(`(?<![\\w$])(?:from|join)\\s+((?:${part}\\.)*${part})\\s+(?:as\\s+)?(${part})(?![\\w$.])`, "gi")
-    const named = new Set<string>()
+    const aliased = new Map<string, string[]>()
     for (const m of stripped.matchAll(relation)) {
       if (NOT_ALIAS.test(m[2]!) || unquoteName(m[2]!) !== qualifier) continue
-      const last = [...m[1]!.matchAll(new RegExp(part, "g"))].at(-1)?.[0] ?? ""
-      named.add(unquoteName(last))
+      const parts = [...m[1]!.matchAll(new RegExp(part, "g"))].map((p) => unquoteName(p[0]))
+      aliased.set(parts.join("\0"), parts)
     }
-    if (named.size) return named.size === 1 ? byName.get([...named][0]!) : undefined
-    return byName.get(qualifier)
+    if (aliased.size) return aliased.size === 1 ? parentOf([...aliased.values()][0]!) : undefined
+    return parentOf([qualifier])
   }
 
   lineage(id: string): ModelLineage {

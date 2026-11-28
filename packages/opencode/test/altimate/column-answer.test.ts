@@ -1494,6 +1494,15 @@ describe("both tools: names at the edges", () => {
     two(`select "o".*, o.customer_id as id from ${T("orders")} "o"`, "id_1")
     // An alias hides a parent of the same name: `customers` is aliased `orders` here, so `orders.*` reads customers.
     two(`select orders.*, 1 as name from ${T("customers")} orders join ${T("orders")} o2 on orders.customer_id = o2.customer_id`, "name_1")
+    // Two parents of one name in different schemas: the relation's schema says which one the star reads, in either order.
+    for (const order of [["one_shared", "two_shared"], ["two_shared", "one_shared"]]) {
+      const path = write(nodes("duckdb", [
+        model("one_shared", [], "select 1 as id", ["id"], { alias: "shared", schema: "one" }),
+        model("two_shared", [], "select 2 as other", ["other"], { alias: "shared", schema: "two" }),
+        model("r", order, `select f.*, f.id from "shop"."one"."shared" f cross join "shop"."two"."shared" g`),
+      ]))
+      expect(() => columnReach(path, "r", "id_1")).not.toThrow()
+    }
     // A UNION's branches each name their own list: two stars in two branches repeat nothing.
     const union = write(nodes("duckdb", [
       model("a", [], "select 1 as id", ["id"]),
@@ -1519,6 +1528,14 @@ describe("both tools: names at the edges", () => {
     ]))
     const lineage = dbtLineage({ manifest_path: path, model: "child" })
     expect(Object.keys((lineage.raw_lineage as any).column_dict ?? {})).not.toContain("_col_0")
+    // However far indentation puts the operator from the branch's SELECT.
+    const indented = write(nodes("duckdb", [
+      model("a", [], "select 1 as id, 2.5 as amount", ["id", "amount"]),
+      model("b", [], "select 2 as id, 3.5 as amount", ["id", "amount"]),
+      model("r", ["a", "b"], `select amount * 2 from ${T("a")} union all\n${" ".repeat(60)}(\n${" ".repeat(60)}select amount as _col_0 from ${T("b")})`),
+      model("child", ["r"], `select * from ${T("r")}`),
+    ]))
+    expect(Object.keys((dbtLineage({ manifest_path: indented, model: "child" }).raw_lineage as any).column_dict ?? {})).not.toContain("_col_0")
   })
 
   test("a _N written in upper-case SQL is still a real alias", () => {
