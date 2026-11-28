@@ -1526,23 +1526,30 @@ describe("both tools: names at the edges", () => {
     expect(() => columnReach(join, "r", "nope")).toThrow(/has no column nope/)
   })
 
-  test("an alias in a later UNION branch names no output, so the engine's _col_0 there stays an engine name", () => {
+  test("an alias in a later UNION branch names no output, so the engine's _col_1 there stays an engine name", () => {
     const path = write(nodes("duckdb", [
       model("a", [], "select 1 as id, 2.5 as amount", ["id", "amount"]),
       model("b", [], "select 2 as id, 3.5 as amount", ["id", "amount"]),
-      model("r", ["a", "b"], `select amount * 2 from ${T("a")} union all select amount as _col_0 from ${T("b")}`),
+      model("r", ["a", "b"], `select id, amount * 2 from ${T("a")} union all select id, amount as _col_1 from ${T("b")}`),
       model("child", ["r"], `select * from ${T("r")}`),
     ]))
-    const lineage = dbtLineage({ manifest_path: path, model: "child" })
-    expect(Object.keys((lineage.raw_lineage as any).column_dict ?? {})).not.toContain("_col_0")
+    // The lineage must have worked: the child lists `id`, and no engine error stands in for an empty answer.
+    const listed = (manifest: string) => {
+      const raw = dbtLineage({ manifest_path: manifest, model: "child" }).raw_lineage as any
+      expect(raw.error).toBeUndefined()
+      return Object.keys(raw.column_dict ?? {})
+    }
+    expect(listed(path)).toContain("id")
+    expect(listed(path)).not.toContain("_col_1")
     // However far indentation puts the operator from the branch's SELECT.
     const indented = write(nodes("duckdb", [
       model("a", [], "select 1 as id, 2.5 as amount", ["id", "amount"]),
       model("b", [], "select 2 as id, 3.5 as amount", ["id", "amount"]),
-      model("r", ["a", "b"], `select amount * 2 from ${T("a")} union all\n${" ".repeat(60)}(\n${" ".repeat(60)}select amount as _col_0 from ${T("b")})`),
+      model("r", ["a", "b"], `select id, amount * 2 from ${T("a")} union all\n${" ".repeat(60)}(\n${" ".repeat(60)}select id, amount as _col_1 from ${T("b")})`),
       model("child", ["r"], `select * from ${T("r")}`),
     ]))
-    expect(Object.keys((dbtLineage({ manifest_path: indented, model: "child" }).raw_lineage as any).column_dict ?? {})).not.toContain("_col_0")
+    expect(listed(indented)).toContain("id")
+    expect(listed(indented)).not.toContain("_col_1")
   })
 
   test("a _N written in upper-case SQL is still a real alias", () => {
