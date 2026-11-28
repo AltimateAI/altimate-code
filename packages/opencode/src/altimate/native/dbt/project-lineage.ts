@@ -189,9 +189,10 @@ function listAt(text: string, stripped: string, at: number): { items: string[]; 
 
 /**
  * Words that end a FROM clause. (`relationUse`'s list is another set: words that aren't a relation's name, such as
- * `join` and `on`, which sit inside a FROM clause.)
+ * `join` and `on`, which sit inside a FROM clause.) Words that can also be an alias (`offset`, `start`) are left out:
+ * running on past `offset 5` reads no alias, and cutting a FROM clause at an alias would lose it.
  */
-const FROM_ENDS = /^(?:where|group|order|limit|offset|fetch|qualify|having|window|connect|start|union|intersect|except|minus)$/i
+const FROM_ENDS = /^(?:where|group|order|limit|qualify|having|window|union|intersect|except|minus)$/i
 
 const WORD = /[\w$]+/y
 

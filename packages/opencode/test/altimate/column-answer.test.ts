@@ -1517,6 +1517,13 @@ describe("both tools: names at the edges", () => {
       model("r", ["orders", "group1"], `select orders.*, 1 as name from ${T("group1")} orders cross join ${T("orders")} o`),
     ]))
     expect(() => columnReach(words, "r", "name_1")).not.toThrow()
+    // An alias that is also a clause word in some dialect (`start`, `offset`) still names its relation.
+    const aliasWords = write(nodes("duckdb", [
+      model("orders", [], "select 1 as id", ["id"]),
+      model("group1", [], "select 2 as id, 'x' as name", ["id", "name"]),
+      model("r", ["orders", "group1"], `select start.*, 1 as name from ${T("group1")} as start cross join ${T("orders")} o`),
+    ]))
+    expect(() => columnReach(aliasWords, "r", "name_1")).not.toThrow()
     // A UNION's branches each name their own list: two stars in two branches repeat nothing.
     const union = write(nodes("duckdb", [
       model("a", [], "select 1 as id", ["id"]),
