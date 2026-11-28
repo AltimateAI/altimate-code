@@ -8,7 +8,44 @@ import * as core from "@altimateai/altimate-core"
 import type { DbtLineageParams, DbtLineageResult } from "../types"
 import { loadRawManifest, findModel, detectDialect, buildSchemaContext } from "./helpers"
 import { lineageGraph } from "./graph"
-import { projectLineage } from "./project-lineage"
+import { projectLineage, stripSql, warehouseNames } from "./project-lineage"
+
+/**
+ * The lineage with the model's own unaliased casts of a column under the column's name on Postgres and Redshift, as
+ * impact_analysis's column answer names them (`warehouseNames`): a renamed `_col_N` takes the name, and its `_N`
+ * twin goes. Every other output, and every other dialect, is left as the engine gives it.
+ */
+function withWarehouseNames(lineage: Record<string, any>, sql: string, dialect: string): Record<string, unknown> {
+  if ((dialect !== "postgres" && dialect !== "redshift") || !Array.isArray(lineage.column_lineage)) return lineage
+  const lower = (text: unknown) => String(text ?? "").toLowerCase()
+  const edges = lineage.column_lineage.map((e: any) => ({ source: lower(e?.source), to: lower(e?.target) }))
+  const names = warehouseNames(edges, stripSql(sql), dialect)
+  const renamed = new Map<string, string>()
+  for (const [i, e] of edges.entries()) if (names[i] && names[i] !== e.to) renamed.set(e.to, names[i]!)
+  if (!renamed.size) return lineage
+  // The `_N` twin of a renamed `_col_N` goes with it, where `warehouseNames` drops every edge into it; a `_N` the SQL
+  // writes (`amount as _1`) keeps its edges there, and so stays.
+  const dropped = new Set(
+    [...renamed.keys()]
+      .map((label) => `_${label.slice(5)}`)
+      .filter((label) => edges.some((e) => e.to === label) && edges.every((e, i) => e.to !== label || names[i] === null)),
+  )
+  const target = (text: unknown) => (dropped.has(lower(text)) ? null : (renamed.get(lower(text)) ?? String(text)))
+  const out: Record<string, unknown> = { ...lineage }
+  out.column_lineage = lineage.column_lineage.flatMap((e: any) => (target(e?.target) === null ? [] : [{ ...e, target: target(e?.target) }]))
+  if (lineage.column_dict && typeof lineage.column_dict === "object") {
+    // No prototype, so an output named `__proto__` is an entry like any other.
+    const dict: Record<string, unknown> = Object.create(null)
+    for (const [key, sources] of Object.entries<any>(lineage.column_dict)) {
+      const name = target(key)
+      if (name === null) continue
+      const had = dict[name]
+      dict[name] = Array.isArray(had) && Array.isArray(sources) ? [...new Set([...had, ...sources])] : sources
+    }
+    out.column_dict = dict
+  }
+  return out
+}
 
 /**
  * The lineage with the placeholder columns taken out, and the parents whose placeholder reached the
@@ -173,6 +210,7 @@ export function dbtLineage(params: DbtLineageParams): DbtLineageResult {
     const schema = Object.keys(tables).length ? core.Schema.fromJson(JSON.stringify({ version: "1", tables })) : undefined
     const result = core.columnLineage(sql, dialect, schema)
     ;({ lineage: rawLineage, starred: missed } = withoutPlaceholders(JSON.parse(JSON.stringify(result)), placeholders))
+    rawLineage = withWarehouseNames(rawLineage, String(sql), dialect)
   } catch (e) {
     rawLineage = { error: String(e) }
   }

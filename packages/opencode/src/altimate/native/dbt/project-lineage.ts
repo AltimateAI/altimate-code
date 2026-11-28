@@ -96,10 +96,21 @@ const COLUMNS_CALL = /(?<![\w$])columns\s*\(/i
 
 /**
  * The engine's own name for an unaliased expression in a SELECT list (`_1`, `_col_1`): not the warehouse's
- * name for it. A name the SQL itself writes (`amount as _1`) is a real alias.
+ * name for it. A name a SELECT list writes, in any SELECT of the SQL (`amount as _1`, `select _1 from q`), is a
+ * real column; the same name elsewhere (a table alias `from orders _1`, a WHERE column) is not.
  */
 export function engineMade(name: string, stripped: string): boolean {
-  return ENGINE_NAME.test(name) && !new RegExp(`(?<![\\w$])${name}(?![\\w$])`, "i").test(stripped)
+  return ENGINE_NAME.test(name) && !writtenNames(stripped).has(name.toLowerCase())
+}
+
+const writtenCache = new Map<string, Set<string>>()
+
+/** The output names the SELECT lists of literal- and comment-stripped SQL write (aliases and bare columns), lower-cased. */
+function writtenNames(stripped: string): Set<string> {
+  return remember(writtenCache, hash("written", stripped), () => {
+    const names = everySelectItems(stripped).flat().map(itemName)
+    return new Set(names.filter((name): name is string => !!name && name !== "*"))
+  })
 }
 
 /**
@@ -115,44 +126,149 @@ function namesItsOutputs(outputs: string[]): boolean {
 const QUOTED = '"(?:[^"]|"")*"|`[^`]*`|\\[[^\\]]*\\]'
 const unquoteName = (name: string) => name.replace(/^["`[]|["`\]]$/g, "").toLowerCase()
 
+/** Literal- and comment-stripped SQL with each quoted name blanked whole, so `"from"` or `"a,b"` ends no item. */
+const blankQuoted = (stripped: string) => stripped.replace(new RegExp(QUOTED, "g"), (q) => " ".repeat(q.length))
+
+/** The word that ends before `end` in quote-blanked text, past whitespace and `(`, and where it starts. */
+function wordBefore(text: string, end: number): { word: string; start: number } {
+  let j = end - 1
+  while (j >= 0 && /[\s(]/.test(text[j]!)) j--
+  let k = j
+  while (k >= 0 && /[\w$]/.test(text[k]!)) k--
+  return { word: text.slice(k + 1, j + 1), start: k + 1 }
+}
+
+/**
+ * Where each `select` keyword starts in quote-blanked text, how deep in parentheses it sits, and whether it starts a
+ * later branch of a set operation (`… union all select …`), whose names the result doesn't take.
+ */
+function selectKeywords(text: string): { at: number; depth: number; later: boolean }[] {
+  const found: { at: number; depth: number; later: boolean }[] = []
+  let depth = 0
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!
+    if (ch === "(") depth++
+    else if (ch === ")") depth--
+    else if ((ch === "s" || ch === "S") && /^select(?![\w$])/i.test(text.slice(i, i + 7)) && !/[\w$]/.test(text[i - 1] ?? " ")) {
+      // A set operator is the word before, past whitespace and `(`, or the one before an `all` or `distinct`.
+      let before = wordBefore(text, i)
+      if (/^(?:all|distinct)$/i.test(before.word)) before = wordBefore(text, before.start)
+      const later = /^(?:union|intersect|except|minus)$/i.test(before.word)
+      found.push({ at: i, depth, later })
+    }
+  }
+  return found
+}
+
+/**
+ * The items of the SELECT list whose `select` starts at `at` in quote-blanked text, split at its own top-level commas.
+ * The list ends at a word that ends a SELECT list, in any case, or at the `)` that closes the parentheses around it.
+ */
+function listAt(text: string, stripped: string, at: number): { items: string[]; end: number } {
+  const start = at + 6 + modifierLength(text, at + 6)
+  const items: string[] = []
+  let from = start
+  let depth = 0
+  let i = start
+  for (; i < text.length; i++) {
+    const ch = text[i]!
+    if (ch === "(") depth++
+    else if (ch === ")") {
+      if (depth === 0) break
+      depth--
+    }
+    if (depth !== 0) continue
+    if (ch === ",") {
+      items.push(stripped.slice(from, i).trim())
+      from = i + 1
+    } else if (LIST_ENDS.test(wordAt(text, i))) break
+  }
+  items.push(stripped.slice(from, i).trim())
+  return { items: items.filter((one) => one !== ""), end: i }
+}
+
+/**
+ * Words that end a FROM clause. (`relationUse`'s list is another set: words that aren't a relation's name, such as
+ * `join` and `on`, which sit inside a FROM clause.) Words that can also be an alias (`offset`, `start`) are left out:
+ * running on past `offset 5` reads no alias, and cutting a FROM clause at an alias would lose it.
+ */
+const FROM_ENDS = /^(?:where|group|order|limit|qualify|having|window|union|intersect|except|minus)$/i
+
+const WORD = /[\w$]+/y
+
+/** The whole name that starts at `i` in quote-blanked text, read in place (no copy of the rest); "" when none starts there. */
+function wordAt(text: string, i: number): string {
+  if (/[\w$]/.test(text[i - 1] ?? " ")) return ""
+  WORD.lastIndex = i
+  return WORD.exec(text)?.[0] ?? ""
+}
+
+/**
+ * The FROM clause that follows a SELECT list ending at `end`, from literal- and comment-stripped SQL, with anything
+ * inside its parentheses (a subquery, a function's arguments) blanked, so only this SELECT's own relations and
+ * aliases show; "" when none follows.
+ */
+function fromClauseAt(text: string, stripped: string, end: number): string {
+  if (!/^from(?![\w$])/i.test(text.slice(end, end + 5))) return ""
+  let out = ""
+  let depth = 0
+  for (let i = end; i < text.length; i++) {
+    const ch = text[i]!
+    if (ch === ")" && depth === 0) break
+    if (depth === 0 && FROM_ENDS.test(wordAt(text, i))) break
+    if (ch === "(") depth++
+    out += depth > 0 ? " " : stripped[i]
+    if (ch === ")") depth--
+  }
+  return out
+}
+
 /**
  * The items of the SQL's outermost SELECT list (the first one outside parentheses, so after any WITH), split at
  * top-level commas, from literal- and comment-stripped SQL; [] when there is none.
  */
 export function selectItems(stripped: string): string[] {
-  // A quoted name is blanked whole, so `"from"` or `"a,b"` ends no item.
-  const text = stripped.replace(new RegExp(QUOTED, "g"), (q) => " ".repeat(q.length))
-  let depth = 0
-  let start = -1
-  const items: string[] = []
-  let from = 0
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i]!
-    if (ch === "(") depth++
-    else if (ch === ")") depth--
-    if (depth !== 0) continue
-    const word = /^[a-z_]+/i.exec(text.slice(i))?.[0]?.toLowerCase()
-    const boundary = i === 0 || !/[\w$]/.test(text[i - 1]!)
-    if (start < 0) {
-      if (boundary && word === "select") {
-        start = i + 6
-        start += modifierLength(text, start)
-        from = start
-        i = start - 1
-      }
-      continue
-    }
-    if (ch === ",") {
-      items.push(stripped.slice(from, i).trim())
-      from = i + 1
-    } else if (boundary && word && /^(from|into|where|union|intersect|except|group|order|limit|qualify|having|window)$/.test(word)) {
-      items.push(stripped.slice(from, i).trim())
-      return items.filter((one) => one !== "")
-    }
-  }
-  if (start >= 0) items.push(stripped.slice(from).trim())
-  return items.filter((one) => one !== "")
+  const text = blankQuoted(stripped)
+  const outer = selectKeywords(text).find((k) => k.depth === 0)
+  return outer ? listAt(text, stripped, outer.at).items : []
 }
+
+/** A SELECT item that is a bare column reference (`id`, `t.id`, `"T"."Id"`). */
+const BARE_REF = new RegExp(`^(?:(?:${QUOTED}|[\\w$]+)\\.)*(?:${QUOTED}|[\\w$]+)$`)
+
+/** Words that end a SELECT list. */
+const LIST_ENDS = /^(?:from|into|where|union|intersect|except|group|order|limit|qualify|having|window)$/i
+
+/**
+ * The items of every SELECT list that names outputs in literal- and comment-stripped SQL, in text order (so CTEs and
+ * subqueries before the outer list that reads them), each read as `selectItems` reads the outer one. A later branch of
+ * a set operation names nothing (the result takes the first branch's names), so it is left out.
+ */
+export function everySelectItems(stripped: string): string[][] {
+  return everySelectList(stripped).map((list) => list.items)
+}
+
+/** Each SELECT list `everySelectItems` reads, with the FROM clause of its own SELECT (`fromClauseAt`). */
+function everySelectList(stripped: string): { items: string[]; from: string }[] {
+  const text = blankQuoted(stripped)
+  return selectKeywords(text)
+    .filter((k) => !k.later)
+    .map((k) => {
+      const list = listAt(text, stripped, k.at)
+      return { items: list.items, from: fromClauseAt(text, stripped, list.end) }
+    })
+}
+
+/** The relation a star's qualifier names, lower-cased (`f` for `f.*` or `"F".*`, `t` for `s.t.*`); "" for a bare `*`; null for no star. */
+export function starQualifier(item: string): string | null {
+  const m = new RegExp(`^((?:(?:${QUOTED}|[\\w$]+)\\.)*)\\*(?:\\s|$)`).exec(item)
+  if (!m) return null
+  const parts = [...m[1]!.matchAll(new RegExp(`(${QUOTED}|[\\w$]+)\\.`, "g"))].map((part) => unquoteName(part[1]!))
+  return parts.at(-1) ?? ""
+}
+
+/** Words that follow a relation in FROM or JOIN without being its alias. */
+const NOT_ALIAS = /^(?:join|left|right|inner|outer|full|cross|natural|lateral|on|using|where|group|order|limit|union|intersect|except|minus|qualify|having|window|sample|tablesample|pivot|unpivot)$/i
 
 /** Words that end an expression (`x is null`, `case … end`) rather than alias it. */
 const ENDS_EXPRESSION = /^(?:null|true|false|end)$/i
@@ -164,7 +280,7 @@ const TAKES_OPERAND = /^(?:and|or|not|is|in|like|ilike|rlike|regexp|similar|to|b
  * else null.
  */
 export function itemName(item: string): string | null {
-  if (/^(?:[\w$]+\.)*\*(?:\s|$)/.test(item)) return "*"
+  if (starQualifier(item) !== null) return "*"
   const as = new RegExp(`\\s+as\\s+(${QUOTED}|[\\w$]+)$`, "i").exec(item)
   if (as) return unquoteName(as[1]!)
   const bare = new RegExp(`^(?:(?:${QUOTED}|[\\w$]+)\\.)*(${QUOTED}|[\\w$]+)$`).exec(item)
@@ -584,6 +700,7 @@ export function clearLineageCaches() {
   lineageCache.clear()
   outputColumnsCache.clear()
   readsCache.clear()
+  writtenCache.clear()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -804,13 +921,70 @@ export class ProjectLineage {
     return out
   }
 
-  /** Whether a bare `*` sits beside an output that repeats a name the star brings in (`select *, val as id`). */
+  /**
+   * Whether a SELECT list with a star, the outer one or one in a CTE or subquery, names an output twice or gives two
+   * outputs one name (`select *, val as id`, `select f.*, f.id`, `select o.*, c.*` over a shared column): the warehouse
+   * renames the repeat. A bare `*` brings every parent's columns; a qualified `t.*` brings the columns of the parent
+   * `t` names (the parent itself, or the relation an alias names in FROM or JOIN). A qualifier that names no parent (a
+   * CTE, a subquery) brings a name when the model passes a column of that name on unchanged from more sources than the
+   * list's own bare references to it.
+   */
   private renamesBesideStar(id: string, stripped: string): boolean {
-    const items = selectItems(stripped)
-    if (!items.some((item) => /^\*(?:\s|$)/.test(item))) return false
-    const brought = new Set(this.parents(id).flatMap((p) => [...(this.settledColumns(p) ?? [])]))
-    const explicit = items.map(itemName).filter((name): name is string => !!name && name !== "*")
-    return new Set(explicit).size !== explicit.length || explicit.some((name) => brought.has(name))
+    const parentColumns = new Set(this.parents(id).flatMap((p) => [...(this.settledColumns(p) ?? [])]))
+    const unchanged = new Map<string, Set<string>>()
+    for (const e of this.lineage(id).edges)
+      if (e.how === "=" && e.fromCol === e.to) unchanged.set(e.to, (unchanged.get(e.to) ?? new Set()).add(`${e.from}|${e.fromCol}`))
+    for (const { items, from } of everySelectList(stripped)) {
+      const stars = items.map(starQualifier)
+      if (stars.every((star) => star === null)) continue
+      const names = items.map(itemName)
+      const explicit = names.filter((name): name is string => !!name && name !== "*")
+      if (new Set(explicit).size !== explicit.length) return true
+      // What each star brings: every parent's columns, one parent's, or unknown.
+      const brought = stars.flatMap((star): (Set<string> | undefined)[] => {
+        if (star === null) return []
+        if (star === "") return [parentColumns]
+        const parent = this.qualifiedParent(id, star, from)
+        return [parent ? this.settledColumns(parent) : undefined]
+      })
+      const known = brought.filter((set): set is Set<string> => !!set)
+      if (explicit.some((name) => known.some((set) => set.has(name)))) return true
+      for (const [i, a] of known.entries()) for (const b of known.slice(i + 1)) for (const name of a) if (b.has(name)) return true
+      if (known.length < brought.length)
+        for (const name of explicit)
+          if ((unchanged.get(name)?.size ?? 0) > items.filter((item, i) => names[i] === name && BARE_REF.test(item)).length) return true
+    }
+    return false
+  }
+
+  /**
+   * The parent a star's qualifier names, if one, read in the FROM clause of the star's own SELECT. An alias there in
+   * FROM or JOIN names its relation (`from shop.main.orders o`) and hides a table of the same name, as in SQL; with no
+   * such alias, a parent called that (its alias or name). A qualifier whose alias names two relations, or names no
+   * parent, gives none.
+   */
+  private qualifiedParent(id: string, qualifier: string, scope: string): string | undefined {
+    const part = `(?:${QUOTED}|[\\w$]+)`
+    // The one parent a relation's parts name: its own name last, then its schema and database where written; two
+    // parents of one name in different schemas stay apart.
+    const parentOf = (parts: string[]): string | undefined => {
+      const [name, schema, database] = [...parts].reverse()
+      const lower = (value: unknown) => String(value ?? "").toLowerCase()
+      const found = this.parents(id).filter((p) => {
+        const n = this.node(p)
+        return lower(n?.alias || n?.name) === name && (!schema || lower(n?.schema) === schema) && (!database || lower(n?.database) === database)
+      })
+      return found.length === 1 ? found[0] : undefined
+    }
+    const relation = new RegExp(`(?<![\\w$])(?:from|join)\\s+((?:${part}\\.)*${part})\\s+(?:as\\s+)?(${part})(?![\\w$.])`, "gi")
+    const aliased = new Map<string, string[]>()
+    for (const m of scope.matchAll(relation)) {
+      if (NOT_ALIAS.test(m[2]!) || unquoteName(m[2]!) !== qualifier) continue
+      const parts = [...m[1]!.matchAll(new RegExp(part, "g"))].map((p) => unquoteName(p[0]))
+      aliased.set(parts.join("\0"), parts)
+    }
+    if (aliased.size) return aliased.size === 1 ? parentOf([...aliased.values()][0]!) : undefined
+    return parentOf([qualifier])
   }
 
   lineage(id: string): ModelLineage {
@@ -890,24 +1064,11 @@ export class ProjectLineage {
       seen.add(dedupe)
       edges.push({ from, fromCol, to, ...howOfEdge(e, fromCol, to) })
     }
-    // The engine names an unaliased expression twice: `_N`, as if the value passed through unchanged, and
-    // `_col_N`, how unknown. Keep the second; the warehouse picks the real name.
-    // A `_N` the SQL itself writes (`amount as _1`) is a real alias and stays.
-    const stripped = stripSql(raw)
-    const named = new Set(edges.filter((e) => /^_col_\d+$/.test(e.to)).map((e) => `${e.from}|${e.fromCol}|${e.to.slice(5)}`))
+    const names = warehouseNames(edges.map((e) => ({ source: `${e.from}|${e.fromCol}`, to: e.to })), stripSql(raw), this.dialect)
     for (let i = edges.length - 1; i >= 0; i--) {
-      const e = edges[i]!
-      if (/^_\d+$/.test(e.to) && engineMade(e.to, stripped) && named.has(`${e.from}|${e.fromCol}|${e.to.slice(1)}`)) edges.splice(i, 1)
-    }
-    // Postgres and Redshift name an unaliased cast of a column after the column (`amount::numeric` is `amount`).
-    if (this.dialect === "postgres" || this.dialect === "redshift") {
-      const items = selectItems(stripped)
-      for (const e of edges) {
-        // A `_col_N` the SQL writes itself (`amount::numeric as _col_1`) is that output's name: keep it.
-        const n = engineMade(e.to, stripped) ? /^_col_(\d+)$/.exec(e.to)?.[1] : undefined
-        const name = n === undefined ? null : castColumn(items[Number(n)] ?? "")
-        if (name && !edges.some((o) => o.from === e.from && o.fromCol === e.fromCol && o.to === name)) e.to = name
-      }
+      const name = names[i]
+      if (name === null) edges.splice(i, 1)
+      else edges[i]!.to = name!
     }
     const errors: unknown[] = Array.isArray(result.errors) ? result.errors : []
     const firstError = (): string => {
@@ -923,6 +1084,26 @@ export class ProjectLineage {
       }
     return { edges, flags, ...(errors.length && { partial: firstError() }) }
   }
+}
+
+/**
+ * The warehouse's names for edges the engine labels, given each edge's source and target (lower-cased): null drops the
+ * edge. The engine names an unaliased expression twice: `_N`, as if the value passed through unchanged, and `_col_N`,
+ * how unknown. The `_N` of a `_col_N` from the same source goes; the warehouse picks the real name. On Postgres and
+ * Redshift a `_col_N` that is an unaliased cast of a column (`amount::numeric`) takes the column's name, unless that
+ * source already reaches the name. A `_N` or `_col_N` a SELECT list writes (`amount as _1`) is the output's name.
+ */
+export function warehouseNames(edges: { source: string; to: string }[], stripped: string, dialect: string): (string | null)[] {
+  const twins = new Set(edges.filter((e) => /^_col_\d+$/.test(e.to)).map((e) => `${e.source}|${e.to.slice(5)}`))
+  const casts = dialect === "postgres" || dialect === "redshift"
+  const items = casts ? selectItems(stripped) : []
+  const out: (string | null)[] = edges.map((e) => (/^_\d+$/.test(e.to) && engineMade(e.to, stripped) && twins.has(`${e.source}|${e.to.slice(1)}`) ? null : e.to))
+  for (const [i, e] of edges.entries()) {
+    const n = casts && out[i] !== null && engineMade(e.to, stripped) ? /^_col_(\d+)$/.exec(e.to)?.[1] : undefined
+    const name = n === undefined ? null : castColumn(items[Number(n)] ?? "")
+    if (name && !edges.some((o, j) => o.source === e.source && out[j] === name)) out[i] = name
+  }
+  return out
 }
 
 function howOfEdge(e: any, fromCol: string, to: string) {

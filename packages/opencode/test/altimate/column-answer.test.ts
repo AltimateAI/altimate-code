@@ -1444,6 +1444,172 @@ describe("both tools: names at the edges", () => {
     expect(Object.keys((folded.raw_lineage as any).column_dict ?? {}).sort()).toEqual(["id", "val", "val_1"])
   })
 
+  test("a _N written outside the SELECT lists is no alias: a table alias _1 adds no fake _1 column", () => {
+    for (const [dialect, sql] of [["duckdb", "select _1.order_id, _1.amount * 2 from"], ["snowflake", "select _1.order_id, _1.amount * 2 from"],
+      ["postgres", "select _1.order_id, _1.amount * 2 from"], ["duckdb", "SELECT _1.order_id, _1.amount * 2 FROM"]]) {
+      const path = write(nodes(dialect!, [
+        model("orders", [], "select 1 as order_id, 2.5 as amount", ["order_id", "amount"]),
+        model("r", ["orders"], `${sql} ${T("orders")} _1`),
+        model("child", ["r"], `select * from ${T("r")}`),
+      ]))
+      expect(carried(columnAnswer(path, "orders", "amount"))).not.toEqual(expect.arrayContaining(["r._1"]))
+      const lineage = dbtLineage({ manifest_path: path, model: "child" })
+      expect(Object.keys((lineage.raw_lineage as any).column_dict ?? {})).not.toContain("_1")
+    }
+  })
+
+  test("a _col_N written outside the SELECT lists doesn't stop a cast from taking its column's name", () => {
+    for (const r of [`select id, amount::numeric from ${T("f")} as _col_1`, `select id, amount::numeric from ${T("f")} where _col_1 > 0`]) {
+      const path = write(nodes("postgres", [
+        model("f", [], "select 1 as id, 2.5 as amount, 3 as _col_1", ["id", "amount", "_col_1"]),
+        model("r", ["f"], r),
+      ]))
+      expect(carried(columnAnswer(path, "f", "amount"))).toEqual(["r.amount"])
+    }
+  })
+
+  test("a repeat beside a qualified or CTE-wrapped star doesn't settle, and a join that repeats nothing still does", () => {
+    for (const r of [`select f.*, val as id from ${T("f")} f`, `with q as (select *, val as id from ${T("f")}) select * from q`,
+      `SELECT f.*, val AS id FROM ${T("f")} f`]) {
+      const path = write(nodes("duckdb", [
+        model("f", [], "select 1 as id, 2 as val", ["id", "val"]),
+        model("r", ["f"], r),
+        model("child", ["r"], `select id_1 as x from ${T("r")}`),
+      ]))
+      expect(() => columnReach(path, "r", "id_1")).not.toThrow()
+      expect(() => columnAnswer(path, "r", "id_1")).not.toThrow()
+    }
+    // A star over one parent that resolves through its alias: a repeat of its own column, two stars that share a
+    // column, a quoted qualifier.
+    const two = (r: string, col: string) => {
+      const path = write(nodes("duckdb", [
+        model("orders", [], "select 1 as id, 2 as customer_id", ["id", "customer_id"]),
+        model("customers", [], "select 2 as customer_id, 'x' as name", ["customer_id", "name"]),
+        model("r", ["orders", "customers"], r),
+      ]))
+      expect(() => columnReach(path, "r", col)).not.toThrow()
+    }
+    two(`select o.*, o.id from ${T("orders")} o`, "id_1")
+    two(`select o.*, c.* from ${T("orders")} o join ${T("customers")} c on o.customer_id = c.customer_id`, "customer_id_1")
+    two(`select "o".*, o.customer_id as id from ${T("orders")} "o"`, "id_1")
+    // An alias hides a parent of the same name: `customers` is aliased `orders` here, so `orders.*` reads customers.
+    two(`select orders.*, 1 as name from ${T("customers")} orders join ${T("orders")} o2 on orders.customer_id = o2.customer_id`, "name_1")
+    // Two parents of one name in different schemas: the relation's schema says which one the star reads, in either order.
+    for (const order of [["one_shared", "two_shared"], ["two_shared", "one_shared"]]) {
+      const path = write(nodes("duckdb", [
+        model("one_shared", [], "select 1 as id", ["id"], { alias: "shared", schema: "one" }),
+        model("two_shared", [], "select 2 as other", ["other"], { alias: "shared", schema: "two" }),
+        model("r", order, `select f.*, f.id from "shop"."one"."shared" f cross join "shop"."two"."shared" g`),
+      ]))
+      expect(() => columnReach(path, "r", "id_1")).not.toThrow()
+    }
+    // An alias resolves in the star's own SELECT: a CTE's alias `orders` for customers doesn't reach the outer `orders.*`.
+    const scoped = write(nodes("duckdb", [
+      model("orders", [], "select 1 as id, 2 as customer_id", ["id", "customer_id"]),
+      model("customers", [], "select 2 as customer_id, 'x' as name", ["customer_id", "name"]),
+      model("r", ["orders", "customers"], `with x as (select orders.customer_id from ${T("customers")} orders) select orders.*, 1 as name from ${T("orders")} cross join x`),
+    ]))
+    expect(() => columnReach(scoped, "r", "nope")).toThrow(/has no column nope/)
+    // A name that starts like an end word (`group1`) is a whole name: it ends no FROM clause, so the alias after it holds.
+    const words = write(nodes("duckdb", [
+      model("orders", [], "select 1 as id", ["id"]),
+      model("group1", [], "select 2 as id, 'x' as name", ["id", "name"]),
+      model("r", ["orders", "group1"], `select orders.*, 1 as name from ${T("group1")} orders cross join ${T("orders")} o`),
+    ]))
+    expect(() => columnReach(words, "r", "name_1")).not.toThrow()
+    // An alias that is also a clause word in some dialect (`start`, `offset`) still names its relation.
+    const aliasWords = write(nodes("duckdb", [
+      model("orders", [], "select 1 as id", ["id"]),
+      model("group1", [], "select 2 as id, 'x' as name", ["id", "name"]),
+      model("r", ["orders", "group1"], `select start.*, start.name from ${T("group1")} as start cross join ${T("orders")} o`),
+    ]))
+    expect(() => columnReach(aliasWords, "r", "name_1")).not.toThrow()
+    // A UNION's branches each name their own list: two stars in two branches repeat nothing.
+    const union = write(nodes("duckdb", [
+      model("a", [], "select 1 as id", ["id"]),
+      model("b", [], "select 2 as id", ["id"]),
+      model("r", ["a", "b"], `select a.* from ${T("a")} a union all select b.* from ${T("b")} b`),
+    ]))
+    expect(() => columnReach(union, "r", "nope")).toThrow(/has no column nope/)
+    // `o.*` brings no `name`, so `c.name` repeats nothing and the model's columns stay settled.
+    const join = write(nodes("duckdb", [
+      model("orders", [], "select 1 as id, 2 as customer_id", ["id", "customer_id"]),
+      model("customers", [], "select 2 as customer_id, 'x' as name", ["customer_id", "name"]),
+      model("r", ["orders", "customers"], `select o.*, c.name from ${T("orders")} o join ${T("customers")} c on o.customer_id = c.customer_id`),
+    ]))
+    expect(() => columnReach(join, "r", "nope")).toThrow(/has no column nope/)
+  })
+
+  test("an alias in a later UNION branch names no output, so the engine's _col_1 there stays an engine name", () => {
+    const path = write(nodes("duckdb", [
+      model("a", [], "select 1 as id, 2.5 as amount", ["id", "amount"]),
+      model("b", [], "select 2 as id, 3.5 as amount", ["id", "amount"]),
+      model("r", ["a", "b"], `select id, amount * 2 from ${T("a")} union all select id, amount as _col_1 from ${T("b")}`),
+      model("child", ["r"], `select * from ${T("r")}`),
+    ]))
+    // The lineage must have worked: the child lists `id`, and no engine error stands in for an empty answer.
+    const listed = (manifest: string) => {
+      const raw = dbtLineage({ manifest_path: manifest, model: "child" }).raw_lineage as any
+      expect(raw.error).toBeUndefined()
+      return Object.keys(raw.column_dict ?? {})
+    }
+    expect(listed(path)).toContain("id")
+    expect(listed(path)).not.toContain("_col_1")
+    // However far indentation puts the operator from the branch's SELECT.
+    const indented = write(nodes("duckdb", [
+      model("a", [], "select 1 as id, 2.5 as amount", ["id", "amount"]),
+      model("b", [], "select 2 as id, 3.5 as amount", ["id", "amount"]),
+      model("r", ["a", "b"], `select id, amount * 2 from ${T("a")} union all\n${" ".repeat(60)}(\n${" ".repeat(60)}select id, amount as _col_1 from ${T("b")})`),
+      model("child", ["r"], `select * from ${T("r")}`),
+    ]))
+    expect(listed(indented)).toContain("id")
+    expect(listed(indented)).not.toContain("_col_1")
+  })
+
+  test("a column that starts like an end word (order1) doesn't end the SELECT list before a written _1", () => {
+    const path = write(nodes("duckdb", [
+      model("f", [], "select 1 as order1, 2.5 as amount", ["order1", "amount"]),
+      model("r", ["f"], `select order1, amount as _1 from ${T("f")}`),
+      model("child", ["r"], `select * from ${T("r")}`),
+    ]))
+    const raw = dbtLineage({ manifest_path: path, model: "child" }).raw_lineage as any
+    expect(Object.keys(raw.column_dict ?? {}).sort()).toEqual(["_1", "order1"])
+  })
+
+  test("a _N written in upper-case SQL is still a real alias", () => {
+    const path = write(nodes("duckdb", [
+      model("f", [], "select 1 as id, 2.5 as amount", ["id", "amount"]),
+      model("r", ["f"], `SELECT id, amount AS _1 FROM ${T("f")}`),
+      model("child", ["r"], `select * from ${T("r")}`),
+    ]))
+    const lineage = dbtLineage({ manifest_path: path, model: "child" })
+    expect(Object.keys((lineage.raw_lineage as any).column_dict ?? {}).sort()).toEqual(["_1", "id"])
+  })
+
+  test("dbt_lineage keeps a written _1 beside a renamed cast, and an output named __proto__", () => {
+    const written = write(nodes("postgres", [
+      model("orders", [], "select 1 as order_id, 2.5 as amount", ["order_id", "amount"]),
+      model("r", ["orders"], `select amount as _1, amount::numeric from ${T("orders")}`),
+    ]))
+    expect(Object.keys((dbtLineage({ manifest_path: written, model: "r" }).raw_lineage as any).column_dict ?? {}).sort()).toEqual(["_1", "amount"])
+    const proto = write(nodes("postgres", [
+      model("f", [], `select 1 as id, 2 as "__proto__"`, ["id", "__proto__"]),
+      model("r", ["f"], `select id, "__proto__"::numeric from ${T("f")}`),
+    ]))
+    expect(Object.keys((dbtLineage({ manifest_path: proto, model: "r" }).raw_lineage as any).column_dict ?? {}).sort()).toEqual(["__proto__", "id"])
+  })
+
+  test("dbt_lineage names a model's own unaliased cast after its column on Postgres and Redshift, as column_answer does", () => {
+    for (const dialect of ["postgres", "redshift"]) {
+      const path = write(nodes(dialect, [
+        model("orders", [], "select 1 as order_id, 2.5 as amount", ["order_id", "amount"]),
+        model("r", ["orders"], `select order_id, amount::numeric from ${T("orders")}`),
+      ]))
+      const lineage = dbtLineage({ manifest_path: path, model: "r" })
+      expect(Object.keys((lineage.raw_lineage as any).column_dict ?? {}).sort()).toEqual(["amount", "order_id"])
+    }
+  })
+
   test("the text line says how many may-carry models are only not traced, without suggesting no effect", () => {
     const path = write(nodes("duckdb", [
       model("f", [], "select 1 as id, 2 as val", ["id", "val"]),
