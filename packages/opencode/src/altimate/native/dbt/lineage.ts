@@ -23,13 +23,19 @@ function withWarehouseNames(lineage: Record<string, any>, sql: string, dialect: 
   const renamed = new Map<string, string>()
   for (const [i, e] of edges.entries()) if (names[i] && names[i] !== e.to) renamed.set(e.to, names[i]!)
   if (!renamed.size) return lineage
-  // The `_N` twin of a renamed `_col_N` goes with it.
-  const dropped = new Set([...renamed.keys()].map((label) => `_${label.slice(5)}`))
+  // The `_N` twin of a renamed `_col_N` goes with it, where `warehouseNames` drops every edge into it; a `_N` the SQL
+  // writes (`amount as _1`) keeps its edges there, and so stays.
+  const dropped = new Set(
+    [...renamed.keys()]
+      .map((label) => `_${label.slice(5)}`)
+      .filter((label) => edges.some((e) => e.to === label) && edges.every((e, i) => e.to !== label || names[i] === null)),
+  )
   const target = (text: unknown) => (dropped.has(lower(text)) ? null : (renamed.get(lower(text)) ?? String(text)))
   const out: Record<string, unknown> = { ...lineage }
   out.column_lineage = lineage.column_lineage.flatMap((e: any) => (target(e?.target) === null ? [] : [{ ...e, target: target(e?.target) }]))
   if (lineage.column_dict && typeof lineage.column_dict === "object") {
-    const dict: Record<string, unknown> = {}
+    // No prototype, so an output named `__proto__` is an entry like any other.
+    const dict: Record<string, unknown> = Object.create(null)
     for (const [key, sources] of Object.entries<any>(lineage.column_dict)) {
       const name = target(key)
       if (name === null) continue

@@ -126,83 +126,93 @@ function namesItsOutputs(outputs: string[]): boolean {
 const QUOTED = '"(?:[^"]|"")*"|`[^`]*`|\\[[^\\]]*\\]'
 const unquoteName = (name: string) => name.replace(/^["`[]|["`\]]$/g, "").toLowerCase()
 
+/** Literal- and comment-stripped SQL with each quoted name blanked whole, so `"from"` or `"a,b"` ends no item. */
+const blankQuoted = (stripped: string) => stripped.replace(new RegExp(QUOTED, "g"), (q) => " ".repeat(q.length))
+
+/**
+ * Where each `select` keyword starts in quote-blanked text, how deep in parentheses it sits, and whether it starts a
+ * later branch of a set operation (`… union all select …`), whose names the result doesn't take.
+ */
+function selectKeywords(text: string): { at: number; depth: number; later: boolean }[] {
+  const found: { at: number; depth: number; later: boolean }[] = []
+  let depth = 0
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!
+    if (ch === "(") depth++
+    else if (ch === ")") depth--
+    else if (/^select(?![\w$])/i.test(text.slice(i, i + 7)) && !/[\w$]/.test(text[i - 1] ?? " ")) {
+      const later = /(?<![\w$])(?:union|intersect|except|minus)(?:\s+(?:all|distinct))?\s*\(?\s*$/i.test(text.slice(0, i))
+      found.push({ at: i, depth, later })
+    }
+  }
+  return found
+}
+
+/**
+ * The items of the SELECT list whose `select` starts at `at` in quote-blanked text, split at its own top-level commas.
+ * The list ends at a word that ends a SELECT list, in any case, or at the `)` that closes the parentheses around it.
+ */
+function listAt(text: string, stripped: string, at: number): string[] {
+  const start = at + 6 + modifierLength(text, at + 6)
+  const items: string[] = []
+  let from = start
+  let depth = 0
+  let i = start
+  for (; i < text.length; i++) {
+    const ch = text[i]!
+    if (ch === "(") depth++
+    else if (ch === ")") {
+      if (depth === 0) break
+      depth--
+    }
+    if (depth !== 0) continue
+    if (ch === ",") {
+      items.push(stripped.slice(from, i).trim())
+      from = i + 1
+    } else if (!/[\w$]/.test(text[i - 1] ?? " ") && LIST_ENDS.test(/^[a-z_]+/i.exec(text.slice(i))?.[0] ?? "")) break
+  }
+  items.push(stripped.slice(from, i).trim())
+  return items.filter((one) => one !== "")
+}
+
 /**
  * The items of the SQL's outermost SELECT list (the first one outside parentheses, so after any WITH), split at
  * top-level commas, from literal- and comment-stripped SQL; [] when there is none.
  */
 export function selectItems(stripped: string): string[] {
-  // A quoted name is blanked whole, so `"from"` or `"a,b"` ends no item.
-  const text = stripped.replace(new RegExp(QUOTED, "g"), (q) => " ".repeat(q.length))
-  let depth = 0
-  let start = -1
-  const items: string[] = []
-  let from = 0
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i]!
-    if (ch === "(") depth++
-    else if (ch === ")") depth--
-    if (depth !== 0) continue
-    const word = /^[a-z_]+/i.exec(text.slice(i))?.[0]?.toLowerCase()
-    const boundary = i === 0 || !/[\w$]/.test(text[i - 1]!)
-    if (start < 0) {
-      if (boundary && word === "select") {
-        start = i + 6
-        start += modifierLength(text, start)
-        from = start
-        i = start - 1
-      }
-      continue
-    }
-    if (ch === ",") {
-      items.push(stripped.slice(from, i).trim())
-      from = i + 1
-    } else if (boundary && word && LIST_ENDS.test(word)) {
-      items.push(stripped.slice(from, i).trim())
-      return items.filter((one) => one !== "")
-    }
-  }
-  if (start >= 0) items.push(stripped.slice(from).trim())
-  return items.filter((one) => one !== "")
+  const text = blankQuoted(stripped)
+  const outer = selectKeywords(text).find((k) => k.depth === 0)
+  return outer ? listAt(text, stripped, outer.at) : []
 }
 
 /** A SELECT item that is a bare column reference (`id`, `t.id`, `"T"."Id"`). */
 const BARE_REF = new RegExp(`^(?:(?:${QUOTED}|[\\w$]+)\\.)*(?:${QUOTED}|[\\w$]+)$`)
 
 /** Words that end a SELECT list. */
-const LIST_ENDS = /^(?:from|into|where|union|intersect|except|group|order|limit|qualify|having|window)$/
+const LIST_ENDS = /^(?:from|into|where|union|intersect|except|group|order|limit|qualify|having|window)$/i
 
 /**
- * The items of every SELECT list in literal- and comment-stripped SQL, in text order (so CTEs and subqueries before
- * the outer list that reads them), each split at its own top-level commas. A list ends at a word that ends a SELECT
- * list, or at the `)` that closes the parentheses it sits in.
+ * The items of every SELECT list that names outputs in literal- and comment-stripped SQL, in text order (so CTEs and
+ * subqueries before the outer list that reads them), each read as `selectItems` reads the outer one. A later branch of
+ * a set operation names nothing (the result takes the first branch's names), so it is left out.
  */
 export function everySelectItems(stripped: string): string[][] {
-  const text = stripped.replace(new RegExp(QUOTED, "g"), (q) => " ".repeat(q.length))
-  const lists: string[][] = []
-  for (const m of text.matchAll(/(?<![\w$])select(?![\w$])/gi)) {
-    const start = m.index + 6 + modifierLength(text, m.index + 6)
-    const items: string[] = []
-    let from = start
-    let depth = 0
-    let i = start
-    for (; i < text.length; i++) {
-      const ch = text[i]!
-      if (ch === "(") depth++
-      else if (ch === ")") {
-        if (depth === 0) break
-        depth--
-      }
-      if (depth !== 0) continue
-      if (ch === ",") {
-        items.push(stripped.slice(from, i).trim())
-        from = i + 1
-      } else if (!/[\w$]/.test(text[i - 1] ?? " ") && LIST_ENDS.test(/^[a-z_]+/i.exec(text.slice(i))?.[0] ?? "")) break
-    }
-    items.push(stripped.slice(from, i).trim())
-    lists.push(items.filter((one) => one !== ""))
-  }
-  return lists
+  const text = blankQuoted(stripped)
+  return selectKeywords(text)
+    .filter((k) => !k.later)
+    .map((k) => listAt(text, stripped, k.at))
 }
+
+/** The relation a star's qualifier names, lower-cased (`f` for `f.*` or `"F".*`, `t` for `s.t.*`); "" for a bare `*`; null for no star. */
+export function starQualifier(item: string): string | null {
+  const m = new RegExp(`^((?:(?:${QUOTED}|[\\w$]+)\\.)*)\\*(?:\\s|$)`).exec(item)
+  if (!m) return null
+  const parts = [...m[1]!.matchAll(new RegExp(`(${QUOTED}|[\\w$]+)\\.`, "g"))].map((part) => unquoteName(part[1]!))
+  return parts.at(-1) ?? ""
+}
+
+/** Words that follow a relation in FROM or JOIN without being its alias. */
+const NOT_ALIAS = /^(?:join|left|right|inner|outer|full|cross|natural|lateral|on|using|where|group|order|limit|union|intersect|except|minus|qualify|having|window|sample|tablesample|pivot|unpivot)$/i
 
 /** Words that end an expression (`x is null`, `case … end`) rather than alias it. */
 const ENDS_EXPRESSION = /^(?:null|true|false|end)$/i
@@ -214,7 +224,7 @@ const TAKES_OPERAND = /^(?:and|or|not|is|in|like|ilike|rlike|regexp|similar|to|b
  * else null.
  */
 export function itemName(item: string): string | null {
-  if (/^(?:[\w$]+\.)*\*(?:\s|$)/.test(item)) return "*"
+  if (starQualifier(item) !== null) return "*"
   const as = new RegExp(`\\s+as\\s+(${QUOTED}|[\\w$]+)$`, "i").exec(item)
   if (as) return unquoteName(as[1]!)
   const bare = new RegExp(`^(?:(?:${QUOTED}|[\\w$]+)\\.)*(${QUOTED}|[\\w$]+)$`).exec(item)
@@ -856,10 +866,12 @@ export class ProjectLineage {
   }
 
   /**
-   * Whether a SELECT list with a star, the outer one or one in a CTE or subquery, names an output twice or gives an
-   * output a name the star brings in (`select *, val as id`, `select f.*, val as id`): the warehouse renames the
-   * repeat. A bare `*` brings every parent's columns. A qualified `t.*` brings a name when the model passes a column
-   * of that name on unchanged from more sources than the list's own bare references to it.
+   * Whether a SELECT list with a star, the outer one or one in a CTE or subquery, names an output twice or gives two
+   * outputs one name (`select *, val as id`, `select f.*, f.id`, `select o.*, c.*` over a shared column): the warehouse
+   * renames the repeat. A bare `*` brings every parent's columns; a qualified `t.*` brings the columns of the parent
+   * `t` names (the parent itself, or the relation an alias names in FROM or JOIN). A qualifier that names no parent (a
+   * CTE, a subquery) brings a name when the model passes a column of that name on unchanged from more sources than the
+   * list's own bare references to it.
    */
   private renamesBesideStar(id: string, stripped: string): boolean {
     const parentColumns = new Set(this.parents(id).flatMap((p) => [...(this.settledColumns(p) ?? [])]))
@@ -867,17 +879,44 @@ export class ProjectLineage {
     for (const e of this.lineage(id).edges)
       if (e.how === "=" && e.fromCol === e.to) unchanged.set(e.to, (unchanged.get(e.to) ?? new Set()).add(`${e.from}|${e.fromCol}`))
     for (const items of everySelectItems(stripped)) {
+      const stars = items.map(starQualifier)
+      if (stars.every((star) => star === null)) continue
       const names = items.map(itemName)
-      if (!names.includes("*")) continue
       const explicit = names.filter((name): name is string => !!name && name !== "*")
       if (new Set(explicit).size !== explicit.length) return true
-      const bareStar = items.some((item) => /^\*(?:\s|$)/.test(item))
-      for (const name of explicit) {
-        if (bareStar ? parentColumns.has(name) : (unchanged.get(name)?.size ?? 0) > items.filter((item, i) => names[i] === name && BARE_REF.test(item)).length)
-          return true
-      }
+      // What each star brings: every parent's columns, one parent's, or unknown.
+      const brought = stars.flatMap((star): (Set<string> | undefined)[] => {
+        if (star === null) return []
+        if (star === "") return [parentColumns]
+        const parent = this.qualifiedParent(id, star, stripped)
+        return [parent ? this.settledColumns(parent) : undefined]
+      })
+      const known = brought.filter((set): set is Set<string> => !!set)
+      if (explicit.some((name) => known.some((set) => set.has(name)))) return true
+      for (const [i, a] of known.entries()) for (const b of known.slice(i + 1)) for (const name of a) if (b.has(name)) return true
+      if (known.length < brought.length)
+        for (const name of explicit)
+          if ((unchanged.get(name)?.size ?? 0) > items.filter((item, i) => names[i] === name && BARE_REF.test(item)).length) return true
     }
     return false
+  }
+
+  /**
+   * The parent a star's qualifier names, if one: a parent called that (its alias or name), or the relation that an
+   * alias names in FROM or JOIN (`from shop.main.orders o`). A qualifier that names no parent, or names two, gives none.
+   */
+  private qualifiedParent(id: string, qualifier: string, stripped: string): string | undefined {
+    const byName = new Map(this.parents(id).map((p) => [String(this.node(p)?.alias || this.node(p)?.name || "").toLowerCase(), p]))
+    if (byName.has(qualifier)) return byName.get(qualifier)
+    const part = `(?:${QUOTED}|[\\w$]+)`
+    const relation = new RegExp(`(?<![\\w$])(?:from|join)\\s+((?:${part}\\.)*${part})\\s+(?:as\\s+)?(${part})(?![\\w$.])`, "gi")
+    const named = new Set<string>()
+    for (const m of stripped.matchAll(relation)) {
+      if (NOT_ALIAS.test(m[2]!) || unquoteName(m[2]!) !== qualifier) continue
+      const last = [...m[1]!.matchAll(new RegExp(part, "g"))].at(-1)?.[0] ?? ""
+      named.add(unquoteName(last))
+    }
+    return named.size === 1 ? byName.get([...named][0]!) : undefined
   }
 
   lineage(id: string): ModelLineage {
