@@ -7,6 +7,7 @@ import type { DbtLineageResult } from "../native/types"
 import { loadRawManifest } from "../native/dbt/helpers"
 import { lineageGraph } from "../native/dbt/graph"
 import { projectRoot } from "../native/connections/registry"
+import type { dbtPartialManifestNote } from "../native/connections/register"
 
 /** The structured result of dbt-integration's `getModelLineage` (version 1), relayed as is. */
 export type ModelLineage = {
@@ -38,7 +39,7 @@ export type ModelLineage = {
 
 export const DbtLineageTool = Tool.define("dbt_lineage", {
   description:
-    "Column-level lineage for a dbt model: its upstream models, seeds and sources, its downstream models, their columns, and the column edges between them. Pass `column` to trace one column. Where writes are allowed, uses the project's dbt integration (compiles on demand, no `dbt compile` needed; up to 3 hops each way) and returns the result as structured content; a read-only call, or one without the integration, reads the compiled SQL in the manifest and traces the model's own SQL.",
+    "Column-level lineage for a dbt model: its upstream models, seeds and sources, its downstream models, their columns, and the column edges between them. Pass `column` to trace one column. Where writes are allowed, uses the project's dbt integration (compiles on demand, no `dbt compile` needed; up to 3 hops each way) and returns the result as structured content; a read-only call, or one without the integration, reads the compiled SQL in the manifest and traces the model's own SQL. While the dbt integration is running and its last parse had errors, the answer starts with a note naming the files that failed to parse: dbt Fusion leaves them out of the manifest, so the graph is missing parts.",
   parameters: z.object({
     model: z
       .string()
@@ -75,21 +76,27 @@ export const DbtLineageTool = Tool.define("dbt_lineage", {
       const what = result.focus.column ? `${result.focus.name}.${result.focus.column}` : result.focus.name
       // A lineage viewer also wants the manifest's graph: exposures and tests sit there, not here.
       const graph = args.include_graph ? manifestGraph(args.manifest_path ?? (await defaultManifestPath(session)), result.focus.uniqueId) : undefined
+      const partial = await partialManifest(readOnly)
       return {
         title: `dbt Lineage: ${what} [${result.confidence}]`,
         metadata: {
           model_name: result.focus.name,
           model_unique_id: result.focus.uniqueId,
           confidence: result.confidence,
+          ...(partial && { partial_manifest: partial }),
           structuredContent: result,
           ...(graph?.graph && { graph: graph.graph }),
           ...(graph?.error && { graph_error: graph.error }),
         },
-        output: formatModelLineage(result),
+        output: withPartialNote(partial, formatModelLineage(result)),
       }
     }
     const notUsed = viaAdapter.reason ? `dbt integration not used: ${viaAdapter.reason}` : undefined
     const manifestPath = args.manifest_path ?? (await defaultManifestPath(session))
+    ctx.abort.throwIfAborted()
+    // The manifest read here is the one the running adapter's last parse wrote only when it lies in that
+    // adapter's project.
+    const partial = await partialManifest(readOnly, manifestPath)
     ctx.abort.throwIfAborted()
     try {
       const result = await Dispatcher.call("dbt.lineage", {
@@ -111,24 +118,53 @@ export const DbtLineageTool = Tool.define("dbt_lineage", {
           model_name: result.model_name,
           model_unique_id: result.model_unique_id ?? null,
           confidence: result.confidence,
+          ...(partial && { partial_manifest: partial }),
           confidence_factors: result.confidence_factors,
           upstream: result.upstream ?? [],
           columns: lineage?.column_dict ?? {},
           edges: Array.isArray(lineage?.column_lineage) ? lineage.column_lineage : [],
           ...(result.graph && { graph: result.graph }),
         },
-        output: formatDbtLineage(result),
+        output: withPartialNote(partial, formatDbtLineage(result)),
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       return {
         title: "dbt Lineage: ERROR",
-        metadata: { model_name: args.model, confidence: "unknown", error: msg },
-        output: `Failed: ${msg}${notUsed ? `\n(${notUsed})` : ""}`,
+        metadata: { model_name: args.model, confidence: "unknown", ...(partial && { partial_manifest: partial }), error: msg },
+        output: withPartialNote(partial, `Failed: ${msg}${notUsed ? `\n(${notUsed})` : ""}`),
       }
     }
   },
 })
+
+type PartialManifestNote = NonNullable<Awaited<ReturnType<typeof dbtPartialManifestNote>>>
+
+/**
+ * The running dbt adapter's note when its last parse had errors, so the manifest dbt wrote is missing
+ * what failed to parse. It answers for the adapter's own lineage, and for a manifest that exists in the
+ * adapter's project. A read-only call never asks: it never uses the adapter.
+ */
+async function partialManifest(readOnly: boolean, manifest?: string): Promise<PartialManifestNote | undefined> {
+  if (readOnly) return undefined
+  const { dbtPartialManifestNote } = await import("../native/connections/register")
+  const note = await dbtPartialManifestNote()
+  if (!note || manifest === undefined) return note
+  return fs.existsSync(manifest) && !(await manifestOutsideAdapterProject(manifest)) ? note : undefined
+}
+
+/** Text errors listed under the partial manifest's note; the metadata carries them all. */
+const MAX_TEXT_PARSE_ERRORS = 10
+
+/** The answer led by the partial manifest's note: a long answer can be cut off on its way to the reader. */
+function withPartialNote(note: PartialManifestNote | undefined, text: string): string {
+  if (!note) return text
+  const errors = note.errors
+    .slice(0, MAX_TEXT_PARSE_ERRORS)
+    .map((e) => `  ${e.file_path}: ${e.message.split("\n").join("\n    ")}`)
+  if (note.errors.length > MAX_TEXT_PARSE_ERRORS) errors.push(`  … ${note.errors.length - MAX_TEXT_PARSE_ERRORS} more in the metadata`)
+  return [note.message, ...errors, "", text].join("\n")
+}
 
 /**
  * Why a named manifest is not the adapter's project's, or undefined when it is: it must lie in that

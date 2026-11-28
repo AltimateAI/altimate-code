@@ -50,7 +50,7 @@ export async function serverInstructions(): Promise<string> {
 // text (for dbt_lineage only its header: the mappings and edges travel as data), only the lineage
 // fields are passed, and the whole is capped.
 const STRUCTURED_FIELDS: Record<string, readonly string[]> = {
-  dbt_lineage: ["model_name", "model_unique_id", "confidence", "confidence_factors", "upstream", "columns", "edges", "error"],
+  dbt_lineage: ["model_name", "model_unique_id", "confidence", "partial_manifest", "confidence_factors", "upstream", "columns", "edges", "error"],
   dbt_sql_graph: ["model", "nodes", "edges", "error"],
   impact_analysis: [
     "model",
@@ -93,7 +93,9 @@ export function structuredResult(tool: string, metadata: Record<string, unknown>
   if (own && typeof own === "object" && !Array.isArray(own)) {
     // The text repeats every edge that `columnLineage` already carries: only its header goes with them.
     const head = report.split(/\n(?:Column edges \(|Trace of )/)[0]!.trim()
-    const full = { ...(own as Record<string, unknown>), report: head }
+    // The partial-parse mark is the tool's, not the integration's: it goes beside the result.
+    const mark = "partial_manifest" in metadata ? { partial_manifest: metadata.partial_manifest } : {}
+    const full = { ...(own as Record<string, unknown>), ...mark, report: head }
     return Buffer.byteLength(JSON.stringify(full)) <= STRUCTURED_MAX_BYTES ? full : capReport(report, true)
   }
   const fields = Object.fromEntries((STRUCTURED_FIELDS[tool] ?? []).filter((key) => key in metadata).map((key) => [key, metadata[key]]))
