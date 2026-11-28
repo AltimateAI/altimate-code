@@ -5,7 +5,7 @@ import { join } from "node:path"
 import { ENGINE, MAX_ANSWER_COLUMNS, columnAnswer, describeAnswer, type ColumnAnswer } from "../../src/altimate/native/dbt/column-answer"
 import { columnReach, namesColumn } from "../../src/altimate/native/dbt/column-reach"
 import { dbtLineage } from "../../src/altimate/native/dbt/lineage"
-import { castColumn, clearLineageCaches, hasNestedWith, howOf, itemName, quotingIsClear, relationUse, shapeFlags, stripAggFilter, stripSql } from "../../src/altimate/native/dbt/project-lineage"
+import { castColumn, clearLineageCaches, hasNestedWith, howOf, itemName, quotingIsClear, relationUse, selectItems, shapeFlags, stripAggFilter, stripSql } from "../../src/altimate/native/dbt/project-lineage"
 
 const dirs: string[] = []
 afterEach(() => {
@@ -1227,10 +1227,15 @@ describe("both tools: names at the edges", () => {
   })
 
   test("an alias without AS is read, and the end of an expression isn't taken for one", () => {
-    const named = { "val id": "id", "count(*) n": "n", "t.col c2": "c2", "'' label": "label", '"My Col"': "my col", "a.b as c": "c", "f.*": "*" }
+    const named = { "val id": "id", "count(*) n": "n", "t.col c2": "c2", "'' label": "label", '"My Col"': "my col", "a.b as c": "c", "f.*": "*",
+      // An operator word after a dot is a column name; a complete interval literal can carry an alias.
+      "t.mod id": "id", "t.div total": "total", "interval '' id": "id", "interval 1 day total": "total",
+      // A quoted name drops its own doubled quote; Unicode names are names.
+      '"a""b"': 'a"b', 'x as "a""b"': 'a"b', "`a``b`": "a`b", '"a``b"': "a``b", "allé": "allé", "x allé": "allé", "t.日本": "日本" }
     for (const [item, name] of Object.entries(named)) expect(itemName(item)).toBe(name)
     for (const item of ["x is null", "x is not true", "case when a > 0 then 1 else 0 end", "sum(x) over w", "a and b", "a + b",
-      "a div b", "a mod b", "a xor b", "x between a and b", "interval '' day", "interval 1 day", "interval 1.5 hour", `x collate "C"`, "amount::numeric"])
+      "a div b", "a mod b", "a xor b", "x between a and b", "interval '' day", "interval 1 day", "interval 1.5 hour", "interval '' days",
+      "interval '' minute", `x collate "C"`, "amount::numeric"])
       expect(itemName(item)).toBeNull()
   })
 
@@ -1378,13 +1383,46 @@ describe("both tools: names at the edges", () => {
     ["-(amount)::numeric", null], ["(amount)::numeric * 2", null], ["(amount + 1)::int", null], ["amount::numeric + 1", null],
     ["cast(amount as int) * 2", null], ["amount::text || ''", null], ["cast(amount as int) between 1 and 2", null],
     ["amount::numeric is not null", null], ["amount::int in (1, 2)", null], ["amount::numeric as _col_1", null],
-    ["amount::timestamp at time zone ''", null], ["amount::text collate \"C\"", null], ["arr[1]::int", null], ["cast(amount)", null],
+    ["amount::timestamp at time zone ''", null], ["amount::text collate \"C\"", "amount"], ['amount collate "C"', "amount"], ["(amount)::text collate pg_catalog.default", "amount"],
+    ["amount::text collate", null], ["1::text collate \"C\"", null], ["arr[1]::int", null], ["cast(amount)", null],
     ["cast(amount as)", null], ["amount::", null], ["(amount", null],
   ]
 
   test("castColumn reads every cast form found so far", () => {
     const wrong = CAST_FORMS.filter(([item, name]) => castColumn(item) !== name).map(([item, name]) => `${item} → ${castColumn(item)} (want ${name})`)
     expect(wrong).toEqual([])
+  })
+
+  test("castColumn gives nothing, rather than overflowing, for deeply nested parentheses", () => {
+    expect(castColumn(`${"(".repeat(50_000)}amount${")".repeat(50_000)}::int`)).toBeNull()
+    expect(castColumn(`${"(".repeat(20)}amount${")".repeat(20)}::int`)).toBe("amount")
+  })
+
+  test("a Postgres E'' string with an escaped quote doesn't shift the SELECT items", () => {
+    const path = write(nodes("postgres", [
+      model("f", [], "select 1 as id, 2 as b, 3 as c", ["id", "b", "c"]),
+      model("r", ["f"], `select id, E'it\\'s, (b)::int, example', c::int, b as b from ${T("f")}`),
+      model("child", ["r"], `select * from ${T("r")}`),
+    ]))
+    expect(carried(columnAnswer(path, "f", "c"))).toEqual(expect.arrayContaining(["r.c", "child.c"]))
+    expect(carried(columnAnswer(path, "f", "c"))).not.toEqual(expect.arrayContaining(["r.b"]))
+  })
+
+  test("a keyword ends a SELECT list only as a whole name, in any script", () => {
+    expect(selectItems("select éfrom, id from t")).toEqual(["éfrom", "id"])
+    expect(selectItems("select fromage, prix_é from t where x")).toEqual(["fromage", "prix_é"])
+    expect(selectItems("select 日本, id from t")).toEqual(["日本", "id"])
+  })
+
+  test("a Unicode name right after SELECT isn't read as a modifier", () => {
+    const path = write(nodes("postgres", [
+      model("f", [], `select 2.5 as "allé"`, ["allé"]),
+      model("r", ["f"], `with q as (select * from ${T("f")}) select allé::numeric from q`),
+      model("child", ["r"], `select * from ${T("r")}`),
+    ]))
+    expect(() => columnReach(path, "r", "allé")).not.toThrow()
+    const lineage = dbtLineage({ manifest_path: path, model: "child" })
+    expect(Object.keys((lineage.raw_lineage as any).column_dict ?? {})).toContain("allé")
   })
 
   test("mixed and nested cast chains of a column are named after it", () => {
