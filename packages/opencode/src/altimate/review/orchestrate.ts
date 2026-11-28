@@ -1574,7 +1574,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
       r = {
         removed: new Set(splitDiff(ctx.file.diff).removed.map(normalizeSelectLine).filter(Boolean)),
         // One parse of the head serves the reindent check and the reach analysis.
-        head: headReach(file)?.items ?? selectItems(ctx.newSql),
+        head: headReach(file)!.items,
         headLines: ctx.newSql.split("\n").map(normalizeSelectLine),
         base: new Set(ctx.oldSql ? selectItems(ctx.oldSql).map(itemKey) : []),
       }
@@ -1605,15 +1605,18 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // expose (`rawBaseLacks`) is proven new, so those undecided findings must not
   // stand in for it: it survives their dedup and keeps its severity below.
   // The proof is withheld only on evidence, from the head's raw SQL, that the
-  // column on the twin's line does not reach the model's output unmasked:
-  //  - its line lies inside select items and each reads it only inside masking
-  //    calls or a window clause (`sha2(\n ssn\n) as tax_ref`; not `coalesce(\n
-  //    ssn,\n '')`, which keeps the value), or is a `*` that excludes it;
-  //  - every item carrying it on that line sits in a CTE or FROM subquery that
-  //    no reading query passes on unmasked (`rawReach`: hashed or dropped on the
-  //    way, or read only by an `in`/`exists` condition);
-  //  - its line is in no select item but in a clause that selects nothing
-  //    (`order by\n ssn`), and nothing in the head may expose the column.
+  // column does not reach the model's output unmasked. Both must hold:
+  //  - on the twin's line: it lies inside select items and each reads the column
+  //    only inside masking calls or a window clause (`sha2(\n ssn\n) as
+  //    tax_ref`; not `coalesce(\n ssn,\n '')`, which keeps the value), is a `*`
+  //    that excludes it, or sits in a CTE or FROM subquery that no reading query
+  //    passes on unmasked (`rawReach`: hashed or dropped on the way, or read only
+  //    by an `in`/`exists` condition); or it is in no select item but in a
+  //    clause that selects nothing (`order by\n ssn`);
+  //  - in the rest of the head: nothing may expose the column (`mayExpose`). The
+  //    twin fires only on a line that opens with the column, so the same column
+  //    selected elsewhere (`select ssn from …` on one line, a `*` over its
+  //    table) still reaches the output when the twin's own line is dropped.
   // Anything `rawReach` cannot follow counts as reaching, so the twin blocks.
   const headReachByFile = new Map<string, RawReach | undefined>()
   const headReach = (file: string) => {
@@ -1646,13 +1649,12 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     const mayReachOutput = (hit: { column: string; line: string }) => {
       const column = hit.column.toLowerCase()
       const lineNos = headLineNumbers(f.file, hit.line)
-      if (!reach || !lineNos.length) return true
+      if (!reach || !lineNos.length || reach.mayExpose(column)) return true
       // Any head line with this text counts: the diff does not say which one it is.
       return lineNos.some((n) => {
         // The analysis's own items: it knows them by identity.
         const items = reach.items.filter((i) => i.startLine <= n && n <= i.endLine)
-        if (items.length) return items.some((i) => reach.passes(i, column))
-        return !reach.inClause(n) || reach.mayExpose(column)
+        return items.length ? items.some((i) => reach.passes(i, column)) : !reach.inClause(n)
       })
     }
     return hits.every(mayReachOutput)

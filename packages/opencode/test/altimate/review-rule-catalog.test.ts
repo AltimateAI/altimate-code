@@ -220,13 +220,12 @@ describe("finalOutputs().raw", () => {
       ssn: ["customers|spouses.ssn"],
     })
   })
-  test("`starRaw` stays fast over a chain of `*` CTEs that each join the previous one twice", () => {
+  // Walking every path would take 2^30 steps: a regression does not finish inside the test timeout.
+  test("`starRaw` resolves a chain of `*` CTEs that each join the previous one twice", () => {
     const ctes = ["c0 as (select * from customers)"]
     for (let i = 1; i <= 30; i++) ctes.push(`c${i} as (select * from c${i - 1} a join c${i - 1} b using (customer_id))`)
     const sql = `with ${ctes.join(",\n")}\nselect * from c30`
-    const t0 = performance.now()
     expect([...finalOutputs(sql).starRaw("ssn")]).toEqual(["customers.ssn"])
-    expect(performance.now() - t0).toBeLessThan(1000)
   })
   test("`refCovered` matches an unqualified column over a join to its single-table ref", () => {
     expect(refCovered("customers|orders.email", new Set(["customers.email"]))).toBe(true)
@@ -427,6 +426,15 @@ describe("rawReach", () => {
       ["nested in a condition", src(`\nselect * from ${OTHER} o\nwhere o.customer_id in (select x.tax_ref from (select tax_ref from src) x)`), false],
       ["scalar subquery in the select list", src(`\nselect o.customer_id, (select s.tax_ref from src s where s.customer_id = o.customer_id) as t\nfrom ${OTHER} o`), true],
       ["parenthesised union branch", src(`\n(select customer_id, region from ${OTHER})\nunion all\n(select customer_id, tax_ref from src)`), true],
+      ["parenthesised first branch only", src(`\n(select customer_id from ${OTHER})\nunion all\nselect customer_id from src`), true],
+      ["parenthesised first branch, a long comment before the operator", src(`, u as (\n  (select region as label from ${OTHER})\n  -- the two sources never overlap, by construction of the loader (see its README)\n  union all\n  select tax_ref from src\n)\nselect label from u`), true],
+      ["parenthesised later branch, a long comment inside the operator", src(`\nselect region from ${OTHER}\nunion /* keep duplicates: the two sources never overlap, checked by hand */ all (select tax_ref from src)`), true],
+      ["parenthesised branches inside a CTE", src(`, u as (\n  (select customer_id from ${OTHER})\n  union all\n  (select customer_id from src)\n)\nselect customer_id from u`), true],
+      ["a scalar subquery ends a union branch, column dropped", src("\nselect (select max(customer_id) from analytics.spouses)\nunion all\nselect customer_id from src"), false],
+      ["a scalar subquery ends a union branch, column carried", src("\nselect (select max(customer_id) from analytics.spouses)\nunion all\nselect tax_ref from src"), true],
+      ["a `where` subquery ends a union branch, column dropped", src(`\nselect customer_id from src\nwhere customer_id > (select max(customer_id) from ${OTHER})\nunion all\nselect customer_id from ${OTHER}`), false],
+      ["an unaliased FROM subquery ends a union branch, column dropped", src(`\nselect customer_id from (select customer_id from src)\nunion all\nselect customer_id from ${OTHER}`), false],
+      ["an unaliased FROM subquery ends a union branch, column carried", src(`\nselect tax_ref from (select tax_ref from src)\nunion all\nselect customer_id from ${OTHER}`), true],
       ["lateral subquery", src(`\nselect o.customer_id, l.x\nfrom ${OTHER} o, src s, lateral (select s.tax_ref as x) l`), true],
     ])
   })
@@ -438,6 +446,12 @@ describe("rawReach", () => {
       ["a table function over another column", src("\nselect s.customer_id, f.value as tag from src s, lateral flatten(input => s.tags) f"), false],
       ["whole row", src("\nselect s from src s"), true],
       ["whole row in a call", src("\nselect to_json(s) as j from src s"), true],
+      ["whole row, carried on by its reader", src(", b as (\n  select s as row_s, customer_id from src s\n)\nselect row_s from b"), true],
+      ["whole row, dropped by its reader", src(", b as (\n  select s as row_s, customer_id from src s\n)\nselect customer_id from b"), false],
+      ["whole row by the CTE's own name, in a reader with a source that did not parse", src(`\nselect o.customer_id, row_to_json(src) as payload from ${OTHER} o join ${OTHER} p on true, src`), true],
+      ["whole row after `unnest(…) with offset`", src(`\nselect o.customer_id, to_json_string(src) as payload from ${OTHER} o, unnest(o.tags) with offset, src`), true],
+      ["a name resolved at run time", src("\nselect identifier('tax_ref') as t from src"), true],
+      ["a name resolved at run time, from a variable and behind a comment", src("\nselect IDENTIFIER /* by name */ ($col) as t from src"), true],
       ["struct expansion of the column", src("\nselect tax_ref.* from src"), true],
       ["an alias the parser did not read", src("\nselect p.* from src pivot (max(v) for k in ('a')) p"), true],
       ["parenthesised join", src(`\nselect tax_ref from (src s join ${OTHER} o on o.customer_id = s.customer_id)`), true],
@@ -473,6 +487,26 @@ describe("rawReach", () => {
     expect(item("regexp_replace(ssn, '[0-9]', '*') as s")).toBe(false)
     expect(item("row_number() over (partition by\n ssn\n order by id) as rn")).toBe(false)
     expect(item("email")).toBe(false)
+    // A test that answers true or false.
+    expect(item("regexp_like(ssn, '^[0-9]+$') as ok")).toBe(false)
+    expect(item("contains(ssn, '-') as dashed")).toBe(false)
+    // A `case` keeps what it may return, whatever identifiers sit around it.
+    expect(item("case when customer_id > 0 then ssn end as t")).toBe(true)
+    expect(item('concat(e."when", ssn, case when customer_id > 1 then \'x\' else \'y\' end) as t')).toBe(true)
+    // Another column under the name counts; a cast's type is not a column.
+    const named = (text: string) => {
+      const r = rawReach(`select ${text} from t`)
+      return r.carries(r.items[0], "ssn")
+    }
+    expect(named("tax_id as ssn")).toBe(true)
+    expect(named("cast(tax_id as varchar) as ssn")).toBe(true)
+    expect(named("cast(null as varchar) as ssn")).toBe(false)
+    expect(named("md5(tax_id)::varchar(32) as ssn")).toBe(false)
+    // A method call on the column: masked by a hash, kept by anything else.
+    expect(item("ssn.md5() as s")).toBe(false)
+    expect(item("c.ssn.sha256() as s")).toBe(false)
+    expect(item("ssn.trim() as s")).toBe(true)
+    expect(item("ssn.replace('-', '').md5() as s")).toBe(true)
   })
 
   test("passes: a `*` item on the changed line passes the column unless it excludes or masks it", () => {
@@ -508,6 +542,70 @@ describe("rawReach", () => {
     expect(rawReach(src("\nselect * from src")).mayExpose("ssn")).toBe(true)
   })
 
+  test("mayExpose: an item anywhere in the model that keeps the column and reaches the output", () => {
+    const exposes = (sql: string) => rawReach(sql).mayExpose("ssn")
+    // `dead` reads the column and nothing reads `dead`.
+    const dead = (rest: string) => `with dead as (\n  select customer_id,\n    ssn\n  from ${REF}\n)${rest}`
+    expect(exposes(dead(`\nselect customer_id from ${OTHER}`))).toBe(false)
+    expect(exposes(dead(`\nselect customer_id, ssn from ${REF}`))).toBe(true)
+    expect(exposes(dead(`\nselect d.customer_id, c.ssn as tax_ref from dead d join ${REF} c on c.customer_id = d.customer_id`))).toBe(true)
+    expect(exposes(dead(`\nselect customer_id, coalesce(ssn, '') as tax_ref from ${REF}`))).toBe(true)
+    expect(exposes(dead(`\nselect customer_id, sha2(ssn) as tax_ref from ${REF}`))).toBe(false)
+    expect(exposes(dead(`, b as (\n  select customer_id, ssn as tax_ref from ${REF}\n)\nselect tax_ref from b`))).toBe(true)
+    expect(exposes(dead(`, b as (\n  select customer_id, ssn as tax_ref from ${REF}\n)\nselect customer_id from b`))).toBe(false)
+    expect(exposes(dead(`\nselect o.customer_id, (select max(c.ssn) from ${REF} c where c.customer_id = o.customer_id) as t from ${OTHER} o`))).toBe(true)
+    expect(exposes(dead(`\nselect o.customer_id, l.t from ${REF} o, lateral (select o.ssn as t) l`))).toBe(true)
+    // Another value under the column's name, a field of that name, a hierarchy root.
+    expect(exposes(dead(`, b as (\n  select customer_id, tax_id as ssn from ${REF}\n)\nselect * from b`))).toBe(true)
+    expect(exposes(dead(`, b as (\n  select customer_id, payload from ${REF}\n)\nselect payload.ssn as tax_ref from b`))).toBe(true)
+    expect(exposes(dead(`\nselect customer_id, connect_by_root ssn from ${REF} start with customer_id = 1 connect by prior customer_id = manager_id`))).toBe(true)
+    // A macro call naming the column, unless the SQL around it masks what it emits.
+    expect(exposes(dead(`\nselect customer_id, {{ dbt.safe_cast("ssn", "varchar") }} as t from ${REF}`))).toBe(true)
+    // The table's column next to a CTE's hashed column of the same name.
+    const hashed = (final: string) => `with h as (\n  select customer_id,\n    sha2(\n      ssn\n    ) as ssn\n  from ${REF}\n)\n${final}`
+    expect(exposes(hashed("select * from h"))).toBe(false)
+    expect(exposes(hashed("select customer_id from h"))).toBe(false)
+    expect(exposes(hashed(`select ssn, c.customer_id from h right join ${REF} c using (ssn)`))).toBe(true)
+    // Names are all it reads: the hashed column selected by its name counts.
+    expect(exposes(hashed("select customer_id, ssn from h"))).toBe(true)
+    // A CTE named like the table an earlier CTE reads.
+    expect(exposes(`with raw_rows as (\n  select customer_id, ssn from customers\n), customers as (\n  select customer_id from raw_rows\n)\nselect r.customer_id, r.ssn from raw_rows r join customers c on c.customer_id = r.customer_id`)).toBe(true)
+  })
+
+  test("mayExpose: a table's columns that leave a select unnamed", () => {
+    const exposes = (sql: string) => rawReach(sql).mayExpose("ssn")
+    expect(exposes(`with a as (\n  select object_construct(*) as payload from ${REF}\n)\nselect payload from a`)).toBe(true)
+    expect(exposes(`with a as (\n  select object_construct(*) as payload from ${REF}\n)\nselect customer_id from ${OTHER}`)).toBe(false)
+    expect(exposes(`with a as (\n  select to_json(c) as payload from ${REF} c\n)\nselect payload from a`)).toBe(true)
+    expect(exposes(`with a as (\n  select to_json(c) as payload, c.customer_id from ${REF} c\n)\nselect customer_id from a`)).toBe(false)
+    // A `ref` read without an alias is also named by its model; with one, only by the alias.
+    expect(exposes(`with a as (\n  select to_json(customers) as payload from ${REF}\n)\nselect payload from a`)).toBe(true)
+    expect(exposes(`select d.day, cast(d.day as date) as day_date from {{ ref('date') }} d`)).toBe(false)
+    // A date part spelled like the alias is not the row.
+    expect(exposes(`select s.customer_id, dateadd(s, s.duration_s, s.started_at) as ended_at from ${REF} s`)).toBe(false)
+    expect(exposes(`select s.customer_id, coalesce(s, null) as payload from ${REF} s`)).toBe(true)
+    // The whole row of an outer table, inside a scalar subquery.
+    expect(exposes(`select c.customer_id, (select to_json(c)) as payload from ${REF} c`)).toBe(true)
+    expect(exposes(`with a as (\n  select * from ${REF} unpivot (v for k in (ssn, region))\n)\nselect v from a`)).toBe(true)
+    expect(exposes(`with a as (\n  select c.customer_id, t from ${REF} c cross join unnest([c.ssn]) as u(t)\n)\nselect t from a`)).toBe(true)
+    expect(exposes(`with a as (\n  select identifier('ssn') as t from ${REF}\n)\nselect t from a`)).toBe(true)
+    // A masking call over the row reads no column; a product with a masked operand is a product.
+    expect(exposes(`select customer_id, hash(*) as row_hash from ${REF}`)).toBe(false)
+    expect(exposes(`select c.customer_id, count(o.*) as orders from ${REF} c left join ${OTHER} o on o.customer_id = c.customer_id group by 1`)).toBe(false)
+    expect(exposes(`select c.customer_id, to_json(o.*) as payload from ${REF} c left join ${OTHER} o on o.customer_id = c.customer_id`)).toBe(true)
+    expect(exposes(`select customer_id, datediff(day, created_at, updated_at) * 24 as hours from ${REF}`)).toBe(false)
+    expect(exposes(`select customer_id, concat(to_json(c), case when customer_id > 1 then 'x' end) as payload from ${REF} c`)).toBe(true)
+    // A Jinja call glued to a `*` may add the column.
+    expect(exposes(`with a as (select customer_id from ${OTHER})\nselect a.* {{ extra('c.ssn') }} from a join ${REF} c on c.customer_id = a.customer_id`)).toBe(true)
+    // A literal's prefix and a cast's type are not the row.
+    expect(exposes(`select r.customer_id, regexp_extract(r.region, r'^[a-z]+') as zone from ${REF} r`)).toBe(false)
+    expect(exposes(`select d.day, cast(d.day as date) as day_date from {{ ref('date') }} as date`)).toBe(false)
+    // A Jinja column list may hold the column under any name.
+    expect(exposes(`with a as (\n  select {{ dbt_utils.star(from=ref('customers')) }} from ${REF}\n)\nselect customer_id from a`)).toBe(true)
+    // SQL the parser does not model may expose anything.
+    expect(exposes(`select t.customer_id\nfrom (\n  with a as (select customer_id, sha2(ssn) as h from ${REF})\n  select * from a\n) t`)).toBe(true)
+  })
+
   test("inClause: a line outside every select list is told apart only by the clause word before it", () => {
     const at = (sql: string, text: string) => rawReach(sql).inClause(sql.split("\n").findIndex((l) => l.trim() === text) + 1)
     expect(at(`select customer_id\nfrom ${REF}\norder by\n  ssn`, "ssn")).toBe(true)
@@ -533,7 +631,8 @@ describe("rawReach", () => {
   })
 
   test("shapes the parser does not model block: every `ssn` line counts as reaching", () => {
-    // As the orchestrator asks it: the items on the line, else the clause it sits in.
+    // The line's own evidence, as the orchestrator asks it after `mayExpose`:
+    // the items on the line, else the clause it sits in.
     const lineReaches = (sql: string) => {
       const r = rawReach(sql)
       return sql.split("\n").flatMap((text, at) => {
@@ -656,12 +755,13 @@ describe("rawReach", () => {
     }
   })
 
-  test("deeply nested subqueries stay fast", () => {
+  // No time is asserted in the next two: a walk that stalls fails on the test timeout.
+  test("subqueries nested past any real model's depth count as reaching", () => {
     const depth = 800
     const sql = "select x from " + "(select x from ".repeat(depth) + `(select\n ssn as x\n from ${REF}) t` + ") t".repeat(depth)
-    const t0 = performance.now()
     expect(reaches(sql)).toBe(true)
-    expect(performance.now() - t0).toBeLessThan(3000)
+    // Nothing shows the column dropped either: the nesting is not followed.
+    expect(reaches(sql.replace("select x from (", "select 1 as one from ("))).toBe(true)
   })
 
   test("malformed SQL and deep chains do not throw or stall", () => {
@@ -675,9 +775,7 @@ describe("rawReach", () => {
       `with c0 as (\n  select customer_id,\n    ssn as x0\n  from ${REF}\n)` +
       Array.from({ length: n }, (_, i) => `, c${i + 1} as (\n  select customer_id, x${i} as x${i + 1}, ${Array.from({ length: 30 }, (_, k) => `f${k}`).join(", ")} from c${i}\n)`).join("") +
       `\nselect x${n} from c${n}`
-    const t0 = performance.now()
     expect(reaches(chain)).toBe(true)
     expect(reaches(chain.replace(`select x${n} from`, "select customer_id from"))).toBe(false)
-    expect(performance.now() - t0).toBeLessThan(2000)
   })
 })

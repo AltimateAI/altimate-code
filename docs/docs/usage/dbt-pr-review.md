@@ -322,12 +322,14 @@ rubric:
   number, a date of birth) to a `marts/` or `reporting/` model, the base file's
   own SQL cannot expose it (it does not name the column, select `*`, or call a
   macro), and the column reaches the model's output unmasked, directly or
-  through CTEs and subqueries. A column that is hashed, masked or dropped on the
-  way (`sha2(ssn)`, `right(ssn, 4)`, `* exclude (ssn)`) stays a warning; one that
+  through CTEs and subqueries, from the added line or from anywhere else in the
+  model. A column that is hashed, masked or dropped everywhere it is read
+  (`sha2(ssn)`, `right(ssn, 4)`, `* exclude (ssn)`) stays a warning; one that
   only passes through a value-preserving expression (`coalesce(ssn, '')`,
-  `max(ssn)`) still blocks, and so does one in SQL the review cannot follow
-  (Jinja that builds the select list, lateral or scalar subqueries, unusual
-  syntax).
+  `max(ssn)`) still blocks. So does one the review cannot rule out: in SQL it
+  cannot follow (Jinja that builds the select list, lateral or scalar
+  subqueries, unusual syntax), or in a model whose output also takes a `*` or a
+  Jinja column list over a table, whose columns the SQL does not show.
 
 ### Risk-tier path tokens
 

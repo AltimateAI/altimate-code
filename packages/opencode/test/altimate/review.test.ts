@@ -1,4 +1,5 @@
-import { describe, test, expect } from "bun:test"
+import { describe, test, expect, spyOn } from "bun:test"
+import * as RuleCatalog from "../../src/altimate/review/rule-catalog"
 import {
   makeFinding,
   fingerprint,
@@ -3300,6 +3301,29 @@ describe("orchestrate", () => {
       { name: "multi-line coalesce keeps the value", base: plainBase, head: `select customer_id,\n  coalesce(\n    ssn,\n    ''\n  ) as tax_ref\nfrom ${REF}`, critical: true },
       { name: "kept by `max` in the final select", base: cteBase, head: src("ssn as tax_ref", "\nselect\n  customer_id,\n  max(tax_ref) as tax_ref\nfrom src\ngroup by 1"), critical: true },
       { name: "a Jinja column list in the final select", base: cteBase, head: src("ssn", "\nselect\n  {{ dbt_utils.star(from=ref('customers'), except=['region']) }}\nfrom src"), critical: true },
+      { name: "read by a name resolved at run time", base: cteBase, head: src("ssn", "\nselect\n  customer_id,\n  identifier('ssn') as tax_ref\nfrom src"), critical: true },
+      // Dropped or masked on the changed line, and selected raw on a line the regex rules do not fire on.
+      { name: "dropped by its CTE, selected on one line by the final select", base: cteBase, head: src("ssn as tax_ref", `\nselect customer_id, ssn from ${REF}`), critical: true },
+      {
+        name: "dropped by its CTE, read from the table again under a qualifier",
+        base: cteBase,
+        head: src("ssn", `\nselect s.customer_id, c.ssn as tax_ref\nfrom src s\njoin ${REF} c on c.customer_id = s.customer_id`),
+        critical: true,
+      },
+      { name: "dropped by its CTE, `select *` over its table", base: cteBase, head: src("ssn as tax_ref", `\nselect * from ${REF}`), critical: true },
+      // A limit of reading names: a hash kept under the column's own name, then selected by that name, reads as the column.
+      {
+        name: "hashed under the same name, then selected by that name",
+        base: cteBase,
+        head: src("ssn", ", final as (\n  select customer_id, sha2(ssn) as ssn\n  from src\n)\nselect customer_id, ssn\nfrom final"),
+        critical: true,
+      },
+      {
+        name: "hashed on its line, kept by another item on one line",
+        base: plainBase,
+        head: `select customer_id, coalesce(ssn, '') as raw_ref,\n  sha2(\n    ssn\n  ) as tax_ref\nfrom ${REF}`,
+        critical: true,
+      },
       // Masked, dropped, or only tested: undecided.
       {
         name: "multi-line sha2 in a CTE",
@@ -3322,16 +3346,29 @@ describe("orchestrate", () => {
         critical: false,
       },
       {
-        name: "hashed under the same name",
+        name: "hashed under the same name, then `select *`",
         base: cteBase,
-        head: src("ssn", ", final as (\n  select customer_id, sha2(ssn) as ssn\n  from src\n)\nselect customer_id, ssn\nfrom final"),
+        head: src("ssn", ", final as (\n  select customer_id, sha2(ssn) as ssn\n  from src\n)\nselect * from final"),
         critical: false,
       },
       { name: "`* exclude` of the column", base: cteBase, head: src("ssn", "\nselect * exclude (ssn)\nfrom src"), critical: false },
       {
         name: "read only by an `exists` condition",
         base: cteBase,
-        head: src("ssn", `\nselect o.*\nfrom ${OTHER} o\nwhere exists (select * from src s where s.customer_id = o.customer_id)`),
+        head: src("ssn", `\nselect o.customer_id\nfrom ${OTHER} o\nwhere exists (select * from src s where s.customer_id = o.customer_id)`),
+        critical: false,
+      },
+      { name: "a method-style hash", base: plainBase, head: `select customer_id,\n  ssn.md5() as tax_ref\nfrom ${REF}`, critical: false },
+      {
+        name: "kept in a whole row that its reader drops",
+        base: cteBase,
+        head: src("ssn", ", b as (\n  select s as row_s, s.customer_id\n  from src s\n)\nselect\n  customer_id\nfrom b"),
+        critical: false,
+      },
+      {
+        name: "dropped, in a union whose first branch ends in a scalar subquery",
+        base: cteBase,
+        head: src("ssn", "\nselect (select max(customer_id) from analytics.spouses)\nunion all\nselect customer_id from src"),
         critical: false,
       },
       { name: "`order by` line, not selected", base: plainBase, head: `select customer_id\nfrom ${REF}\norder by\n  ssn`, critical: false },
@@ -3384,22 +3421,36 @@ describe("orchestrate", () => {
   })
 
   test("the raw-base proof parses each file once however many PII lines it adds", async () => {
-    // 300 added PII lines in a 3,000-column CTE: the proof is asked twice per line.
-    const cols = Array.from({ length: 3000 }, (_, i) => `    c${i},`).join("\n")
-    const pii = Array.from({ length: 300 }, (_, i) => `    ssn as t${i},`).join("\n")
-    const base = `with src as (\n  select\n${cols}\n    customer_id\n  from {{ ref('customers') }}\n)\nselect * from src`
-    const head = `with src as (\n  select\n${cols}\n${pii}\n    customer_id\n  from {{ ref('customers') }}\n)\nselect customer_id from src`
-    const t0 = performance.now()
-    const env = await runReview({
-      changedFiles: [{ path: "models/marts/m1.sql", status: "modified" as const, diff: `${pii.split("\n").map((l) => `+${l}`).join("\n")}\n` }],
-      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"] },
-      rubric: DEFAULT_RUBRIC,
-      mode: "gate",
-      runner: piiRunner(["ssn"]),
-      getContent: content(head, base),
-    })
-    expect(env.findings.filter(isTwin).length).toBeGreaterThan(0)
-    expect(performance.now() - t0).toBeLessThan(1500)
+    // Added PII lines in a wide CTE: the proof is asked twice per line.
+    const cols = Array.from({ length: 200 }, (_, i) => `    c${i},`).join("\n")
+    const base = `with src as (\n  select\n${cols}\n    customer_id\n  from {{ ref('customers') }}\n)\nselect customer_id from src`
+    const parses = async (lines: number) => {
+      const pii = Array.from({ length: lines }, (_, i) => `    ssn as t${i},`).join("\n")
+      const head = `with src as (\n  select\n${cols}\n${pii}\n    customer_id\n  from {{ ref('customers') }}\n)\nselect customer_id from src`
+      // Counts the orchestrator's own calls into the parser.
+      const reach = spyOn(RuleCatalog, "rawReach")
+      const items = spyOn(RuleCatalog, "selectItems")
+      try {
+        const env = await runReview({
+          changedFiles: [{ path: "models/marts/m1.sql", status: "modified" as const, diff: `${pii.split("\n").map((l) => `+${l}`).join("\n")}\n` }],
+          config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"] },
+          rubric: DEFAULT_RUBRIC,
+          mode: "gate",
+          runner: piiRunner(["ssn"]),
+          getContent: content(head, base),
+        })
+        return { twins: env.findings.filter(isTwin).length, head: reach.mock.calls.length, base: items.mock.calls.length }
+      } finally {
+        reach.mockRestore()
+        items.mockRestore()
+      }
+    }
+    const one = await parses(1)
+    const many = await parses(300)
+    expect(one.twins).toBeGreaterThan(0)
+    expect(many.twins).toBeGreaterThan(0)
+    expect(one.head).toBe(1)
+    expect({ head: many.head, base: many.base }).toEqual({ head: one.head, base: one.base })
   })
 
   test("without a compiled base, an added `c.ssn` over a raw base with no `ssn` still blocks", async () => {
