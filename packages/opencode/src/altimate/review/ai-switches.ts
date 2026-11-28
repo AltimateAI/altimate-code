@@ -8,7 +8,7 @@
 // env variable, as before, so an unset variable means off there.
 import type { ReviewConfig } from "./config"
 
-export type AiSwitchName = "coverage" | "contextCard" | "focused" | "otherFiles" | "pythonFiles" | "verify"
+export type AiSwitchName = "coverage" | "contextCard" | "focused" | "otherFiles" | "pythonFiles" | "verify" | "conventions"
 
 export type AiSwitches = Record<AiSwitchName, boolean>
 
@@ -20,12 +20,13 @@ export const AI_SWITCH_ENV: Record<AiSwitchName, string> = {
   otherFiles: "ALTIMATE_REVIEW_AI_OTHER_FILES",
   pythonFiles: "ALTIMATE_REVIEW_AI_PYTHON_FILES",
   verify: "ALTIMATE_REVIEW_AI_VERIFY",
+  conventions: "ALTIMATE_REVIEW_CONVENTIONS",
 }
 
 /**
  * Product defaults when neither env nor config sets a switch: the configuration measured
- * together (wider input, related files batched, context cards, the verifier). Each one is
- * opt-out with `ai: { <switch>: false }` or its env variable set to `0`.
+ * together (wider input, related files batched, context cards, the verifier, the team
+ * conventions). Each one is opt-out with `ai: { <switch>: false }` or its env variable set to `0`.
  */
 export const AI_SWITCH_DEFAULTS: AiSwitches = {
   coverage: true,
@@ -34,6 +35,7 @@ export const AI_SWITCH_DEFAULTS: AiSwitches = {
   otherFiles: true,
   pythonFiles: true,
   verify: true,
+  conventions: true,
 }
 
 type Env = Record<string, string | undefined>

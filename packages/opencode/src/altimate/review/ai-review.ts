@@ -18,6 +18,7 @@ import { CARD_BATCH_MAX_CHARS } from "./ai-context-card"
 import { type AiSwitches, switchOn } from "./ai-switches"
 import { AI_OTHER_FILES_QUOTA, AI_OTHER_KINDS } from "./ai-other-files"
 import { AI_PYTHON_FILES_QUOTA, AI_PYTHON_KIND } from "./ai-python-files"
+import { type Convention, type ConventionRecord, conventionRecords, groupConventionFindings, renderConventions } from "./conventions"
 
 const log = Log.create({ service: "ai-review" })
 
@@ -750,6 +751,8 @@ export interface AiReviewInput {
   checkedPaths?: string[]
   /** The review's repository (`--cwd`): files named by env variables must be outside it. */
   reviewDir?: string
+  /** Team conventions from the base branch (`conventions` switch); each call carries those for its files. */
+  conventions?: Convention[]
 }
 
 /** What happened in the advisory lane, reported on the envelope and in the comment. */
@@ -782,6 +785,8 @@ export interface AiLaneStatus {
   unsent?: string[]
   /** Files sent only in calls that failed while others answered (state `ok`): not reviewed by the lane. */
   failedFiles?: string[]
+  /** The team conventions loaded from the base branch (no text), when any were given. */
+  conventions?: ConventionRecord[]
 }
 /** One file as sent to the model. */
 export interface AiInputRecord {
@@ -797,6 +802,8 @@ export interface AiInputRecord {
   card: boolean
   /** Index of the call that carried the file; set only under focused batching. */
   batch?: number
+  /** Convention paths the call carried; set on the first file of each call that carried any. */
+  conventions?: string[]
 }
 /** Token counts as `Session.getUsage` reports them: `input` excludes cached
  *  tokens, `inputTotal` includes them. */
@@ -889,6 +896,9 @@ function buildBatchMessage(
   } else {
     parts.push("\n## GROUNDING — the engine produced no findings.")
   }
+  // The team conventions that apply to this call's files, within the per-call conventions budget.
+  const conventions = input.conventions?.length ? renderConventions(input.conventions, input.files.map((f) => f.path)) : undefined
+  if (conventions?.text) parts.push(conventions.text)
 
   parts.push("\n## CHANGED FILES (review for what the engine missed):")
   let cardChars = 0
@@ -908,6 +918,7 @@ function buildBatchMessage(
       ...(focus ? { batch: focus.batch } : {}),
     })
   }
+  if (conventions?.paths.length && records.length) records[0].conventions = conventions.paths
   if (focus?.others.length) {
     parts.push(
       "\n## OTHER FILES CHANGED IN THIS PR (reviewed in separate calls; do not comment on them):",
@@ -997,13 +1008,15 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
   const plan = planAiInput(input)
   const { files, budget } = plan
   const dryRun = aiDryRunEnabled()
-  // Recorded under coverage, focused batching, context cards or dry run (all on by default).
+  // Recorded under coverage, focused batching, context cards or dry run (all on by default);
+  // `conventions` whenever the base has instruction files (the `conventions` switch, on by default).
   // Files only the AI lane reads are listed by the coverage ledger, unless a deterministic lane checked them.
   const checked = new Set(input.checkedPaths ?? [])
   const unsent = plan.unsent.filter((f) => !AI_ONLY_KINDS.has(f.kind ?? "") || checked.has(f.path)).map((f) => f.path)
-  const recorded: Pick<AiLaneStatus, "input" | "unsent"> = {
+  const recorded: Pick<AiLaneStatus, "input" | "unsent" | "conventions"> = {
     ...(budget.coverage || dryRun || plan.focused || plan.input.some((r) => r.card) ? { input: plan.input } : {}),
     ...(budget.coverage && unsent.length ? { unsent } : {}),
+    ...(input.conventions?.length ? { conventions: conventionRecords(input.conventions) } : {}),
   }
   const done = (findings: Finding[], status: Omit<AiLaneStatus, "durationMs">): AiReviewResult => ({
     findings,
@@ -1012,7 +1025,15 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
   if (!files.length && (dryRun || !replay)) return done([], { state: "skipped", reason: "no changed dbt files to review" })
   // Dry run wins over replay: a replayed envelope would still reach the verifier, a model call.
   if (dryRun) return done([], { state: "skipped", reason: "dry run (ALTIMATE_REVIEW_AI_DRYRUN=1): no model call" })
-  if (replay) return runAiReplay(input, replay)
+  if (replay) {
+    // The replayed findings get the same convention record and grouping as a live run.
+    const r = await runAiReplay(input, replay)
+    if (!input.conventions?.length) return r
+    return {
+      findings: groupConventionFindings(r.findings, input.conventions),
+      status: { ...r.status, conventions: conventionRecords(input.conventions) },
+    }
+  }
 
   let modelLabel: string | undefined
   try {
@@ -1065,6 +1086,8 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
       findings = v.findings
       verifier = v.status
     }
+    // One comment for one convention broken the same way on several files.
+    if (input.conventions?.length) findings = groupConventionFindings(findings, input.conventions)
     return done(findings, {
       state: "ok",
       model: modelLabel,

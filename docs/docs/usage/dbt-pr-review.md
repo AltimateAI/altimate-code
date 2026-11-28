@@ -301,6 +301,7 @@ ai: true                      # the advisory AI lane; false turns it off. Or an 
 #   otherFiles: true          # other/analysis files inside the project (.sql/.yml/.yaml)
 #   pythonFiles: true         # changed Python files, inside or outside the project
 #   verify: true              # the dbt-grounded verifier over the AI comments
+#   conventions: true         # repo review instructions from the base branch (see below)
 dataDiff:                     # OFF by default — see "Data-diff in CI" below
   enabled: false
   warehouse: ""               # connection name; empty = default connection
@@ -652,6 +653,22 @@ across 12 dialects all plan; anything still unrecognized stays *undecidable*, ne
    when neither resolves to a work tree. The error names the work tree it found;
    note that a home directory that is itself a git repository (dotfiles kept in
    git) is such a work tree, so files anywhere under it are refused.
+   The repo's own review instructions go with each call, read from the base branch
+   so a PR cannot change them: `.altimate/review.md`, `REVIEW.md`, `AGENTS.md`,
+   `CLAUDE.md` and `.claude/CLAUDE.md` (at the root and in each directory above a
+   file the review covers, so a dbt project's own `.altimate/review.md` next to its
+   `.altimate/review.yml` applies to it), `.cursor/rules/*.mdc` (rules with `globs`
+   or `alwaysApply`; manual rules with neither are skipped), `.cursorrules`,
+   `.github/copilot-instructions.md`, `.coderabbit.yaml` `path_instructions` and
+   `tone_instructions`, and the dbt/SQL/test sections of `CONTRIBUTING.md`, most
+   specific first, up to 3,000 characters per call (`ai.conventions: false` or
+   `ALTIMATE_REVIEW_CONVENTIONS=0` turns this off). A file that is a symlink at the
+   base commit is skipped, and so is any instruction file that holds a private key
+   or a service-account key: it is never sent to the model. In the other files,
+   provider tokens (GitHub `ghp_…`, Slack `xox…`, OpenAI `sk-…`), AWS key ids, passwords in URLs and
+   secret-named settings whose value looks like a credential are redacted; ordinary
+   text such as `env_var('DBT_PASSWORD')` examples is left as written. The verifier reads a
+   convention file's base-branch text, not the PR's edit of it.
 4. **Rubric → verdict.** Findings map to a verdict by a versioned rubric (data,
    not prompt): any blocking-category `critical` → `REQUEST_CHANGES`; ≥3 warnings
    → risk pattern → `REQUEST_CHANGES`; only suggestions → `COMMENT`; nothing →

@@ -1,5 +1,6 @@
 import { type Finding, type Severity, type Confidence, SEVERITY_ORDER, blankNames, groupKeyTitle, verifierDemoted } from "./finding"
 import { type VerdictEnvelope, type PostingPolicy, DEFAULT_POSTING_POLICY, isOutsideProjectReason } from "./verdict"
+import { SAME_APPLIES_RE, sameAppliesLine } from "./conventions"
 
 /**
  * Render a verdict envelope for humans (PR summary markdown) and for the VCS
@@ -134,13 +135,17 @@ export function renderSummary(env: VerdictEnvelope, opts: RenderOptions = {}): s
   // diff carries the detail. Pre-existing findings sit in a collapsed list.
   const deferredIds = new Set(inlineComments(env, opts.alreadyPosted, opts.commentable).deferred.map((f) => f.id))
   const posting = postingPolicy(env)
+  // Findings shown through their lead's inline comment (`groupedInto`) get no line of their own;
+  // without inline comments every finding is listed.
+  const collapsed = opts.inline === false ? new Set<string>() : collapsedFindings(env, opts.alreadyPosted, opts.commentable)
+  const shown = env.findings.filter((f) => !collapsed.has(f.id))
   const inline =
     opts.inline === false
       ? []
-      : env.findings.filter((f) => inlineEligible(f, posting, opts.commentable) && !deferredIds.has(f.id))
+      : shown.filter((f) => inlineEligible(f, posting, opts.commentable) && !deferredIds.has(f.id))
   const inlineIds = new Set(inline.map((f) => f.id))
-  const preExisting = env.findings.filter((f) => f.preExisting && !inlineIds.has(f.id))
-  const rest = env.findings.filter((f) => !f.preExisting && !inlineIds.has(f.id))
+  const preExisting = shown.filter((f) => f.preExisting && !inlineIds.has(f.id))
+  const rest = shown.filter((f) => !f.preExisting && !inlineIds.has(f.id))
   if (inline.length) {
     lines.push(
       `### Inline (${inline.length})`,
@@ -198,6 +203,10 @@ export function renderSummary(env: VerdictEnvelope, opts: RenderOptions = {}): s
   return [...lines, ...tail].join("\n")
 }
 
+/** A finding's body without the grouping's "same applies" sentence: a summary bullet lists each
+ *  finding it shows, and the sentence may name findings dropped later. */
+const shownBody = (f: Finding) => f.body.replace(SAME_APPLIES_RE, "")
+
 /** Render findings of one severity as bullets. With `group`, findings that say
  *  the same thing (same category, title and body once names are blanked) on
  *  GROUP_MIN_MODELS or more distinct models collapse into one bullet. */
@@ -206,7 +215,7 @@ function bulletsFor(items: Finding[], group: boolean): Array<{ text: string; cou
   for (const f of items) {
     // The body is part of the key: one rule with different messages (e.g. a
     // dialect check naming different functions) is different findings.
-    const key = group ? `${f.category}|${groupKeyTitle(f)}|${blankNames(oneLine(f.body))}` : f.id
+    const key = group ? `${f.category}|${groupKeyTitle(f)}|${blankNames(oneLine(shownBody(f)))}` : f.id
     const g = groups.get(key)
     if (g) g.push(f)
     else groups.set(key, [f])
@@ -221,7 +230,8 @@ function bulletsFor(items: Finding[], group: boolean): Array<{ text: string; cou
       const more = names.length > 8 ? ` (+${names.length - 8} more)` : ""
       // Show a body verbatim only when every member says exactly that;
       // otherwise its names belong to one model, so show the blanked form.
-      const body = oneLine(clampBody(g.every((f) => f.body === g[0].body) ? g[0].body : blankNames(g[0].body)))
+      const lead = shownBody(g[0])
+      const body = oneLine(clampBody(g.every((f) => shownBody(f) === lead) ? lead : blankNames(lead)))
       const unverified = g.some((f) => f.degraded) ? " · _unverified_" : ""
       out.push({
         text:
@@ -237,7 +247,7 @@ function bulletsFor(items: Finding[], group: boolean): Array<{ text: string; cou
         text:
           `- **${f.title}**  \n` +
           (f.evidenceLine ? `  ${evidenceText(f)}  \n` : "") +
-          `  ${oneLine(clampBody(f.body))}  \n  <sub>\`${loc}\`${f.degraded ? " · _unverified_" : ""} · ${f.category}</sub>`,
+          `  ${oneLine(clampBody(shownBody(f)))}  \n  <sub>\`${loc}\`${f.degraded ? " · _unverified_" : ""} · ${f.category}</sub>`,
         count: 1,
       })
     }
@@ -437,7 +447,7 @@ export function commentableLines(diff: string | undefined): Set<number> {
 
 /** The posting policy an envelope was produced under (defaults for envelopes
  *  from releases that did not record one). */
-export function postingPolicy(env: VerdictEnvelope): PostingPolicy {
+export function postingPolicy(env: Pick<VerdictEnvelope, "policy">): PostingPolicy {
   return env.policy?.posting ?? DEFAULT_POSTING_POLICY
 }
 
@@ -461,6 +471,64 @@ export function inlineEligible(f: Finding, posting: PostingPolicy, commentable?:
 }
 
 /**
+ * Findings folded into a lead comment (`groupedInto`, see `groupConventionFindings`) that this
+ * run shows only through the lead: the lead is in the envelope, is posted inline by this run
+ * (eligible, not yet on the PR, within the inline budget). Once the lead is on the PR it is not
+ * posted again, so a finding newly folded into it is posted on its own; those the posted lead
+ * already listed carry its markers and count as posted. When the lead does not go inline this
+ * run (ineligible, or over the budget), each folded finding stands on its own.
+ */
+export function collapsedFindings(
+  env: Pick<VerdictEnvelope, "findings" | "policy">,
+  alreadyPosted: Set<string> = new Set(),
+  commentable?: Map<string, Set<number>>,
+): Set<string> {
+  return inlinePlan(env, alreadyPosted, commentable).collapsed
+}
+
+/** Which findings this run posts inline, which are deferred, and which are folded into a posted lead. */
+function inlinePlan(
+  env: Pick<VerdictEnvelope, "findings" | "policy">,
+  alreadyPosted: Set<string>,
+  commentable?: Map<string, Set<number>>,
+): { posted: Finding[]; deferred: Finding[]; collapsed: Set<string> } {
+  const posting = postingPolicy(env)
+  const leads = new Map(env.findings.map((f) => [f.id, f]))
+  // Folded into a lead that may go inline; settled below against the budget.
+  // A finding already on the PR (listed by an earlier lead's comment) is not folded again, so a
+  // lead picked anew on a later push neither re-lists it nor re-emits its marker.
+  // Grouping ignores the verifier's demotions and runs before findings are marked pre-existing,
+  // so a finding is folded only when it could go inline itself (tier, verifier, pre-existing,
+  // severity floor); otherwise it keeps its own summary entry.
+  const foldable = env.findings.filter((f) => {
+    const lead = f.groupedInto ? leads.get(f.groupedInto) : undefined
+    return (
+      !!lead &&
+      !alreadyPosted.has(f.id) &&
+      !alreadyPosted.has(lead.id) &&
+      inlineEligible(lead, posting, commentable) &&
+      inlineEligible(f, posting)
+    )
+  })
+  const foldableIds = new Set(foldable.map((f) => f.id))
+  const fresh = env.findings
+    .filter((f) => !foldableIds.has(f.id) && inlineEligible(f, posting, commentable) && !alreadyPosted.has(f.id))
+    .sort(
+      (a, b) =>
+        SEVERITY_ORDER[b.severity] - SEVERITY_ORDER[a.severity] ||
+        CONFIDENCE_ORDER[b.confidence] - CONFIDENCE_ORDER[a.confidence] ||
+        a.file.localeCompare(b.file) ||
+        a.startLine! - b.startLine!,
+    )
+  const posted = fresh.slice(0, posting.inlineBudget)
+  const postedIds = new Set(posted.map((f) => f.id))
+  const collapsed = new Set(foldable.filter((f) => postedIds.has(f.groupedInto!)).map((f) => f.id))
+  // A finding whose lead is over the budget stands on its own; the budget is spent, so it is deferred.
+  const released = foldable.filter((f) => !collapsed.has(f.id) && inlineEligible(f, posting, commentable) && !alreadyPosted.has(f.id))
+  return { posted, deferred: [...fresh.slice(posting.inlineBudget), ...released], collapsed }
+}
+
+/**
  * Inline comments for this run: eligible findings not already on the PR, most
  * severe and most confident first, capped at the posting budget. Findings over
  * the budget are `deferred` and stay in the summary. A finding whose line is
@@ -472,23 +540,26 @@ export function inlineComments(
   alreadyPosted: Set<string> = new Set(),
   commentable?: Map<string, Set<number>>,
 ): { comments: InlineComment[]; deferred: Finding[] } {
-  const posting = postingPolicy(env)
-  const fresh = env.findings
-    .filter((f) => inlineEligible(f, posting, commentable) && !alreadyPosted.has(f.id))
-    .sort(
-      (a, b) =>
-        SEVERITY_ORDER[b.severity] - SEVERITY_ORDER[a.severity] ||
-        CONFIDENCE_ORDER[b.confidence] - CONFIDENCE_ORDER[a.confidence] ||
-        a.file.localeCompare(b.file) ||
-        a.startLine! - b.startLine!,
-    )
-  const comments = fresh.slice(0, posting.inlineBudget).map((f): InlineComment => {
+  const { posted, deferred, collapsed } = inlinePlan(env, alreadyPosted, commentable)
+  const byId = new Map(env.findings.map((f) => [f.id, f]))
+  const foldedInto = new Map<string, string[]>()
+  for (const f of env.findings) if (collapsed.has(f.id)) foldedInto.set(f.groupedInto!, [...(foldedInto.get(f.groupedInto!) ?? []), f.id])
+  const comments = posted.map((f): InlineComment => {
     const parts = [`${SEVERITY_EMOJI[f.severity]} **${f.title}**`]
     if (f.evidenceLine) parts.push(evidenceText(f))
-    parts.push(clampBody(f.body))
+    // A lead's list of folded files is its own part, after the clamp: a long body must not cut it
+    // while the folded findings' markers below count them as posted.
+    const folded = foldedInto.get(f.id) ?? []
+    // The grouping's own "same applies" sentence is always replaced: it may name findings that
+    // were dropped later or are already on the PR.
+    parts.push(clampBody(f.body.replace(SAME_APPLIES_RE, "")))
+    if (folded.length) parts.push(sameAppliesLine(folded.map((id) => byId.get(id)!.file)))
     const s = f.suggestion
     if (s) parts.push(suggestionBlock(s.replacement))
     parts.push(findingMarker(f.id))
+    // The folded findings this comment lists count as posted on the next run, so they are not
+    // posted again on their own once this comment is on the PR.
+    for (const id of foldedInto.get(f.id) ?? []) parts.push(findingMarker(id))
     const body = parts.join("\n\n")
     // GitHub applies a suggestion to the comment's line range, so the
     // comment spans exactly the replaced lines.
@@ -501,7 +572,7 @@ export function inlineComments(
       body,
     }
   })
-  return { comments, deferred: fresh.slice(posting.inlineBudget) }
+  return { comments, deferred }
 }
 
 function groupBySeverity(findings: Finding[]): Record<Severity, Finding[]> {

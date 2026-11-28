@@ -1,0 +1,12 @@
+language: en-US
+tone_instructions: "Be brief; name the column."
+reviews:
+  path_instructions:
+    - path: "models/staging/**/*.sql"
+      instructions: |
+        Staging models only rename and cast source columns; no joins.
+    - path: "models/marts/**"
+      instructions: |
+        Every mart has a unique + not_null test on its primary key.
+    - path: "!models/legacy/**"
+      instructions: "ignored negation"

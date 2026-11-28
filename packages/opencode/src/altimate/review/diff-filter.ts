@@ -197,7 +197,7 @@ export function hasOldSide(file: ChangedFile): boolean {
 // `*`/`?` never cross `/`; a double-star directory prefix matches zero or more
 // whole directory segments (preserving the slash boundary); a trailing or
 // standalone double-star matches the rest of the path.
-function globToRegExp(glob: string): RegExp {
+export function globToRegExp(glob: string): RegExp {
   let re = ""
   for (let i = 0; i < glob.length; i++) {
     const c = glob[i]

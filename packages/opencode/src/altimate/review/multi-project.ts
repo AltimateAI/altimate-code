@@ -343,6 +343,14 @@ function mergeAi(runs: Array<{ root: string; env: VerdictEnvelope }>): VerdictEn
   const input = ais.some((a) => a.input) ? ais.flatMap((a) => a.input ?? []) : undefined
   const unsent = ais.flatMap((a) => a.unsent ?? [])
   const failedFiles = ais.flatMap((a) => a.failedFiles ?? [])
+  // Each project loads the conventions above its own files: the union, once per record.
+  const seenConv = new Set<string>()
+  const conventions = ais
+    .flatMap((a) => a.conventions ?? [])
+    .filter((c) => {
+      const key = JSON.stringify([c.path, c.scope, c.globs ?? [], c.chars])
+      return !seenConv.has(key) && !!seenConv.add(key)
+    })
   return {
     ...base,
     state,
@@ -355,6 +363,7 @@ function mergeAi(runs: Array<{ root: string; env: VerdictEnvelope }>): VerdictEn
     input,
     unsent: unsent.length ? unsent : undefined,
     failedFiles: failedFiles.length ? failedFiles : undefined,
+    conventions: conventions.length ? conventions : undefined,
     verifier: mergeVerifier(lanes.map((r) => ({ root: r.root, v: r.env.ai!.verifier }))),
     projects: lanes.map((r) => ({ root: r.root, state: r.env.ai!.state, reason: r.env.ai!.reason, calls: r.env.ai!.calls })),
   }
