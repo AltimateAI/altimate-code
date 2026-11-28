@@ -140,8 +140,9 @@ function selectKeywords(text: string): { at: number; depth: number; later: boole
     const ch = text[i]!
     if (ch === "(") depth++
     else if (ch === ")") depth--
-    else if (/^select(?![\w$])/i.test(text.slice(i, i + 7)) && !/[\w$]/.test(text[i - 1] ?? " ")) {
-      const later = /(?<![\w$])(?:union|intersect|except|minus)(?:\s+(?:all|distinct))?\s*\(?\s*$/i.test(text.slice(0, i))
+    else if ((ch === "s" || ch === "S") && /^select(?![\w$])/i.test(text.slice(i, i + 7)) && !/[\w$]/.test(text[i - 1] ?? " ")) {
+      // The set operator sits just before: `union all (select …`, so a short look back is enough.
+      const later = /(?<![\w$])(?:union|intersect|except|minus)(?:\s+(?:all|distinct))?\s*\(?\s*$/i.test(text.slice(Math.max(0, i - 40), i))
       found.push({ at: i, depth, later })
     }
   }
@@ -902,12 +903,12 @@ export class ProjectLineage {
   }
 
   /**
-   * The parent a star's qualifier names, if one: a parent called that (its alias or name), or the relation that an
-   * alias names in FROM or JOIN (`from shop.main.orders o`). A qualifier that names no parent, or names two, gives none.
+   * The parent a star's qualifier names, if one. An alias in FROM or JOIN names its relation (`from shop.main.orders o`)
+   * and hides a table of the same name, as in SQL; with no such alias, a parent called that (its alias or name). A
+   * qualifier whose alias names two relations, or names no parent, gives none.
    */
   private qualifiedParent(id: string, qualifier: string, stripped: string): string | undefined {
     const byName = new Map(this.parents(id).map((p) => [String(this.node(p)?.alias || this.node(p)?.name || "").toLowerCase(), p]))
-    if (byName.has(qualifier)) return byName.get(qualifier)
     const part = `(?:${QUOTED}|[\\w$]+)`
     const relation = new RegExp(`(?<![\\w$])(?:from|join)\\s+((?:${part}\\.)*${part})\\s+(?:as\\s+)?(${part})(?![\\w$.])`, "gi")
     const named = new Set<string>()
@@ -916,7 +917,8 @@ export class ProjectLineage {
       const last = [...m[1]!.matchAll(new RegExp(part, "g"))].at(-1)?.[0] ?? ""
       named.add(unquoteName(last))
     }
-    return named.size === 1 ? byName.get([...named][0]!) : undefined
+    if (named.size) return named.size === 1 ? byName.get([...named][0]!) : undefined
+    return byName.get(qualifier)
   }
 
   lineage(id: string): ModelLineage {

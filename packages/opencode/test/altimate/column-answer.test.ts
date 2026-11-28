@@ -1492,6 +1492,8 @@ describe("both tools: names at the edges", () => {
     two(`select o.*, o.id from ${T("orders")} o`, "id_1")
     two(`select o.*, c.* from ${T("orders")} o join ${T("customers")} c on o.customer_id = c.customer_id`, "customer_id_1")
     two(`select "o".*, o.customer_id as id from ${T("orders")} "o"`, "id_1")
+    // An alias hides a parent of the same name: `customers` is aliased `orders` here, so `orders.*` reads customers.
+    two(`select orders.*, 1 as name from ${T("customers")} orders join ${T("orders")} o2 on orders.customer_id = o2.customer_id`, "name_1")
     // A UNION's branches each name their own list: two stars in two branches repeat nothing.
     const union = write(nodes("duckdb", [
       model("a", [], "select 1 as id", ["id"]),
