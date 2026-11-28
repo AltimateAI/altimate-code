@@ -1510,6 +1510,13 @@ describe("both tools: names at the edges", () => {
       model("r", ["orders", "customers"], `with x as (select orders.customer_id from ${T("customers")} orders) select orders.*, 1 as name from ${T("orders")} cross join x`),
     ]))
     expect(() => columnReach(scoped, "r", "nope")).toThrow(/has no column nope/)
+    // A name that starts like an end word (`group1`) is a whole name: it ends no FROM clause, so the alias after it holds.
+    const words = write(nodes("duckdb", [
+      model("orders", [], "select 1 as id", ["id"]),
+      model("group1", [], "select 2 as id, 'x' as name", ["id", "name"]),
+      model("r", ["orders", "group1"], `select orders.*, 1 as name from ${T("group1")} orders cross join ${T("orders")} o`),
+    ]))
+    expect(() => columnReach(words, "r", "name_1")).not.toThrow()
     // A UNION's branches each name their own list: two stars in two branches repeat nothing.
     const union = write(nodes("duckdb", [
       model("a", [], "select 1 as id", ["id"]),
@@ -1550,6 +1557,16 @@ describe("both tools: names at the edges", () => {
     ]))
     expect(listed(indented)).toContain("id")
     expect(listed(indented)).not.toContain("_col_1")
+  })
+
+  test("a column that starts like an end word (order1) doesn't end the SELECT list before a written _1", () => {
+    const path = write(nodes("duckdb", [
+      model("f", [], "select 1 as order1, 2.5 as amount", ["order1", "amount"]),
+      model("r", ["f"], `select order1, amount as _1 from ${T("f")}`),
+      model("child", ["r"], `select * from ${T("r")}`),
+    ]))
+    const raw = dbtLineage({ manifest_path: path, model: "child" }).raw_lineage as any
+    expect(Object.keys(raw.column_dict ?? {}).sort()).toEqual(["_1", "order1"])
   })
 
   test("a _N written in upper-case SQL is still a real alias", () => {

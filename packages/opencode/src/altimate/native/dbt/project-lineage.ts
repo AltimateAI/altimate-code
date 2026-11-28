@@ -181,14 +181,26 @@ function listAt(text: string, stripped: string, at: number): { items: string[]; 
     if (ch === ",") {
       items.push(stripped.slice(from, i).trim())
       from = i + 1
-    } else if (!/[\w$]/.test(text[i - 1] ?? " ") && LIST_ENDS.test(/^[a-z_]+/i.exec(text.slice(i))?.[0] ?? "")) break
+    } else if (LIST_ENDS.test(wordAt(text, i))) break
   }
   items.push(stripped.slice(from, i).trim())
   return { items: items.filter((one) => one !== ""), end: i }
 }
 
-/** Words that end a FROM clause. */
-const FROM_ENDS = /^(?:where|group|order|limit|qualify|having|window|union|intersect|except|minus)$/i
+/**
+ * Words that end a FROM clause. (`relationUse`'s list is another set: words that aren't a relation's name, such as
+ * `join` and `on`, which sit inside a FROM clause.)
+ */
+const FROM_ENDS = /^(?:where|group|order|limit|offset|fetch|qualify|having|window|connect|start|union|intersect|except|minus)$/i
+
+const WORD = /[\w$]+/y
+
+/** The whole name that starts at `i` in quote-blanked text, read in place (no copy of the rest); "" when none starts there. */
+function wordAt(text: string, i: number): string {
+  if (/[\w$]/.test(text[i - 1] ?? " ")) return ""
+  WORD.lastIndex = i
+  return WORD.exec(text)?.[0] ?? ""
+}
 
 /**
  * The FROM clause that follows a SELECT list ending at `end`, from literal- and comment-stripped SQL, with anything
@@ -202,7 +214,7 @@ function fromClauseAt(text: string, stripped: string, end: number): string {
   for (let i = end; i < text.length; i++) {
     const ch = text[i]!
     if (ch === ")" && depth === 0) break
-    if (depth === 0 && !/[\w$]/.test(text[i - 1] ?? " ") && FROM_ENDS.test(/^[a-z_]+/i.exec(text.slice(i))?.[0] ?? "")) break
+    if (depth === 0 && FROM_ENDS.test(wordAt(text, i))) break
     if (ch === "(") depth++
     out += depth > 0 ? " " : stripped[i]
     if (ch === ")") depth--
