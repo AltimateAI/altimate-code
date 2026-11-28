@@ -14,6 +14,20 @@ import { type Rubric, exclusionReason, clampSeverity } from "./rubric"
 import { type ReviewConfig } from "./config"
 import { type ReviewMode, type ReviewScope, type VerdictEnvelope, buildEnvelope, signEnvelope } from "./verdict"
 import { detectModelPatterns, detectSchemaYmlPatterns, splitDiff } from "./dbt-patterns"
+import {
+  type FinalOutputs,
+  type RawReach,
+  type RelationPrefixes,
+  type SelectItem,
+  type SelectItemColumn,
+  finalOutputs,
+  rawReach,
+  refCovered,
+  ROOT_SCOPE,
+  SILENT_JINJA_TAG,
+  normalizeSelectLine,
+  selectItems,
+} from "./rule-catalog"
 import { type AiLaneStatus, type AiReviewInput, type AiReviewResult, safeReason } from "./ai-review"
 
 /**
@@ -206,6 +220,25 @@ export interface OrchestrateInput {
   layout?: DbtProjectLayout
   /** What the review covered: base resolution and files left out of scope. */
   scope?: Omit<ReviewScope, "unverified">
+  /** Drop the regex catalog's cross-engine portability findings (single known engine). */
+  suppressPortability?: boolean
+}
+
+/** A catalog finding tagged as cross-engine portability advice. */
+export function isCatalogPortability(f: Finding): boolean {
+  return f.evidence?.tool === "rule-catalog" && (f.evidence.result as { portability?: boolean })?.portability === true
+}
+
+/**
+ * Portability advice that is noise for a project on `dialect`: dropped only
+ * when the rule names `dialect` among the engines that support the construct.
+ * Otherwise (engine not listed, or support never established) it may be an
+ * error on this project's own engine and is kept.
+ */
+export function isSuppressiblePortability(f: Finding, dialect: string): boolean {
+  if (!isCatalogPortability(f)) return false
+  const worksOn = (f.evidence?.result as { worksOn?: string[] })?.worksOn
+  return !!worksOn && worksOn.includes(dialect.toLowerCase())
 }
 
 /** True when SQL text contains Jinja (`{{ }}`, `{% %}` or `{# #}`). */
@@ -395,6 +428,8 @@ async function qualityLane(
   sql: string | undefined,
   dialect: string,
   oldSql?: string,
+  /** True when `sql` is the raw file; compiled-SQL line numbers do not exist in the PR's file. */
+  linesMatchFile = false,
 ): Promise<Finding[]> {
   if (!sql || file.status === "deleted") return []
   const model = modelNameFromPath(file.path)
@@ -432,8 +467,8 @@ async function qualityLane(
         body: issue.message,
         file: file.path,
         model,
-        startLine: issue.line,
-        endLine: issue.line,
+        startLine: linesMatchFile ? issue.line : undefined,
+        endLine: linesMatchFile ? issue.line : undefined,
         evidence: { tool: "altimate_core.check", result: issue },
         // Include the message so distinct instances of the same rule (e.g. two
         // different non-portable functions) don't collapse under one fingerprint.
@@ -845,11 +880,6 @@ const STRUCTURAL_CATEGORY: Record<string, ReviewCategory> = {
 const PII_LOW_RISK_CLASS = /^(name|address)$/i
 const PII_LOW_RISK_MIN_CONFIDENCE = 0.9
 const PII_DEFAULT_MIN_CONFIDENCE = 0.7
-// Column-name tokens the regex PII twins (`pii_into_mart`) key off — used to
-// recover which column a coarse regex finding flagged so suppression can be
-// column-aware (suppress only when core actually classified THAT column).
-const PII_TOKEN_RE =
-  /\b(email|ssn|social_security|phone_number|first_name|last_name|full_name|street_address|date_of_birth|dob|passport|credit_card)\b/i
 
 async function structuralChangeLane(ctx: ModelContext, runner: ReviewRunner): Promise<Finding[]> {
   if (!runner.structuralDiff) return []
@@ -1003,6 +1033,9 @@ async function piiClassifyLane(
   // apply (`missingGrainTestLane` also includes `intermediate`): an internal
   // intermediate model surfacing PII is a warning, not a hard block.
   const highExposureLayer = /(^|\/)(marts|reporting)\//.test(file.path)
+  // Without a compiled base, every head column counts as "introduced", so a
+  // pre-existing column can't be told apart: never escalate to critical then.
+  const baseUnknown = hasOldSide(file) && !ctx.engineOldSql
   for (const p of pii) {
     const classification = String(p.classification ?? "")
     const lowRiskClass = PII_LOW_RISK_CLASS.test(classification)
@@ -1010,7 +1043,7 @@ async function piiClassifyLane(
     if (p.confidence < minConfidence || !p.column) continue
     const col = p.column.toLowerCase()
     const highConfidence = p.confidence >= 0.9
-    const severity: Severity = highExposureLayer && highConfidence && !lowRiskClass ? "critical" : "warning"
+    const severity: Severity = highExposureLayer && highConfidence && !lowRiskClass && !baseUnknown ? "critical" : "warning"
     out.push(
       makeFinding({
         severity: clampSeverity("pii_exposure", severity, highConfidence ? "high" : "medium"),
@@ -1022,7 +1055,9 @@ async function piiClassifyLane(
           (p.masking ? `; suggested masking: \`${p.masking}\`.` : "."),
         file: file.path,
         model,
-        confidence: highConfidence ? "high" : "medium",
+        // Without a base, exposure is undecided: `unknown` keeps these warnings
+        // out of the warning-pattern count, so they never block.
+        confidence: baseUnknown ? "unknown" : highConfidence ? "high" : "medium",
         evidence: { tool: "altimate_core.classify_pii", result: p },
         ruleKey: `pii_exposure:${col}`,
       }),
@@ -1031,20 +1066,27 @@ async function piiClassifyLane(
   return { findings: out, classifiedColumns, completed: true }
 }
 
-function piiLane(file: ChangedFile & { kind: string }, columns: string[]): Finding[] {
+/** `baseUnknown`: the file had a previous version but its base SQL could not
+ *  be compiled, so these columns may predate the PR. Reported as a warning
+ *  (never blocking) instead of a critical "newly exposed" finding. */
+function piiLane(file: ChangedFile & { kind: string }, columns: string[], baseUnknown = false): Finding[] {
   if (file.status === "deleted" || !columns.length) return []
   const model = modelNameFromPath(file.path)
   return [
     makeFinding({
-      severity: "critical",
+      severity: baseUnknown ? "warning" : "critical",
       category: "pii_exposure",
       title: `${model}: exposes PII column${columns.length !== 1 ? "s" : ""} (${columns.join(", ")})`,
       body:
         `This model surfaces PII-classified column(s): ${columns.map((c) => `\`${c}\``).join(", ")}.` +
-        ` Confirm masking/access policy before merging to a non-restricted schema.`,
+        ` Confirm masking/access policy before merging to a non-restricted schema.` +
+        (baseUnknown
+          ? " The base version could not be compiled, so these columns may already be exposed before this PR."
+          : ""),
       file: file.path,
       model,
-      confidence: "high",
+      // `unknown`: undecided exposure never counts toward the warning pattern.
+      confidence: baseUnknown ? "unknown" : "high",
       evidence: { tool: "schema.detect_pii", result: { columns } },
       ruleKey: "pii:exposure",
     }),
@@ -1066,6 +1108,39 @@ interface ModelContext {
   engineOldSql?: string
   /** Structurally complex change (window/subquery/large plan) — a tiering signal. */
   complex?: boolean
+}
+
+/**
+ * The raw (uncompiled) base cannot expose any of the source columns `names`:
+ * none appears in it as a word outside comments, no select item reads a `*`, its
+ * only Jinja expressions are `ref`, `source`, `config` or `this`, and its only
+ * Jinja statements are control flow (`if`/`for`/`set` and their ends), which
+ * emit no text of their own. A macro (`dbt_utils.star(…)`), a variable, a
+ * `{{ col }}` loop, an `{% include %}` or a `{% call %}` block could emit any
+ * column, so any other tag proves nothing. String literals still count as
+ * evidence: a JSON path (`payload:ssn`, `'$.ssn'`) can expose the column.
+ * A `*` is any `*` token not preceded by a word (`*`, `c.*`, `*except(email)`,
+ * `as struct *`, `object_construct(*)`); `count(*)` reads no column. Spaced
+ * multiplication (`a * b`) also matches, which only leaves the base undecided.
+ */
+const RAW_BASE_PLAIN_EXPR = /^\{\{-?\s*(?:(?:ref|source|config)\s*\([^{}]*\)|this)\s*-?\}\}$/
+const RAW_BASE_STAR = /(?:^|[\s.(])\*(?=\s|$|[a-z(),])/i
+/** What `rawBaseLacks` reads from a raw base, parsed once per file: its code
+ *  without comments, or `undefined` when the base is undecided for every column. */
+function rawBaseCode(oldSql: string | undefined): string | undefined {
+  if (!oldSql) return undefined
+  if (!(oldSql.match(/\{\{[\s\S]*?\}\}/g) ?? []).every((e) => RAW_BASE_PLAIN_EXPR.test(e))) return undefined
+  if (!(oldSql.match(/\{%[\s\S]*?%\}/g) ?? []).every((t) => SILENT_JINJA_TAG.test(t))) return undefined
+  if (selectItems(oldSql).some((i) => RAW_BASE_STAR.test(i.text.replace(/\bcount\s*\(\s*\*\s*\)/gi, " ")))) return undefined
+  // Comments out, literals and quoted identifiers kept (one pass, so `--` inside
+  // `'…'` or `"…"` is not a comment).
+  return oldSql.replace(/\{#[\s\S]*?#\}|\/\*[\s\S]*?\*\/|--[^\n]*|'(?:[^']|'')*'|"(?:[^"]|"")*"/g, (m) =>
+    m.startsWith("'") || m.startsWith('"') ? m : " ",
+  )
+}
+function rawBaseLacks(code: string | undefined, names: string[]): boolean {
+  if (code === undefined || !names.length) return false
+  return names.every((n) => !new RegExp(`(?<![\\w$])${n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w$])`, "i").test(code))
 }
 
 export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelope> {
@@ -1117,7 +1192,8 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   )
 
   // A run is degraded when model files exist but none resolved against a manifest.
-  const runDegraded = modelFiles.length > 0 ? !anyManifest : reviewable.length === 0
+  // Nothing to resolve (yml-only, pure moves) is not a lint-only run.
+  const runDegraded = modelFiles.length > 0 && !anyManifest
 
   // High-risk path tokens are user-configured (billing/pci/patient/etc.) —
   // the reviewer core carries no default list. `undefined` when no
@@ -1177,16 +1253,125 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   const all: Finding[][] = []
   // Files where the diff-scoped PII classifier completed (looked at the change),
   // those where it actually emitted a finding, and — per file — the lowercased
-  // columns it classified. These drive column-aware dedup of the coarse regex
-  // PII twins in the merge step below.
+  // columns it classified and those it flagged. These drive column-aware dedup
+  // of the coarse regex PII twins in the merge step below.
   const diffScopedPiiCompletedFiles = new Set<string>()
   const diffScopedPiiFindingFiles = new Set<string>()
   const classifiedPiiColumnsByFile = new Map<string, Set<string>>()
+  const flaggedPiiColumnsByFile = new Map<string, Set<string>>()
+  // Per file: PII columns the compiled base already exposed. Neither the broad
+  // fallback nor the regex twins report these (this PR did not expose them).
+  const basePiiColumnsByFile = new Map<string, Set<string>>()
+  // Per file, the final output of the base and head models, parsed from the SQL
+  // the engine reads (compiled, or raw only when it holds no Jinja): a raw Jinja
+  // base would credit it with every `{% if %}` branch, including ones the target
+  // never renders. No engine SQL → nothing is known exposed.
+  const outputsByFile = new Map<string, FinalOutputs>()
+  const outputs = (file: string, side: "old" | "new") => {
+    const key = `${side}\u0000${file}`
+    let parsed = outputsByFile.get(key)
+    if (!parsed) {
+      const ctx = ctxByPath.get(file)
+      parsed = finalOutputs((side === "old" ? ctx?.engineOldSql : ctx?.engineNewSql) ?? "")
+      outputsByFile.set(key, parsed)
+    }
+    return parsed
+  }
+  // The schema prefixes the base reads tables under: a base compiled into
+  // another environment (prod `target-base`, a `+schema` change) reads the same
+  // tables under different prefixes, which `refCovered` then ignores.
+  const envOf = (file: string): RelationPrefixes => ({ base: outputs(file, "old").prefixes })
+  // `source.column` refs the base exposed raw under a name its PII detection
+  // reported: named in its final select, or passed through its plain `*`
+  // (`select * from customers` exposes `customers.ssn` when `ssn` is base PII).
+  const baseRawPiiByFile = new Map<string, Set<string>>()
+  const baseRawPii = (file: string) => {
+    const cached = baseRawPiiByFile.get(file)
+    if (cached) return cached
+    const basePii = basePiiColumnsByFile.get(file)
+    const refs = new Set<string>()
+    if (!basePii) return refs
+    const base = outputs(file, "old")
+    for (const name of basePii) {
+      for (const ref of base.raw.get(name) ?? []) refs.add(ref)
+      if (!base.names.has(name) && base.passthrough) for (const ref of base.starRaw(name)) refs.add(ref)
+    }
+    baseRawPiiByFile.set(file, refs)
+    return refs
+  }
+  // A regex twin's SOURCE column (`ssn`, with its output alias when it has one) is
+  // already exposed only when the head reads it raw from sources that a base PII
+  // output also exposed raw: same table and column (`c.ssn` → `cust.ssn` on
+  // `customers` is not new; `s.ssn` from `spouses` is). An alias alone is not
+  // proof (`c.email as contact` → `c.ssn as contact` newly exposes `ssn`), and
+  // neither is a base output that only masks the column (`sha2(c.ssn) as ssn_hash`)
+  // or a CTE's own alias that never reaches the final select. A column the head's
+  // final output doesn't expose raw under that name is reported.
+  // The output name comes from the head's final-select item that spans the line
+  // and reads the column raw, so an alias on the next line counts; else the
+  // twin's own alias, else the column.
+  const isBaseExposed = (file: string, column: string, alias?: string, line?: string) => {
+    const spanning = line ? headItemsOnLine(file, line).filter((i) => i.scope === ROOT_SCOPE && i.rawColumn === column) : []
+    const names = spanning.length ? [...new Set(spanning.map((i) => i.name!))] : [alias ?? column]
+    const head = outputs(file, "new").raw
+    const exposed = baseRawPii(file)
+    return names.every((name) => {
+      const refs = [...(head.get(name) ?? [])].filter((r) => r.endsWith(`.${column}`))
+      return refs.length > 0 && refs.every((r) => refCovered(r, exposed, envOf(file)))
+    })
+  }
+  // A head PII output name the base already exposed. When the head selects a
+  // column raw under it, the base must expose that same source column raw (base
+  // `md5(home_address) as home_address` → head `home_address` is new). A head
+  // output that is not a raw column is base-exposed when every source column its
+  // value is computed from is one a base PII output exposed raw, or when the base
+  // computes the name the same way (same item text with its literals, same
+  // CTEs/subqueries read, over source columns the base's name also read):
+  // `md5(x) as x` → `lower(x) as x` unmasks, and base raw `email` →
+  // `lower(ssn) as email` reads `ssn`. A name the head's final select doesn't
+  // resolve counts as base-exposed only when the head passes it through a plain
+  // `*` and every source column that `*` resolves it to was exposed raw by a
+  // base PII output (named, or through the base's own `*`).
+  const isBaseExposedOutput = (file: string, name: string, basePii: Set<string>) => {
+    const head = outputs(file, "new")
+    const rawColumns = head.raw.get(name)
+    if (rawColumns?.size) {
+      const exposed = baseRawPii(file)
+      return [...rawColumns].every((ref) => refCovered(ref, exposed, envOf(file)))
+    }
+    if (!basePii.has(name)) return false
+    const base = outputs(file, "old")
+    if (head.names.has(name)) {
+      const exposed = baseRawPii(file)
+      const reads = head.reads.get(name)
+      if (reads && [...reads].every((ref) => refCovered(ref, exposed, envOf(file)))) return true
+      // The same computation counts only over the same source columns: the
+      // signature holds the item text and derived-query bodies, not the tables
+      // (`lower(email)` from `customers` → from `spouses` is new). Refs no
+      // source explains are left to the signature.
+      const baseReads = base.reads.get(name) ?? new Set<string>()
+      const sameReads = [...(reads ?? [])]
+        .filter((ref) => !ref.startsWith("?"))
+        .every((ref) => refCovered(ref, baseReads, envOf(file)))
+      const baseSigs = base.signatures.get(name)
+      return sameReads && !!baseSigs && [...(head.signatures.get(name) ?? [])].every((sig) => baseSigs.has(sig))
+    }
+    // Unresolved only through a plain `*`: a shape the parser does not model (a
+    // parenthesised top-level union, `* except (…)`) is reported. A `*` the
+    // parser resolves is base-exposed only when every source column it passes
+    // the name through was one a base PII output exposed raw.
+    if (!head.passthrough) return false
+    const starRefs = head.starRaw(name)
+    const exposed = baseRawPii(file)
+    return starRefs.size > 0 && [...starRefs].every((ref) => refCovered(ref, exposed, envOf(file)))
+  }
   for (const ctx of ctxByPath.values()) {
     const tasks: Promise<Finding[]>[] = []
     // Engine lanes consume COMPILED SQL (rendered by dbt) when available.
     if (lanes.has("sql_quality") || lanes.has("warehouse_cost"))
-      tasks.push(qualityLane(ctx.file, input.runner, ctx.engineNewSql, dialect, ctx.engineOldSql))
+      tasks.push(
+        qualityLane(ctx.file, input.runner, ctx.engineNewSql, dialect, ctx.engineOldSql, ctx.engineNewSql === ctx.newSql),
+      )
     if (lanes.has("semantic_change")) {
       tasks.push(dataDiffLane(ctx, input.runner, dialect, input.config.dataDiff))
       tasks.push(grainMismatchLane(ctx, input.runner))
@@ -1222,16 +1407,36 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
           classifiedPiiColumnsByFile.set(currentCtx.file.path, diffScopedPii.classifiedColumns)
         }
         if (diffScopedPii.findings.length) diffScopedPiiFindingFiles.add(currentCtx.file.path)
+        flaggedPiiColumnsByFile.set(
+          currentCtx.file.path,
+          new Set(diffScopedPii.findings.map((f) => String((f.evidence?.result as any)?.column ?? "").toLowerCase())),
+        )
         const findings = [...diffScopedPii.findings]
+        let basePii = new Set<string>()
+        if (hasOldSide(currentCtx.file) && currentCtx.engineOldSql) {
+          try {
+            basePii = new Set(
+              (await input.runner.detectPii(currentCtx.engineOldSql, dialect)).columns.map((c) => c.toLowerCase()),
+            )
+          } catch {
+            /* unknown base exposure: report as if new */
+          }
+          basePiiColumnsByFile.set(currentCtx.file.path, basePii)
+        }
         if (lanes.has("pii_exposure")) {
           // The broad fallback covers output PII columns the precise lane did NOT
           // classify (pre-existing columns, or ones core's classifier missed) —
           // dedup against the columns core actually CONSIDERED, never all
           // introduced columns, so a missed column still surfaces here.
-          const fallbackPii = diffScopedPii.completed
+          let fallbackPii = diffScopedPii.completed
             ? currentCtx.pii.filter((col) => !diffScopedPii.classifiedColumns.has(col.toLowerCase()))
             : currentCtx.pii
-          findings.push(...piiLane(currentCtx.file, fallbackPii))
+          // The fallback reports only columns the base did not already expose.
+          fallbackPii = fallbackPii.filter(
+            (col) => !isBaseExposedOutput(currentCtx.file.path, col.toLowerCase(), basePii),
+          )
+          const baseUnknown = hasOldSide(currentCtx.file) && !currentCtx.engineOldSql
+          findings.push(...piiLane(currentCtx.file, fallbackPii, baseUnknown))
         }
         return findings
       })(),
@@ -1353,6 +1558,107 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
       }
     }
   }
+  // An added line is a pure reindent (or comment/comma-only edit) only when it
+  // matches a removed line AND every select item it belongs to in the head is the
+  // same item, in the same query scope (CTE, nested query or final select), in the
+  // base. Matching a removed line elsewhere is not enough: `email,` moved from a
+  // CTE into the final select, or `ssn` left behind when `sha2(\n ssn\n) as x`
+  // is unwrapped, exposes something new.
+  const reindentByFile = new Map<string, { removed: Set<string>; head: SelectItem[]; headLines: string[]; base: Set<string> }>()
+  const itemKey = (i: SelectItem) => `${i.scope}#${i.branch}\u0000${i.text.toLowerCase()}`
+  const reindentInfo = (file: string) => {
+    const ctx = ctxByPath.get(file)
+    if (!ctx?.newSql) return undefined
+    let r = reindentByFile.get(file)
+    if (!r) {
+      r = {
+        removed: new Set(splitDiff(ctx.file.diff).removed.map(normalizeSelectLine).filter(Boolean)),
+        // One parse of the head serves the reindent check and the reach analysis.
+        head: headReach(file)!.items,
+        headLines: ctx.newSql.split("\n").map(normalizeSelectLine),
+        base: new Set(ctx.oldSql ? selectItems(ctx.oldSql).map(itemKey) : []),
+      }
+      reindentByFile.set(file, r)
+    }
+    return r
+  }
+  // The 1-based head lines equal to `line` (normalised).
+  const headLineNumbers = (file: string, line: string) => {
+    const r = reindentInfo(file)
+    const normalized = normalizeSelectLine(line)
+    if (!r || !normalized) return []
+    return r.headLines.flatMap((l, i) => (l === normalized ? [i + 1] : []))
+  }
+  // Head select items spanning any head line equal to `line` (normalised).
+  const headItemsOnLine = (file: string, line: string) => {
+    const lineNos = headLineNumbers(file, line)
+    return (reindentInfo(file)?.head ?? []).filter((i) => lineNos.some((n) => i.startLine <= n && n <= i.endLine))
+  }
+  const isReindented = (file: string, line: string) => {
+    const r = reindentInfo(file)
+    if (!r || !ctxByPath.get(file)?.oldSql || !r.removed.has(normalizeSelectLine(line))) return false
+    const items = headItemsOnLine(file, line)
+    return items.length > 0 && items.every((i) => r.base.has(itemKey(i)))
+  }
+  // Without a compiled base every other PII lane is undecided (an unknown-
+  // confidence warning). A regex twin whose source columns the raw base cannot
+  // expose (`rawBaseLacks`) is proven new, so those undecided findings must not
+  // stand in for it: it survives their dedup and keeps its severity below.
+  // The proof is withheld only on evidence, from the head's raw SQL, that the
+  // column does not reach the model's output unmasked. Both must hold:
+  //  - on the twin's line: it lies inside select items and each reads the column
+  //    only inside masking calls or a window clause (`sha2(\n ssn\n) as
+  //    tax_ref`; not `coalesce(\n ssn,\n '')`, which keeps the value), is a `*`
+  //    that excludes it, or sits in a CTE or FROM subquery that no reading query
+  //    passes on unmasked (`rawReach`: hashed or dropped on the way, or read only
+  //    by an `in`/`exists` condition); or it is in no select item but in a
+  //    clause that selects nothing (`order by\n ssn`);
+  //  - in the rest of the head: nothing may expose the column (`mayExpose`). The
+  //    twin fires only on a line that opens with the column, so the same column
+  //    selected elsewhere (`select ssn from …` on one line, a `*` over its
+  //    table) still reaches the output when the twin's own line is dropped.
+  // Anything `rawReach` cannot follow counts as reaching, so the twin blocks.
+  const headReachByFile = new Map<string, RawReach | undefined>()
+  const headReach = (file: string) => {
+    if (!headReachByFile.has(file)) {
+      const sql = ctxByPath.get(file)?.newSql
+      headReachByFile.set(file, sql ? rawReach(sql) : undefined)
+    }
+    return headReachByFile.get(file)
+  }
+  const rawBaseCodeByFile = new Map<string, string | undefined>()
+  const baseCode = (file: string) => {
+    if (!rawBaseCodeByFile.has(file)) rawBaseCodeByFile.set(file, rawBaseCode(ctxByPath.get(file)?.oldSql))
+    return rawBaseCodeByFile.get(file)
+  }
+  // Asked for each twin in the dedup and again for its severity: kept per finding
+  // (per-token twins share a fingerprint, so the finding itself is the key).
+  const provenByFinding = new WeakMap<Finding, boolean>()
+  const provenNewTwin = (f: Finding) => {
+    let proven = provenByFinding.get(f)
+    if (proven === undefined) provenByFinding.set(f, (proven = proveNewTwin(f)))
+    return proven
+  }
+  const proveNewTwin = (f: Finding) => {
+    const ctx = ctxByPath.get(f.file)
+    if (!ctx || !hasOldSide(ctx.file) || ctx.engineOldSql) return false
+    const result = (f.evidence?.result ?? {}) as { column?: string; line?: string; items?: SelectItemColumn[] }
+    const hits = result.items?.length ? result.items : result.column ? [{ column: result.column, line: result.line ?? "" }] : []
+    if (!hits.length || !rawBaseLacks(baseCode(f.file), hits.map((h) => h.column))) return false
+    const reach = headReach(f.file)
+    const mayReachOutput = (hit: { column: string; line: string }) => {
+      const column = hit.column.toLowerCase()
+      const lineNos = headLineNumbers(f.file, hit.line)
+      if (!reach || !lineNos.length || reach.mayExpose(column)) return true
+      // Any head line with this text counts: the diff does not say which one it is.
+      return lineNos.some((n) => {
+        // The analysis's own items: it knows them by identity.
+        const items = reach.items.filter((i) => i.startLine <= n && n <= i.endLine)
+        return items.length ? items.some((i) => reach.passes(i, column)) : !reach.inClause(n)
+      })
+    }
+    return hits.every(mayReachOutput)
+  }
   const merged = flat.filter((f) => {
     const tool = f.evidence?.tool
     const fallbackRule = String((f.evidence?.result as any)?.rule ?? "").replace(/_/g, "-")
@@ -1366,23 +1672,39 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
       f.category === "pii_exposure" &&
       (fallbackRule === "pii-into-mart" || fallbackRule === "select-pii-columns")
     ) {
+      const proven = provenNewTwin(f)
       // The broad `schema.detect_pii` lane already flagged this file → redundant.
-      if (schemaPiiFiles.has(f.file)) return false
-      if (fallbackRule === "pii-into-mart") {
-        // `pii_into_mart` carries the matched column in `result.line`: suppress
-        // only when core's classifier actually CONSIDERED that column (flagged or
-        // deliberately muted). A column core never classified falls through.
-        const token = PII_TOKEN_RE.exec(String((f.evidence?.result as any)?.line ?? ""))?.[1]?.toLowerCase()
-        if (token && classifiedPiiColumnsByFile.get(f.file)?.has(token)) return false
-        // No recoverable column: defer to the prior file-level behavior so the
-        // twin isn't double-reported when core ran for the file.
-        if (!token && diffScopedPiiCompletedFiles.has(f.file)) return false
-        return true
+      if (schemaPiiFiles.has(f.file) && !proven) return false
+      const result = (f.evidence?.result ?? {}) as {
+        line?: string
+        column?: string
+        alias?: string
+        items?: SelectItemColumn[]
       }
-      // `select-pii-columns` doesn't preserve its column. Suppress only when a
-      // precise detector actually EMITTED a PII finding for the file (so the
-      // exposure is reported by the better source, not silently dropped).
-      if (diffScopedPiiFindingFiles.has(f.file)) return false
+      if (fallbackRule === "pii-into-mart") {
+        // `pii_into_mart` is one finding per column token, carrying the column,
+        // its alias and the line. A reindented base line exposes nothing new.
+        if (result.line && isReindented(f.file, result.line)) return false
+        if (!result.column) return !diffScopedPiiCompletedFiles.has(f.file)
+        // Suppress when core's classifier actually CONSIDERED that column (flagged
+        // or deliberately muted). A column core never classified falls through.
+        // A proven-new twin is dropped only when core muted the column, not when
+        // core flagged it as an undecided warning.
+        const classified = classifiedPiiColumnsByFile.get(f.file)
+        const flagged = flaggedPiiColumnsByFile.get(f.file)
+        const considered = (c?: string) => !!c && !!classified?.has(c) && !(proven && flagged?.has(c))
+        if (considered(result.column) || considered(result.alias)) return false
+        // A column the base already exposed is not newly exposed by this PR.
+        return !isBaseExposed(f.file, result.column, result.alias, result.line)
+      }
+      // `select-pii-columns` keeps every matched column with its alias and line:
+      // drop it when each one is a reindented base line or already base-exposed.
+      const items = result.items ?? []
+      if (items.length && items.every((i) => isReindented(f.file, i.line) || isBaseExposed(f.file, i.column, i.alias, i.line))) return false
+      // Otherwise suppress only when a precise detector actually EMITTED a PII
+      // finding for the file (so the exposure is reported by the better source,
+      // not silently dropped).
+      if (diffScopedPiiFindingFiles.has(f.file) && !proven) return false
       return true
     }
     if (!coreRanFiles.has(f.file)) return true
@@ -1408,6 +1730,18 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
       return false
     return true
   })
+  // Without a compiled base (raw Jinja on the old side) the regex PII twins can't
+  // tell a new column from one the base already exposed: report them like the
+  // other PII lanes, as a warning of unknown confidence that never blocks.
+  // Unless the raw base proves the column new (`rawBaseLacks`): then the twin
+  // keeps its severity.
+  for (const [i, f] of merged.entries()) {
+    const rule = (f.evidence?.result as { rule?: string } | undefined)?.rule
+    if (f.category !== "pii_exposure" || (rule !== "pii_into_mart" && rule !== "select-pii-columns")) continue
+    const ctx = ctxByPath.get(f.file)
+    if (!ctx || !hasOldSide(ctx.file) || ctx.engineOldSql || provenNewTwin(f)) continue
+    merged[i] = { ...f, severity: f.severity === "critical" ? "warning" : f.severity, confidence: "unknown" }
+  }
 
   // AI reviewer lane — runs AFTER the deterministic lanes so it can be GROUNDED
   // in (and told not to duplicate) the engine findings. Advisory only: its
@@ -1448,6 +1782,10 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // Flatten, drop excluded, dedupe, threshold-filter.
   let findings = dedupe(merged)
   findings = findings.filter((f) => !exclusionReason(f, input.rubric))
+  // Cross-engine portability advice from the regex catalog is noise for a
+  // project that runs on one known engine. Core's dialect-aware check (a
+  // function missing on THIS engine) is a real error and is kept.
+  if (input.suppressPortability) findings = findings.filter((f) => !isSuppressiblePortability(f, dialect))
   const minSev = SEVERITY_ORDER[input.config.severityThreshold]
   findings = findings.filter((f) => SEVERITY_ORDER[f.severity] >= minSev)
   // Sort by severity desc, then file.

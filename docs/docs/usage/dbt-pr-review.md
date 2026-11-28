@@ -254,6 +254,18 @@ dropped on the next run. `--post` targets **GitHub** PRs (it reads `GITHUB_TOKEN
 run with `--json`/`--output` and post the verdict using that platform's own API —
 native GitLab posting is not yet built in.
 
+The summary comment is updated in place only if the token's own account posted it.
+For a personal access token, the account is the `/user` login. For Actions' own
+`GITHUB_TOKEN`, it is `github-actions[bot]`. A GitHub App installation token cannot
+read `/user`, so set `ALTIMATE_REVIEW_BOT_LOGIN` to the app's bot login (for example
+`my-app[bot]`). Without it, outside Actions, each run posts a new summary comment
+rather than risk editing another bot's comment. Inside Actions, an App token without
+the variable is treated as `github-actions[bot]`: it never finds the summary it
+posted earlier and adds a new one on every run, and if the PR already has a
+`github-actions[bot]` summary it updates that one and no longer recognises its own
+inline comments, so they are posted again. Set `ALTIMATE_REVIEW_BOT_LOGIN` whenever
+the review posts with an App token.
+
 ## Configuration — `.altimate/review.yml`
 
 Per-repo configuration, the analogue of an `AGENTS.md`. Tune the rubric, choose
@@ -264,6 +276,9 @@ mode: comment                 # comment | gate
 severityThreshold: suggestion
 manifestPath: target/manifest.json
 dialect: snowflake
+# portability: true           # cross-engine advice. Unset: off once the engine is known
+                              # (configured or detected). An explicit value applies even when
+                              # the engine is unknown. Set true for multi-adapter packages.
 reviewers: []                 # empty = risk-tier defaults; or pin lanes
 dataDiff:                     # OFF by default — see "Data-diff in CI" below
   enabled: false
@@ -282,6 +297,39 @@ rubric:
     allowSelectStarInStaging: true
     skipNonProdModels: true
 ```
+
+### What the PR comment shows
+
+- **One summary comment**, updated in place on every push, capped at about
+  5,000 characters. Critical findings come first; anything that does not fit is
+  counted, and the full list is always in the job log and the verdict envelope
+  (`altimate review --json --output <file>`). Local CLI output is never truncated.
+- **Repeated findings are grouped:** the same rule and message (ignoring model
+  and column names) at the same severity on three or more models is one bullet
+  listing the models, with each model's own names when they differ. Local CLI output lists every
+  finding with its location.
+- **Inline comments only on lines of the PR's diff.** Findings computed on
+  compiled SQL, or on unchanged lines, stay in the summary.
+- **No re-posting on reruns:** each inline comment carries the finding's
+  fingerprint, so a push does not repeat findings already on the PR, and a
+  non-blocking rerun with nothing new and the same headline as the bot's last
+  review only updates the summary.
+- **PII:** flagged only for PII columns the change newly exposes, not for
+  columns the base already surfaced. That comparison needs the base version's
+  SQL; when it can't be compiled, PII columns are reported as non-blocking
+  warnings that may predate the PR. One case still blocks without a compiled
+  base: the diff adds a highly sensitive column (an SSN, a passport or card
+  number, a date of birth) to a `marts/` or `reporting/` model, the base file's
+  own SQL cannot expose it (it does not name the column, select `*`, or call a
+  macro), and the column reaches the model's output unmasked, directly or
+  through CTEs and subqueries, from the added line or from anywhere else in the
+  model. A column that is hashed, masked or dropped everywhere it is read
+  (`sha2(ssn)`, `right(ssn, 4)`, `* exclude (ssn)`) stays a warning; one that
+  only passes through a value-preserving expression (`coalesce(ssn, '')`,
+  `max(ssn)`) still blocks. So does one the review cannot rule out: in SQL it
+  cannot follow (Jinja that builds the select list, lateral or scalar
+  subqueries, unusual syntax), or in a model whose output also takes a `*` or a
+  Jinja column list over a table, whose columns the SQL does not show.
 
 ### Risk-tier path tokens
 

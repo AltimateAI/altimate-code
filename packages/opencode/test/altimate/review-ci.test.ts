@@ -3,7 +3,15 @@ import { resolveGitHubTarget } from "../../src/altimate/review/post-github"
 import { ReviewCommand } from "../../src/cli/cmd/review"
 import { buildReviewSchemaContext } from "../../src/altimate/review/schema-context"
 
-const ENV_KEYS = ["GITHUB_TOKEN", "GH_TOKEN", "GITHUB_REPOSITORY", "GITHUB_EVENT_PATH", "ALTIMATE_PR_NUMBER"]
+const ENV_KEYS = [
+  "GITHUB_TOKEN",
+  "GH_TOKEN",
+  "GITHUB_REPOSITORY",
+  "GITHUB_EVENT_PATH",
+  "ALTIMATE_PR_NUMBER",
+  "GITHUB_ACTIONS",
+  "ALTIMATE_REVIEW_BOT_LOGIN",
+]
 const saved: Record<string, string | undefined> = {}
 for (const k of ENV_KEYS) saved[k] = process.env[k]
 
@@ -70,7 +78,11 @@ describe("resolveGitHubTarget", () => {
     process.env["GITHUB_REPOSITORY"] = "AltimateAI/altimate-bigquery-demo"
     process.env["ALTIMATE_PR_NUMBER"] = "42"
     const t = await resolveGitHubTarget()
-    expect(t).toEqual({ token: "tok", owner: "AltimateAI", repo: "altimate-bigquery-demo", prNumber: 42 })
+    expect(t).toEqual({ token: "tok", owner: "AltimateAI", repo: "altimate-bigquery-demo", prNumber: 42, actions: false })
+    // In Actions, with the posting account set explicitly.
+    process.env["GITHUB_ACTIONS"] = "true"
+    process.env["ALTIMATE_REVIEW_BOT_LOGIN"] = " my-app[bot] "
+    expect(await resolveGitHubTarget()).toMatchObject({ actions: true, botLogin: "my-app[bot]" })
   })
 
   test("returns undefined when PR number cannot be resolved", async () => {

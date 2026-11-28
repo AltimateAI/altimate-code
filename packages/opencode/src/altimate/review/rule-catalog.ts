@@ -44,6 +44,19 @@ export interface Rule {
   unless?: RegExp
   kind?: RuleKind
   pathGlob?: RegExp
+  /**
+   * Cross-engine portability advice: dropped for a project on one known
+   * engine only when that engine is listed in `worksOn` (dialect names as
+   * `run.ts` maps them: `postgres`, `tsql`, `databricks`, ...). An engine
+   * missing from it, or a rule with no `worksOn`, keeps the advice: it may be
+   * a real error on that engine.
+   */
+  portability?: { worksOn?: string[] }
+  /** Column-token pattern (first capture group is the column name) collected on
+   *  every line `added` matches — every token, not just the first — and kept on
+   *  `evidence.result.columns` / `items` so the orchestrator can reconcile each
+   *  column (and its `AS` alias) with the base. */
+  capturesColumns?: RegExp
   example: RuleExample
   counter?: RuleExample
 }
@@ -57,6 +70,18 @@ function stripComments(s: string): string {
     .replace(/\/\*[\s\S]*?\*\//g, " ")
     .replace(/--[^\n]*/g, " ")
     .replace(/\{#[\s\S]*?#\}/g, " ")
+}
+
+/**
+ * Blank out single-quoted SQL string-literal CONTENTS (keeping the quotes) so a
+ * regex detector can't be tripped by punctuation inside a literal — e.g. the
+ * `/` in `'n/a'` must not read as division, a `,` in `'a,b'` must not read as a
+ * comma join, and `'passport'` must not read as a column. Detectors that
+ * legitimately inspect literal content (leading wildcard, hardcoded date) must
+ * NOT use this. Handles doubled-quote escapes.
+ */
+export function stripLiterals(s: string): string {
+  return s.replace(/'(?:[^']|'')*'/g, "''")
 }
 
 export interface RuleInput {
@@ -101,6 +126,1777 @@ export function ruleMatches(rule: Rule, input: RuleInput): boolean {
   return relevant
 }
 
+/** A column token found in a select item, with the item's `AS` alias (the
+ *  output name) when it has one, and the trimmed line it came from. */
+export interface SelectItemColumn {
+  column: string
+  alias?: string
+  line: string
+}
+
+/** Split on commas outside parentheses (one entry per select item). Callers
+ *  blank string literals first (`stripLiterals`), so a comma inside one never splits. */
+function topLevelItems(s: string): string[] {
+  const items: string[] = []
+  let depth = 0
+  let start = 0
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === "(") depth++
+    else if (s[i] === ")") depth = Math.max(0, depth - 1)
+    else if (s[i] === "," && depth === 0) {
+      items.push(s.slice(start, i))
+      start = i + 1
+    }
+  }
+  items.push(s.slice(start))
+  return items
+}
+
+/**
+ * Every column token `tokenRe` finds on a select line (all of them, not just
+ * the first), each paired with its item's `AS` alias. The pair matters because
+ * PII detection reports OUTPUT names: `c.ssn as tax_ref` exposes `tax_ref`.
+ * Tokens inside single-quoted literals are ignored.
+ */
+export function selectItemColumns(line: string, tokenRe: RegExp): SelectItemColumn[] {
+  const global = new RegExp(tokenRe.source, tokenRe.flags.includes("g") ? tokenRe.flags : `${tokenRe.flags}g`)
+  const out: SelectItemColumn[] = []
+  const seen = new Set<string>()
+  // Literals are blanked first: their contents are neither column tokens nor
+  // item separators (`email || ',' || phone_number as contact` is one item).
+  // Clause text (`from ssn_vault`, `where …`) is not a select list.
+  for (const item of topLevelItems(selectListText(stripLiterals(stripComments(line))))) {
+    // The alias as the select-list parser reads it: with or without `AS`,
+    // quoted (`as "Tax Ref"` → `tax ref`), after any parenthesised expression.
+    const alias = itemAlias(item)
+    for (const m of item.matchAll(global)) {
+      const column = m[1]?.toLowerCase()
+      if (!column || seen.has(`${column} ${alias ?? ""}`)) continue
+      seen.add(`${column} ${alias ?? ""}`)
+      out.push({ column, alias, line: line.trim() })
+    }
+  }
+  return out
+}
+
+// One identifier segment: bare, double-quoted or backtick-quoted.
+const SEGMENT = String.raw`(?:[A-Za-z_][\w$]*|"[^"]+"|` + "`[^`]+`)"
+// A column reference, optionally table-qualified (`c.ssn`, `"c"."ssn"`); group 1 is
+// the qualifier's last segment (the table or its alias), group 2 the column.
+const COLUMN_REF = String.raw`(?:(?:${SEGMENT}\s*\.\s*)*(${SEGMENT})\s*\.\s*)?(${SEGMENT})`
+// Select-item expressions that expose a column RAW: a bare reference, or one only
+// cast to a type (`cast(c.ssn as varchar)`, `c.ssn::varchar(20)`).
+const RAW_COLUMN_EXPRS = [
+  new RegExp(String.raw`^${COLUMN_REF}$`, "i"),
+  new RegExp(String.raw`^cast\s*\(\s*${COLUMN_REF}\s+as\s+[\w\s(),]+\)$`, "i"),
+  new RegExp(String.raw`^${COLUMN_REF}\s*::\s*\w+(?:\s*\([\d\s,]*\))?$`, "i"),
+]
+const EXPLICIT_ALIAS = new RegExp(String.raw`^([\s\S]*\S)\s+as\s+(${SEGMENT})$`, "i")
+// `expr name`: the expression must end in an identifier, quote or `)`, not an operator.
+const IMPLICIT_ALIAS = new RegExp(String.raw`^([\s\S]*[\w$"\x60)\]])\s+(${SEGMENT})$`, "i")
+// Trailing words that end an expression rather than name it (`case … end`, `x is null`).
+const NOT_AN_ALIAS = new Set(
+  "end null true false and or not is in then else when case like ilike between asc desc over filter within as distinct all".split(
+    " ",
+  ),
+)
+// Words that end a select list at its own nesting level.
+const SELECT_LIST_END =
+  /^(from|where|group|order|limit|qualify|having|union|intersect|except|minus|window|into|fetch|offset)\b/i
+
+/** The `group` at `at` is the `within group (…)` of an ordered-set aggregate.
+ *  Any run of whitespace (a masked comment is one) may separate the words. */
+const withinGroup = (sql: string, at: number) => {
+  if (!/^group$/i.test(sql.slice(at, at + 5))) return false
+  let after = at + 5
+  while (/\s/.test(sql[after] ?? "")) after++
+  if (sql[after] !== "(") return false
+  let before = at
+  while (before > 0 && /\s/.test(sql[before - 1])) before--
+  return before < at && /(?:^|[^\w$."`])within$/i.test(sql.slice(Math.max(0, before - 7), before))
+}
+
+/** `line` with everything outside a select list blanked: from a clause keyword
+ *  (`from`, `where`, …) at a query's own level up to the next `select`. A
+ *  keyword inside a call (`extract(day from d)`) does not count. */
+function selectListText(line: string): string {
+  // Per open parenthesis: whether it opens a subquery, and the outer mode.
+  const stack: Array<{ query: boolean; listing: boolean }> = []
+  let listing = true
+  let query = true
+  let out = ""
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i]
+    if (c === "(") {
+      stack.push({ query, listing })
+      query = /^\s*select\b/i.test(line.slice(i + 1, i + 40))
+      if (query) listing = false
+    } else if (c === ")") {
+      const outer = stack.pop()
+      if (outer) ({ query, listing } = outer)
+    } else if (query && !isWordChar(line[i - 1])) {
+      if (/^select\b/i.test(line.slice(i, i + 7))) listing = true
+      else if (SELECT_LIST_END.test(line.slice(i, i + 10)) && !withinGroup(line, i)) listing = false
+    }
+    out += listing || c === "(" || c === ")" ? c : c === "\n" ? c : " "
+  }
+  return out
+}
+
+const unquote = (s: string) => s.replace(/^["`]|["`]$/g, "").toLowerCase()
+
+/** Scope key of the model's outermost query. No identifier unquotes to it, so a
+ *  CTE named `final` (the dbt style guide's last CTE) keeps its own scope. */
+export const ROOT_SCOPE = "\u0000root"
+
+/** One item of a select list, located in its query scope. */
+export interface SelectItem {
+  /** Output name: the alias (with or without `AS`) or a bare column's own name. */
+  name?: string
+  /** The column the item exposes RAW (bare or qualified reference, or only cast). */
+  rawColumn?: string
+  /** The qualifier of `rawColumn` (`c` in `c.ssn`): a FROM/JOIN alias or table name. */
+  rawQualifier?: string
+  /** Whitespace-normalised item text, for comparing one item across base and head. */
+  text: string
+  /** As `text`, with string-literal contents kept: `regexp_replace(ssn, '\\d', '*')`
+   *  and `regexp_replace(ssn, '^$', '*')` differ here. */
+  exact: string
+  /** For an item that is not a raw column, every column reference its expression
+   *  reads (outside `over (…)`, `filter (…)` and `within group (…)`). */
+  reads?: Array<{ qualifier?: string; column: string }>
+  /** The item is a constant (literals, numbers, `null`/`true`/`false`, casts of them). */
+  constant?: boolean
+  /** `ROOT_SCOPE` for the outermost query, the CTE name for a CTE body, and for a
+   *  nested query `<parent>><alias>` or, without one, `<parent>>sub<n>`. */
+  scope: string
+  /** Which `UNION`/`INTERSECT`/`EXCEPT` branch of its scope (0 for the first select). */
+  branch: number
+  /** Position in its select list. */
+  position: number
+  /** 1-based first and last source lines the item spans. */
+  startLine: number
+  endLine: number
+}
+
+/**
+ * Blank comments, Jinja tags and string-literal contents to spaces, and Jinja
+ * expressions to `_`, keeping every offset and newline in place so positions
+ * still map to source lines. One left-to-right pass, so `--` inside a literal or
+ * a double-quoted identifier, or a quote inside a comment, is not misread.
+ */
+const MASKED_TOKEN = /\{#[\s\S]*?#\}|\{%[\s\S]*?%\}|\{\{[\s\S]*?\}\}|\/\*[\s\S]*?\*\/|--[^\n]*|'(?:[^']|'')*'|"(?:[^"]|"")*"/g
+function maskSql(sql: string, keepLiterals = false): string {
+  return sql.replace(MASKED_TOKEN, (m) => {
+    if (m.startsWith('"')) return m
+    if (m.startsWith("{{")) return m.replace(/[^\n]/g, "_")
+    if (m.startsWith("'")) return keepLiterals ? m : `'${m.slice(1, -1).replace(/[^\n]/g, " ")}'`
+    return m.replace(/[^\n]/g, " ")
+  })
+}
+
+const isWordChar = (c: string | undefined) => !!c && /[\w$."`]/.test(c)
+
+// Whitespace and dot spacing collapse only outside string literals, whose
+// spacing can change what an expression does (`'[0-9] *'` vs `'[0-9]  *'`).
+const NORMALIZE_STEPS: Array<[RegExp, (group?: string) => string]> = [
+  [/'(?:[^']|'')*'|\s+/g, () => " "],
+  [/'(?:[^']|'')*'|\(\s+/g, () => "("],
+  [/'(?:[^']|'')*'|\s+([),])/g, (close) => close!],
+  [/'(?:[^']|'')*'|\s*\.\s*/g, () => "."],
+]
+const normalizeItem = (raw: string) =>
+  NORMALIZE_STEPS.reduce(
+    (s, [re, to]) => s.replace(re, (m: string, group?: string) => (m.startsWith("'") ? m : to(group))),
+    raw,
+  ).trim()
+
+// Words in an expression that are syntax, never a column.
+const EXPR_KEYWORDS = new Set(
+  "and or not is null true false case when then else end as in like ilike rlike regexp similar escape between distinct all any some exists over partition by order asc desc nulls filter within group interval from for collate both leading trailing using separator cast try_cast".split(
+    " ",
+  ),
+)
+// A typed literal (`date '2024-01-01'`, `timestamp '…'`, `interval '1 day'`,
+// BigQuery `interval 1 day`): its type and unit words are part of the constant,
+// not columns.
+const TYPED_LITERAL =
+  /(?<![\w$."`])(?:(?:date|time|timestamp(?:_[nlt]tz|tz)?|datetime)\s*'(?:[^']|'')*'|interval\s*(?:'(?:[^']|'')*'|[+-]?\d+(?:\.\d+)?)(?:\s+(?:year|quarter|month|week|day|hour|minute|second|millisecond|microsecond)s?\b)?)/gi
+const COLUMN_TOKEN = new RegExp(String.raw`(?<![\w$."\x60])${COLUMN_REF}(?![\w$"\x60])(\s*\()?`, "gi")
+
+/** The column references an expression reads, from masked SQL: function names,
+ *  keywords, cast/`::` target types and the clauses that only partition, order
+ *  or filter rows (`over (…)`, `filter (…)`, `within group (…)` right after a
+ *  call's `)`) are skipped. A word that is only sometimes a keyword (`first`,
+ *  `time`, `row`) counts as a column unless it is in its keyword phrase. */
+function columnReads(expr: string): Array<{ qualifier?: string; column: string }> {
+  let e = expr.replace(TYPED_LITERAL, " ").replace(/'(?:[^']|'')*'/g, " ")
+  // `f(…) over (…)` / `filter (…)` / `within group (…)`: cut each clause to its
+  // `)`. `filter(arr, x -> …)` without a call before it is an array function.
+  const clause = /\)\s*(?:over|filter|within\s+group)\s*\(/i
+  for (let m = clause.exec(e); m; m = clause.exec(e)) {
+    const open = m.index + m[0].length - 1
+    e = e.slice(0, m.index + 1) + " " + e.slice(closingParen(e, open) + 1)
+  }
+  e = e
+    .replace(/\bnulls\s+(?:first|last)\b|\bat\s+time\s+zone\b|\b(?:respect|ignore)\s+nulls\b/gi, " ")
+    .replace(/::\s*\w+(?:\s*\([\d\s,]*\))?/g, " ")
+    .replace(/\bas\s+\w+(?:\s+\w+)*?(?:\s*\([\d\s,]*\))?\s*(?=\))/gi, " ")
+  const out: Array<{ qualifier?: string; column: string }> = []
+  for (const m of e.matchAll(COLUMN_TOKEN)) {
+    if (m[3]) continue // a function call
+    const column = unquote(m[2])
+    // A bare keyword is syntax; a quoted or qualified one is a column.
+    if (!m[1] && !/^["\x60]/.test(m[2]) && EXPR_KEYWORDS.has(column)) continue
+    out.push(m[1] ? { qualifier: unquote(m[1]), column } : { column })
+  }
+  return out
+}
+
+/** A select item's expression and its alias (`AS` or implicit), if any. */
+function splitAlias(text: string): { expr: string; alias?: string } {
+  const explicit = EXPLICIT_ALIAS.exec(text)
+  if (explicit) return { expr: explicit[1], alias: explicit[2] }
+  const implicit = IMPLICIT_ALIAS.exec(text)
+  if (implicit && !NOT_AN_ALIAS.has(unquote(implicit[2]))) return { expr: implicit[1], alias: implicit[2] }
+  return { expr: text }
+}
+
+/** A select item's output alias, unquoted and lowercased, when it has one. */
+function itemAlias(item: string): string | undefined {
+  const { alias } = splitAlias(normalizeItem(item))
+  return alias ? unquote(alias) : undefined
+}
+
+/** Only literals, numbers, `null`/`true`/`false` and casts of them. */
+function isConstant(expr: string): boolean {
+  const rest = expr
+    .replace(TYPED_LITERAL, " ")
+    .replace(/'(?:[^']|'')*'/g, " ")
+    .replace(/::\s*\w+(?:\s*\([\d\s,]*\))?/g, " ")
+    .replace(/\bas\s+\w+(?:\s+\w+)*?(?:\s*\([\d\s,]*\))?\s*(?=\))/gi, " ")
+    .replace(/\b(?:null|true|false|cast)\b/gi, " ")
+  return /^[\s\d.+\-*/(),]*$/.test(rest)
+}
+
+function describeItem(
+  raw: string,
+): Pick<SelectItem, "name" | "rawColumn" | "rawQualifier" | "text" | "reads" | "constant"> {
+  const text = normalizeItem(raw)
+  const { expr, alias } = splitAlias(text)
+  const matched = RAW_COLUMN_EXPRS.map((re) => re.exec(expr)).find(Boolean)
+  // A bare `null` / `true` / `false` (or a cast of one) is a constant, not a column.
+  const ref = matched && !matched[1] && /^(?:null|true|false)$/i.test(matched[2]) ? undefined : matched
+  const rawColumn = ref ? unquote(ref[2]) : undefined
+  const rawQualifier = ref?.[1] ? unquote(ref[1]) : undefined
+  const name = alias ? unquote(alias) : rawColumn
+  if (ref) return { name, rawColumn, rawQualifier, text }
+  return { name, text, reads: columnReads(expr), constant: isConstant(expr) }
+}
+
+// Words that end a FROM clause's table list at its own nesting level.
+const FROM_LIST_END = /^(where|group|order|limit|qualify|having|union|intersect|except|minus|window|fetch|offset|on|using)\b/i
+const SET_OPERATOR = /^(union|intersect|except|minus)\b/i
+// Words after a FROM/JOIN source that are not its alias.
+const NOT_A_SOURCE_ALIAS = new Set(
+  "on using where join left right inner outer full cross natural group order limit qualify having union intersect except minus window fetch offset lateral pivot unpivot tablesample sample for at before changes match_recognize with".split(
+    " ",
+  ),
+)
+
+/** One FROM/JOIN source of a select: a table (its full relation name, every
+ *  segment unquoted and lowercased), a CTE, or a FROM subquery (named by its
+ *  scope), with the alias it is read under. */
+interface Source {
+  name: string
+  /** A schema-qualified table's last segment, which a column qualifier names it by. */
+  short?: string
+  alias?: string
+}
+
+interface ParsedSelects {
+  items: SelectItem[]
+  /** Per `scope#branch`, the sources its FROM / JOIN clauses read. */
+  sources: Map<string, Source[]>
+  /** Per `scope#branch`, the masked text of its FROM/JOIN source list: table
+   *  names, aliases and table-function or `pivot`/`unpivot` arguments, without
+   *  the bodies of FROM subqueries and without join conditions. */
+  sourceText: Map<string, string>
+  /** `scope#branch` selects with a source the parser could not name: a
+   *  parenthesised join, a Jinja expression other than `ref`/`source`/`this`, a
+   *  comma-joined source after a join condition, or no source at all in a
+   *  select that holds a Jinja expression (which may be its FROM). */
+  unknownSources: Set<string>
+  /** Nested queries that are the operand of `in`, `exists`, `any`, `some` or
+   *  `all`: their rows decide a condition and never reach an output. */
+  predicates: Set<string>
+  /** The SQL is not, as a whole, CTEs and queries of the form `select … from …`
+   *  joined by set operators, with names the parser can follow. Anything else
+   *  is unmodelled: a `select` that does not open its query (`from c select
+   *  x`, `|>`, two Jinja alternatives of one body), a CTE or a final query with
+   *  no `select` (`table c`, `values`, a macro), a set operator not followed by
+   *  a select (`union all by name`, `corresponding`), a parenthesised
+   *  set-operation branch, a `with` inside parentheses, a column list on a CTE
+   *  or on a CTE/subquery alias (`a (x, y) as (…)`, `from c as t(x)`), a CTE
+   *  defined twice or named through Jinja, a select list that stops at a
+   *  clause word used as a column (`select topic, offset, ssn from …`), or a
+   *  statement other than one query. */
+  unmodelled: boolean
+  /** The select items themselves may be wrong: quoting the masker may have
+   *  misread, because Jinja or the warehouse lexes the text differently: a
+   *  literal spanning lines, an unpaired quote, a backslash before a quote, a
+   *  `#`, `//` or `$$`, a block comment inside a block comment, Jinja
+   *  delimiters inside a SQL comment or a literal (Jinja renders before SQL is
+   *  read), a quoted identifier holding a parenthesis; or a select prefix it does
+   *  not strip (`distinct top 10`, `as struct`) became part of the first item,
+   *  or an item was split inside `[…]` / `{…}`. */
+  misread: boolean
+  /** Items holding a Jinja expression that may stand for a raw column or a
+   *  column list: an item without an alias, or one whose expression is not a
+   *  macro call (`{{ col }} as x`). */
+  jinjaItems: Set<SelectItem>
+  /** Per item, the text of its Jinja macro calls that are not masking calls
+   *  (`{{ dbt.safe_cast("ssn", "varchar") }}`): a column they name may come
+   *  out raw. */
+  jinjaCalls: Map<SelectItem, string>
+  /** Offsets `[start, stop)` of every FROM/JOIN source segment (as `sourceText`). */
+  sourceRanges: Array<[number, number]>
+  /** Per nested query, the offset of the `(` that opens it. */
+  scopeOpen: Map<string, number>
+  /** Per nested query, the scope it is nested in. */
+  scopeParent: Map<string, string>
+}
+
+/** Offset of the `)` closing the `(` at `open` in masked SQL, or the end. */
+function closingParen(s: string, open: number): number {
+  let depth = 0
+  for (let i = open; i < s.length; i++) {
+    if (s[i] === "(") depth++
+    else if (s[i] === ")" && --depth === 0) return i
+  }
+  return s.length
+}
+
+function parseSelects(sql: string): ParsedSelects {
+  const s = maskSql(sql)
+  const withLiterals = maskSql(sql, true)
+  const lineStarts = [0]
+  for (let i = 0; i < s.length; i++) if (s[i] === "\n") lineStarts.push(i + 1)
+  const lineOf = (offset: number) => {
+    let lo = 0
+    let hi = lineStarts.length - 1
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1
+      if (lineStarts[mid] <= offset) lo = mid
+      else hi = mid - 1
+    }
+    return lo + 1
+  }
+  const items: SelectItem[] = []
+  const sources = new Map<string, Source[]>()
+  const sourceText = new Map<string, string>()
+  const unknownSources = new Set<string>()
+  const predicates = new Set<string>()
+  const jinjaItems = new Set<SelectItem>()
+  const jinjaCalls = new Map<SelectItem, string>()
+  const sourceRanges: Array<[number, number]> = []
+  const cteNames = new Set<string>()
+  const lexedApart = (m: string) => {
+    // A literal spanning lines, or holding Jinja comment or statement delimiters.
+    if (m.startsWith("'")) return m.includes("\n") || /\{[#%]|[#%]\}/.test(m)
+    // A SQL comment holding Jinja (rendered first), or another block comment (nested in some engines).
+    if (m.startsWith("--") || m.startsWith("/*")) return /\{[#%{]|[#%}]\}/.test(m) || m.indexOf("/*", 2) >= 0
+    return false
+  }
+  let misread =
+    (sql.match(MASKED_TOKEN) ?? []).some(lexedApart) ||
+    (s.match(/'/g)?.length ?? 0) % 2 === 1 ||
+    s.includes("#") ||
+    s.includes("//") ||
+    sql.includes("$$") ||
+    sql.includes("\\'") ||
+    (s.match(/"(?:[^"]|"")*"|\x60[^\x60]*\x60/g) ?? []).some((quoted) => /[()]/.test(quoted))
+  // One query only: a DDL/DML wrapper or a second statement is not a model.
+  // A set operator is followed by its next select (not `by name`, `table c`).
+  let unmodelled =
+    /^[\s_]*(?:create|insert|merge|update|delete|alter|drop)\b/i.test(s) ||
+    /;\s*\S/.test(s) ||
+    s.includes("|>") ||
+    /(?<![\w$."\x60*])(?:union|intersect|except|minus)\b(?!\s+(?:all\s+|distinct\s+)?(?:select\b|\())(?!\s*\()/i.test(s)
+  const scopeOpen = new Map<string, number>()
+  const scopeParent = new Map<string, string>()
+  const selectScopes = new Set<string>()
+  // The scope each nested query's `(` opens, so a FROM subquery is a named source.
+  const parenScope = new Map<number, string>()
+  // Each select's scope, branch and the offset its select list ends at.
+  const selects: Array<{ scope: string; branch: number; start: number; end: number }> = []
+  const scopes: string[] = [ROOT_SCOPE]
+  const branches = new Map<string, number>()
+  // `name as (`, or `name (col, …) as (`: a column list still names the CTE, whose
+  // outputs then keep the body's own names (so a renamed column resolves to nothing).
+  const cteHead = new RegExp(
+    String.raw`(${SEGMENT})\s*(\([^()]*\)\s*)?\s+as\s*(?:(?:not\s+)?materialized\s*)?$`,
+    "i",
+  )
+  const tableRef = new RegExp(String.raw`^\s*((?:${SEGMENT}\s*\.\s*)*${SEGMENT})`, "i")
+  // A nested query is keyed by the alias after its `)` (`(select …) s`,
+  // `(select …) as n`), else numbered within its parent, so a subquery added
+  // elsewhere does not rename it between base and head.
+  const nestedKeys = new Set<string>()
+  const nestedCount = new Map<string, number>()
+  const subAlias = new RegExp(String.raw`^\s+(?:as\s+)?(${SEGMENT})`, "i")
+  const nestedKey = (parent: string, open: number) => {
+    const close = closingParen(s, open)
+    const alias = subAlias.exec(s.slice(close + 1, close + 200))?.[1]
+    const named =
+      alias && !NOT_A_SOURCE_ALIAS.has(unquote(alias)) && !NOT_AN_ALIAS.has(unquote(alias)) && !SELECT_LIST_END.test(alias)
+        ? `${parent}>${unquote(alias)}` : undefined
+    let key = named
+    if (!key || nestedKeys.has(key)) {
+      // Numbered within the parent, skipping any key already taken (a numbered
+      // key can equal one another scope numbered under the same alias).
+      let n = nestedCount.get(parent) ?? 0
+      do key = `${named ?? parent}>sub${++n}`
+      while (nestedKeys.has(key))
+      nestedCount.set(parent, n)
+    }
+    nestedKeys.add(key)
+    return key
+  }
+  // A `from` of the same select after `at`: at its nesting level, before a set
+  // operator or the end of the query (`is distinct from` is not one).
+  const fromAhead = (at: number) => {
+    let depth = 0
+    for (let j = at; j < s.length; j++) {
+      const d = s[j]
+      if (d === "(") depth++
+      else if (d === ")") {
+        if (--depth < 0) return false
+      } else if (d === ";" && depth === 0) return false
+      else if (depth === 0 && !isWordChar(s[j - 1])) {
+        if (SET_OPERATOR.test(s.slice(j, j + 10))) return false
+        if (/^from\b/i.test(s.slice(j, j + 5)) && !/\bdistinct\s+$/i.test(s.slice(Math.max(0, j - 12), j))) return true
+      }
+    }
+    return false
+  }
+  // The last 40 characters before `at`, each run of white space as one space.
+  const textBefore = (at: number) => {
+    let out = ""
+    for (let j = at - 1; j >= 0 && out.length < 40; j--) {
+      const blank = /\s/.test(s[j])
+      if (!blank || !out.startsWith(" ")) out = (blank ? " " : s[j]) + out
+    }
+    return out
+  }
+  // A set operator is the next word at or after `at`.
+  const setOperatorAt = (at: number) => {
+    let j = at
+    while (j < s.length && /\s/.test(s[j])) j++
+    return SET_OPERATOR.test(s.slice(j, j + 10))
+  }
+  // The text before `at` ends where a query can start: nothing, only Jinja
+  // (masked to `_`), `(`, or the `)` that closes the CTE list.
+  const opensQuery = (at: number) => {
+    let j = at - 1
+    while (j >= 0 && /\s/.test(s[j])) j--
+    return j < 0 || s[j] === "(" || s[j] === ")" || (s[j] === "_" && /^[\s_]*$/.test(s.slice(0, j)))
+  }
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]
+    if (c === "(") {
+      const parent = scopes[scopes.length - 1]
+      const cte = cteHead.exec(s.slice(Math.max(0, i - 200), i))
+      // A CTE body is named by its CTE; a nested query gets its own scope; any
+      // other parenthesis (a call, a grouping) stays in its parent's scope.
+      if (/^\s*with\b/i.test(s.slice(i + 1, i + 50))) unmodelled = true
+      if (cte && !/^as$/i.test(cte[1])) {
+        const name = unquote(cte[1])
+        scopes.push(name)
+        // A column list, a second definition (Jinja alternatives), or a name
+        // that came out of Jinja or collides with a nested query's key.
+        if (cte[2] || cteNames.has(name) || name.includes(">") || /_{4,}|\{/.test(name)) unmodelled = true
+        cteNames.add(name)
+      } else if (/^[\s(]*select\b/i.test(s.slice(i + 1, i + 200))) {
+        scopes.push(nestedKey(parent, i))
+        parenScope.set(i, scopes[scopes.length - 1])
+        scopeOpen.set(scopes[scopes.length - 1], i)
+        scopeParent.set(scopes[scopes.length - 1], parent)
+        // The words before the parenthesis, with white space (a comment is
+        // blanked to spaces) collapsed, however long it runs.
+        const before = textBefore(i)
+        const setOperand = /\b(?:union|intersect|except|minus)(?:\s+all|\s+distinct)?\s*$/i.test(before)
+        if (
+          /(?:^|[^\w$."\x60])(?:in|exists|any|some)\s*$/i.test(before) ||
+          // `union all (…)` is a branch and `select all (…)` a scalar subquery.
+          (/(?:^|[^\w$."\x60])all\s*$/i.test(before) && !setOperand && !/\bselect\s+all\s*$/i.test(before))
+        )
+          predicates.add(scopes[scopes.length - 1])
+        // A parenthesised set-operation branch: its select is not a numbered
+        // branch. One that opens the operation stands where a query starts:
+        // after `(`, the `)` of the CTE list, or nothing but Jinja. Anywhere
+        // else (`select (select …) union …`, `where x = (select …) union …`,
+        // `from (select …) union …`) the parenthesis ends a branch as a scalar
+        // or FROM subquery.
+        else if (setOperand || (opensQuery(i) && setOperatorAt(closingParen(s, i) + 1))) unmodelled = true
+      } else scopes.push(parent)
+      continue
+    }
+    if (c === ")") {
+      if (scopes.length > 1) scopes.pop()
+      continue
+    }
+    if ((c !== "s" && c !== "S") || isWordChar(s[i - 1]) || !/^select\b/i.test(s.slice(i, i + 7))) continue
+    const scope = scopes[scopes.length - 1]
+    selectScopes.add(scope)
+    // A select opens its query: after `(`, the `)` of the CTE list, a set
+    // operator, or nothing but Jinja at the start. After anything else (`from
+    // c select x`, a second Jinja alternative) the query is not `select … from …`.
+    const lead = s.slice(0, i).trimEnd()
+    if (
+      lead &&
+      !/[()]$/.test(lead) &&
+      !/(?<![\w$."\x60])(?:union|intersect|except|minus)(?:\s+(?:all|distinct))?$/i.test(lead) &&
+      !/^[\s_]*$/.test(lead)
+    )
+      unmodelled = true
+    const branch = branches.get(scope) ?? 0
+    branches.set(scope, branch + 1)
+    // The list runs from after `select [distinct [on (…)]|all|top n]` to the first
+    // clause keyword, `)` or `;` at its own nesting level.
+    let start = i + 6
+    const distinctOn = /^\s+distinct\s+on\s*\(/i.exec(s.slice(start, start + 100))
+    if (distinctOn) start = closingParen(s, start + distinctOn[0].length - 1) + 1
+    else {
+      const prefix = /^\s+(?:(?:distinct|all)\b|top\s+\d+\b)?/i.exec(s.slice(start, start + 100))
+      if (prefix) start += prefix[0].length
+    }
+    if (/^\s*(?:as\s+(?:struct|value)|distinct|all|top|percent|with\s+ties)\b/i.test(s.slice(start, start + 40))) misread = true
+    let depth = 0
+    let itemStart = start
+    let position = 0
+    let end = s.length
+    const push = (stop: number) => {
+      const raw = s.slice(itemStart, stop)
+      if (!raw.trim()) return
+      const first = itemStart + (raw.length - raw.trimStart().length)
+      const last = itemStart + raw.trimEnd().length - 1
+      const item: SelectItem = {
+        ...describeItem(raw),
+        exact: normalizeItem(withLiterals.slice(itemStart, stop)),
+        scope,
+        branch,
+        position: position++,
+        startLine: lineOf(first),
+        endLine: lineOf(last),
+      }
+      items.push(item)
+      // Split inside `[…]` or `{…}`: the item is a piece of a larger one.
+      const count = (ch: string) => raw.split(ch).length - 1
+      if (count("[") !== count("]") || count("{") !== count("}")) misread = true
+      const source = sql.slice(itemStart, stop)
+      // Jinja expressions of the item (masked to `_`, so not ones inside a literal).
+      const jinja = [...source.matchAll(/\{\{[\s\S]*?\}\}/g)].filter((m) => s[itemStart + m.index!] === "_")
+      if (
+        (jinja.length && (!splitAlias(item.text).alias || jinja.some((m) => !m[0].includes("(")))) ||
+        // A statement tag in the item (a conditional wrapper or alias, a loop),
+        // or an expression glued to a name (`ssn{{ suffix }}`): its text is not its SQL.
+        source.includes("{%") ||
+        /[\w$]\{\{|\}\}[\w$]/.test(source) ||
+        // Jinja left unmasked: it sits in a quoted identifier (`ssn as "{{ col }}"`).
+        raw.includes("{{")
+      )
+        jinjaItems.add(item)
+      const calls = jinja.filter((m) => {
+        const macro = /([A-Za-z_]\w*)\s*\(/.exec(m[0])?.[1]
+        return !!macro && !isMaskingCall(macro)
+      })
+      if (calls.length) jinjaCalls.set(item, calls.map((m) => m[0]).join(" "))
+    }
+    for (let j = start; j <= s.length; j++) {
+      const d = s[j]
+      if (j === s.length || (depth === 0 && (d === ")" || d === ";"))) {
+        push(j)
+        end = j
+        break
+      }
+      if (d === "(") depth++
+      else if (d === ")") depth--
+      else if (depth === 0 && d === ",") {
+        push(j)
+        itemStart = j + 1
+      } else if (
+        depth === 0 &&
+        !isWordChar(s[j - 1]) &&
+        SELECT_LIST_END.test(s.slice(j, j + 10)) &&
+        // `listagg(x, ',') within group (order by y)` is part of the item.
+        !withinGroup(s, j) &&
+        // `* except (…)` (BigQuery) is one item, not a set operation.
+        !(/^except\b/i.test(s.slice(j, j + 7)) && /\*\s*$/.test(s.slice(itemStart, j)))
+      ) {
+        // A list that stops at any other clause word while this select still
+        // has a FROM ahead stopped at a column named like one (`offset`, `window`).
+        if (!/^from\b/i.test(s.slice(j, j + 5)) && !SET_OPERATOR.test(s.slice(j, j + 10)) && fromAhead(j)) unmodelled = true
+        push(j)
+        end = j
+        break
+      }
+    }
+    selects.push({ scope, branch, start, end })
+  }
+  // Sources read at each select's own level: the table, CTE or subquery after
+  // `from`, `join`, or a `,` inside a FROM list, with its alias, up to the end of
+  // the select (`)`, `;`, a set operator).
+  const aliasRe = new RegExp(String.raw`^\s+(?:as\s+)?(${SEGMENT})`, "i")
+  const segmentRe = new RegExp(SEGMENT, "g")
+  for (const { scope, branch, start, end } of selects) {
+    const key = `${scope}#${branch}`
+    const read: Source[] = []
+    let inFrom = false
+    // Inside a join's `on` / `using` condition: a `,` at this level starts a
+    // comma-joined source (`join b on … , lateral flatten(…) f`).
+    let inCondition = false
+    let depth = 0
+    // The source list's own text, one segment per source: from after `from`,
+    // `join` or `,` to the next of them or the word that ends the list.
+    let text = ""
+    let segment = -1
+    const closeSegment = (stop: number) => {
+      if (segment >= 0) {
+        const part = s.slice(segment, stop)
+        text += ` ${part}`
+        // Without the white space around it, so the range holds no line it only touches.
+        if (part.trim()) sourceRanges.push([segment + part.length - part.trimStart().length, segment + part.trimEnd().length])
+      }
+      segment = -1
+    }
+    let j = end
+    for (; j < s.length; j++) {
+      const d = s[j]
+      if (depth === 0 && (d === ")" || d === ";")) break
+      if (d === "(") depth++
+      else if (d === ")") depth--
+      if (depth !== 0) continue
+      const boundary = !isWordChar(s[j - 1])
+      if (boundary && SET_OPERATOR.test(s.slice(j, j + 10))) break
+      const kw = boundary ? /^(from|join)\b/i.exec(s.slice(j, j + 5)) : null
+      if (kw || (inFrom && d === ",")) {
+        closeSegment(j)
+        const after = j + (kw ? kw[0].length : 1)
+        const lead = after + (/^\s*/.exec(s.slice(after, after + 200))?.[0].length ?? 0)
+        let name: string | undefined
+        let short: string | undefined
+        let rest = lead
+        if (s[lead] === "(") {
+          // A FROM subquery is a source under its alias; any other parenthesis
+          // (a parenthesised join) names no source here.
+          name = parenScope.get(lead)
+          rest = closingParen(s, lead) + 1
+        } else {
+          const ref = tableRef.exec(s.slice(after, after + 300))
+          if (ref) {
+            const segments = [...ref[1].matchAll(segmentRe)].map((m) => m[0])
+            const last = segments[segments.length - 1]
+            const at = after + ref[0].length - last.length
+            // A Jinja `{{ ref('x') }}` is masked to underscores: name it by its source text.
+            short = /^_+$/.test(last) ? sql.slice(at, at + last.length).replace(/\s+/g, "").toLowerCase() : unquote(last)
+            // A name partly out of Jinja (`stg_{{ src }}`) could be anything, a CTE included.
+            if (!/^_+$/.test(last) && /_{4,}|\{/.test(last)) unknownSources.add(key)
+            // Database and schema stay part of the identity: `restricted.customers`
+            // and `public.customers` are different tables.
+            name = [...segments.slice(0, -1).map(unquote), short].join(".")
+            rest = after + ref[0].length
+          }
+        }
+        if (name) {
+          const aliased = aliasRe.exec(s.slice(rest, rest + 200))
+          const alias = aliased?.[1]
+          const src: Source = short && short !== name ? { name, short } : { name }
+          if (alias && !NOT_A_SOURCE_ALIAS.has(unquote(alias))) {
+            src.alias = unquote(alias)
+            // `from c as t(x, y)` renames a CTE's or a subquery's columns.
+            if ((s[lead] === "(" || cteNames.has(name)) && /^\s*\(/.test(s.slice(rest + aliased![0].length, rest + aliased![0].length + 20)))
+              unmodelled = true
+          }
+          read.push(src)
+          // A Jinja source that is not a relation call could name anything, a CTE included.
+          if (short?.startsWith("{{") && !/^\{\{[-+]?(?:(?:ref|source)\(|this[-+]?\}\}$)/.test(short)) unknownSources.add(key)
+        } else unknownSources.add(key)
+        // A FROM subquery's body is its own scope: only its alias belongs to this list.
+        segment = s[lead] === "(" && name ? rest : after
+        inFrom = true
+        j = after - 1
+        inCondition = false
+      } else if (inCondition && d === ",") {
+        // Not read as a source (the resolvers keep their source list): its text
+        // counts, and the select reads something unnamed.
+        closeSegment(j)
+        segment = j + 1
+        unknownSources.add(key)
+      } else if (boundary && FROM_LIST_END.test(s.slice(j, j + 10))) {
+        // `unnest(x) with offset` is part of a source, not the end of the
+        // list: what follows it is not read as a source.
+        if (inFrom && /^offset\b/i.test(s.slice(j, j + 7)) && /\bwith\s+$/i.test(s.slice(Math.max(0, j - 200), j))) unknownSources.add(key)
+        closeSegment(j)
+        inCondition = inFrom || inCondition ? /^(?:on|using)\b/i.test(s.slice(j, j + 6)) : false
+        inFrom = false
+      }
+    }
+    closeSegment(j)
+    // No source parsed, yet a Jinja expression in the select: it may hold the FROM.
+    if (!read.length && /(?<![\w$])_{4,}(?![\w$])/.test(s.slice(start, j))) unknownSources.add(key)
+    sources.set(key, read)
+    sourceText.set(key, text)
+  }
+  // Every CTE and the final query hold a select (not `table c`, `values`, a macro).
+  if (!selectScopes.has(ROOT_SCOPE) || [...cteNames].some((name) => !selectScopes.has(name))) unmodelled = true
+  return { items, sources, sourceText, unknownSources, predicates, unmodelled, misread, jinjaItems, jinjaCalls, sourceRanges, scopeOpen, scopeParent }
+}
+
+/**
+ * Every select list in `sql`, item by item, with the query scope each belongs
+ * to. Scope is what separates a CTE's `ssn as contact` from the final select's
+ * `email as contact`: only `ROOT_SCOPE` items are the model's output. Items are
+ * parsed across lines, so a multi-line expression or alias is one item.
+ */
+export function selectItems(sql: string): SelectItem[] {
+  return parseSelects(sql).items
+}
+
+const STAR = new RegExp(String.raw`^(?:${SEGMENT}\.)*\*$`)
+
+/** The model's final output, as `finalOutputs` resolves it. */
+export interface FinalOutputs {
+  /**
+   * Per output name of the model (its FINAL projection, never a CTE's or a
+   * nested query's own aliases), the source columns it exposes RAW under that
+   * name, each as `source.column` where the source is the table (its full
+   * relation name as written) the column is read from: `c.ssn as tax_ref` with
+   * `customers c` → `tax_ref: {customers.ssn}`, so the same column name from
+   * another table (`s.ssn` with `spouses s`, or `restricted.customers` vs
+   * `public.customers`) is a different exposure. A qualifier resolves
+   * through its own FROM/JOIN source only; a column read from a CTE or a FROM
+   * subquery takes that scope's exposure for it (masked there → nothing raw), and
+   * `*` over them takes all of theirs. An unqualified column resolves through the
+   * CTEs/subqueries that output it, else the single table read (several tables →
+   * one combined `a|b.column` ref). A qualifier that matches no source gets a ref
+   * that matches nothing on the other side. A later set-operation branch takes the
+   * first branch's name at the same position. An item that wraps the column in any
+   * other function or expression (`sha2(c.ssn)`, `left(c.ssn, 4)`, `case …`,
+   * `a || b`) exposes nothing raw and is left out.
+   */
+  raw: Map<string, Set<string>>
+  /** Every output name the final projection resolves. */
+  names: Set<string>
+  /** The final projection has a plain `*`, so it also passes through unnamed columns. */
+  passthrough: boolean
+  /** The `source.column` refs the final projection's plain `*` items expose raw
+   *  for a column they pass through unnamed (`select * from customers` →
+   *  `ssn: {customers.ssn}`; a CTE that masks it → none). */
+  starRaw: (column: string) => Set<string>
+  /** The database/schema prefix of every table the SQL reads (`""` for an
+   *  unqualified one), for `refCovered`'s environment check. */
+  prefixes: Set<string>
+  /** Per output name, a signature of how it is computed: the item text (string
+   *  literals as written, each FROM/JOIN alias named by its source) plus the
+   *  full text of every CTE or subquery its select reads. Equal signatures on two sides mean the name is computed the same way. */
+  signatures: Map<string, Set<string>>
+  /** Per output name, every `source.column` ref its value is computed from, raw
+   *  or not, resolved like `raw` (`lower(s.ssn) as email` with `spouses s` →
+   *  `email: {spouses.ssn}`; through a CTE, what that CTE's column reads). */
+  reads: Map<string, Set<string>>
+}
+
+interface ScopeOutputs extends Omit<FinalOutputs, "passthrough" | "starRaw" | "prefixes"> {
+  /** `*` items, whose columns pass through unnamed (`select * from customers`). */
+  stars: Array<{ branch: number; qualifier?: string }>
+  /** Every item's text, and that of every scope it reads. */
+  body: string
+}
+
+let unresolvedRefs = 0
+
+const splitRef = (ref: string) => {
+  const dot = ref.lastIndexOf(".")
+  return { tables: ref.slice(0, dot).split("|"), column: ref.slice(dot + 1) }
+}
+
+/** A table name split into its database/schema prefix and its own name. A Jinja
+ *  `{{ ref(…) }}` name has no prefix. */
+function splitTable(table: string): { prefix: string; name: string } {
+  const dot = table.startsWith("{{") ? -1 : table.lastIndexOf(".")
+  return dot < 0 ? { prefix: "", name: table } : { prefix: table.slice(0, dot), name: table.slice(dot + 1) }
+}
+
+/** The database/schema prefixes the base's SQL reads tables under: `sameTable`
+ *  asks only whether the base already read tables under the head's prefix. */
+export interface RelationPrefixes {
+  base: Set<string>
+}
+
+/**
+ * Head table `h` and base table `b` are the same table. Equal names are. With
+ * the same own name, an unqualified side matches a qualified one, and two
+ * different prefixes are different tables when the base already read tables
+ * under the head's prefix (that prefix exists in the base's environment, so
+ * the head chose another schema): base `restricted.customers` +
+ * `public.orders` → head `public.customers` is a swap. A head prefix the base
+ * never read is an environment difference: a base compiled into `dbt_prod`
+ * and a head into `dbt_ci_pr_42` (or a `+schema` change) read the same tables.
+ * Without `env`, names must be equal.
+ */
+function sameTable(h: string, b: string, env?: RelationPrefixes): boolean {
+  if (h === b) return true
+  if (!env) return false
+  const x = splitTable(h)
+  const y = splitTable(b)
+  if (x.name !== y.name) return false
+  if (!x.prefix || !y.prefix) return true
+  return !env.base.has(x.prefix)
+}
+
+/**
+ * `ref` is one of the `exposed` source columns. An unqualified column read over
+ * several tables (`customers|orders.email`, see `FinalOutputs.raw`) comes from
+ * exactly one of them (the query would be ambiguous otherwise), so it is
+ * covered by a single-table ref to one of its members. The reverse is not: a
+ * base combined ref does not say which table the column came from, so a head
+ * read pinned to one of them (`s.ssn`) may be new. Two combined refs match only
+ * when they read the same tables, member by member. Tables compare as in
+ * `sameTable` (database/schema only within one environment).
+ */
+export function refCovered(ref: string, exposed: Set<string>, env?: RelationPrefixes): boolean {
+  if (exposed.has(ref)) return true
+  const r = splitRef(ref)
+  for (const e of exposed) {
+    const x = splitRef(e)
+    if (x.column !== r.column) continue
+    if (x.tables.length === 1) {
+      if (r.tables.some((t) => sameTable(t, x.tables[0], env))) return true
+      continue
+    }
+    // Two combined refs: the same tables, member by member.
+    if (r.tables.length === x.tables.length && r.tables.every((t) => x.tables.some((b) => sameTable(t, b, env))))
+      return true
+  }
+  return false
+}
+
+/** `sql` lowercased except inside string literals, whose case can change what
+ *  an expression does (`regexp_replace(email, '[a-z]', '*')`). */
+const lowerOutsideLiterals = (sql: string) =>
+  sql.replace(/'(?:[^']|'')*'|[^']+/g, (m) => (m.startsWith("'") ? m : m.toLowerCase()))
+
+/** The model's final output: every name it resolves, the source columns each
+ *  exposes raw (`raw`), and how each is computed. */
+export function finalOutputs(sql: string): FinalOutputs {
+  const { items, sources } = parseSelects(sql)
+  const byScope = new Map<string, SelectItem[]>()
+  for (const item of items) {
+    const list = byScope.get(item.scope)
+    if (list) list.push(item)
+    else byScope.set(item.scope, [item])
+  }
+  // A ref no source explains: unique, so it is never "already exposed".
+  const unresolved = (col: string) => new Set([`?${++unresolvedRefs}.${col}`])
+  const union = (sets: Iterable<Set<string>>) => {
+    const out = new Set<string>()
+    for (const set of sets) for (const x of set) out.add(x)
+    return out
+  }
+  const memo = new Map<string, ScopeOutputs>()
+  const refMemo = new Map<string, { raw: Set<string>; reads: Set<string> }>()
+  // `seen` plus `scope`, built once per pair: the same chain is walked for every
+  // column, so copying `seen` on each step would make a deep chain quadratic.
+  const innerSets = new WeakMap<Set<string>, Map<string, Set<string>>>()
+  const innerOf = (seen: Set<string>, scope: string) => {
+    let perScope = innerSets.get(seen)
+    if (!perScope) innerSets.set(seen, (perScope = new Map()))
+    let inner = perScope.get(scope)
+    if (!inner) perScope.set(scope, (inner = new Set([...seen, scope])))
+    return inner
+  }
+  const isDerived = (src: Source, scope: string, seen: Set<string>) =>
+    src.name !== scope && byScope.has(src.name) && !seen.has(src.name)
+  // The `source.column` refs a column read in `scope#branch` resolves to: those
+  // it exposes raw (`raw`; a column a CTE computes is none), and every one its
+  // value is computed from (`reads`).
+  type Refs = { raw: Set<string>; reads: Set<string> }
+  const same = (set: Set<string>): Refs => ({ raw: set, reads: set })
+  const unionRefs = (list: Refs[]): Refs => ({ raw: union(list.map((r) => r.raw)), reads: union(list.map((r) => r.reads)) })
+  const resolveRef = (scope: string, branch: number, qualifier: string | undefined, col: string, seen: Set<string>): Refs => {
+    // Memoised like `resolve`: a wide select over a deep `*` chain would
+    // otherwise walk the chain once per column reference.
+    const memoKey = `${scope}#${branch}\u0000${qualifier ?? ""}\u0000${col}`
+    const hit = refMemo.get(memoKey)
+    if (hit) return hit
+    const out = resolveRefUncached(scope, branch, qualifier, col, seen)
+    refMemo.set(memoKey, out)
+    return out
+  }
+  const resolveRefUncached = (
+    scope: string,
+    branch: number,
+    qualifier: string | undefined,
+    col: string,
+    seen: Set<string>,
+  ): Refs => {
+    const srcs = sources.get(`${scope}#${branch}`) ?? []
+    const inner = innerOf(seen, scope)
+    const fromSource = (src: Source): Refs => {
+      if (!isDerived(src, scope, seen)) return same(byScope.has(src.name) ? unresolved(col) : new Set([`${src.name}.${col}`]))
+      const out = resolve(src.name, inner)
+      if (out.names.has(col)) return { raw: out.raw.get(col) ?? new Set(), reads: out.reads.get(col) ?? new Set() }
+      if (out.stars.length) return unionRefs(out.stars.map((st) => resolveRef(src.name, st.branch, st.qualifier, col, inner)))
+      return same(unresolved(col))
+    }
+    if (qualifier) {
+      // A qualifier names its source by alias, else by the table's last segment.
+      const named = (x: Source) => x.name === qualifier || x.short === qualifier
+      const src =
+        srcs.find((x) => x.alias === qualifier) ?? srcs.find((x) => !x.alias && named(x)) ?? srcs.find(named)
+      return src ? fromSource(src) : same(unresolved(col))
+    }
+    const named = srcs.filter((x) => isDerived(x, scope, seen) && resolve(x.name, inner).names.has(col))
+    if (named.length) return unionRefs(named.map(fromSource))
+    const open = srcs.filter((x) =>
+      isDerived(x, scope, seen) ? resolve(x.name, inner).stars.length > 0 : !byScope.has(x.name),
+    )
+    if (open.length === 1) return fromSource(open[0])
+    if (open.length > 1) return same(new Set([`${[...new Set(open.map((x) => x.name))].sort().join("|")}.${col}`]))
+    return same(unresolved(col))
+  }
+  // An item's text for signatures: lowercased outside literals, with each
+  // FROM/JOIN alias replaced by the source it names (a table by its own name,
+  // without database/schema, which `refCovered` compares environment-aware via
+  // `reads`; a CTE or subquery by its scope), so renaming an alias
+  // (`md5(c.ssn)` → `md5(cu.ssn)` on one table) keeps the signature.
+  const signatureText = (item: SelectItem, scope: string) => {
+    const named = new Map<string, string>()
+    for (const src of sources.get(`${scope}#${item.branch}`) ?? [])
+      if (src.alias && src.alias !== src.name) named.set(src.alias, byScope.has(src.name) ? src.name : splitTable(src.name).name)
+    const text = lowerOutsideLiterals(item.exact)
+    if (!named.size) return text
+    return text.replace(/'(?:[^']|'')*'|[^']+/g, (part) =>
+      part.startsWith("'")
+        ? part
+        : part.replace(new RegExp(String.raw`(?<![\w$."\x60])(${SEGMENT})(\s*\.)`, "g"), (m, q: string, dot: string) => {
+            const src = named.get(unquote(q))
+            return src === undefined ? m : `\u0004${src}${dot}`
+          }),
+    )
+  }
+  const resolve = (scope: string, seen: Set<string>): ScopeOutputs => {
+    const cached = memo.get(scope)
+    if (cached) return cached
+    const inner = innerOf(seen, scope)
+    const raw = new Map<string, Set<string>>()
+    const names = new Set<string>()
+    const signatures = new Map<string, Set<string>>()
+    const reads = new Map<string, Set<string>>()
+    const stars: ScopeOutputs["stars"] = []
+    const addTo = (map: Map<string, Set<string>>, name: string, values: Iterable<string>) => {
+      const set = map.get(name) ?? new Set<string>()
+      for (const v of values) set.add(v)
+      map.set(name, set)
+    }
+    const scopeItems = byScope.get(scope) ?? []
+    const firstNames = new Map(scopeItems.filter((i) => i.branch === 0).map((i) => [i.position, i.name]))
+    const readBodies = new Set<string>()
+    for (const item of scopeItems) {
+      const derived = (sources.get(`${scope}#${item.branch}`) ?? []).filter((src) => isDerived(src, scope, seen))
+      const bodies = derived.map((src) => resolve(src.name, inner).body).sort()
+      for (const b of bodies) readBodies.add(b)
+      if (STAR.test(item.text)) {
+        const qualifier = /([^.]+)\.\*$/.exec(item.text)?.[1]
+        const q = qualifier ? unquote(qualifier) : undefined
+        stars.push({ branch: item.branch, qualifier: q })
+        for (const src of derived) {
+          if (q && src.alias !== q && src.name !== q) continue
+          const out = resolve(src.name, inner)
+          for (const n of out.names) names.add(n)
+          for (const [n, cols] of out.raw) addTo(raw, n, cols)
+          for (const [n, sigs] of out.signatures) addTo(signatures, n, [...sigs].map((sig) => `*${sig}`))
+          for (const [n, cols] of out.reads) addTo(reads, n, cols)
+        }
+        continue
+      }
+      const name = item.branch === 0 ? item.name : firstNames.get(item.position)
+      if (!name) continue
+      names.add(name)
+      addTo(signatures, name, [`${signatureText(item, scope)}\u0001${bodies.join("\u0002")}`])
+      if (item.rawColumn) {
+        const refs = resolveRef(scope, item.branch, item.rawQualifier, item.rawColumn, seen)
+        addTo(raw, name, refs.raw)
+        addTo(reads, name, refs.reads)
+      } else {
+        reads.set(name, reads.get(name) ?? new Set())
+        for (const r of item.reads ?? []) addTo(reads, name, resolveRef(scope, item.branch, r.qualifier, r.column, seen).reads)
+        // An expression whose column reads parse to nothing is not known to read
+        // nothing: it is never "already exposed" by its reads (the signature may
+        // still match). Only a constant reads nothing.
+        if (!item.reads?.length && !item.constant) addTo(reads, name, unresolved(name))
+      }
+    }
+    for (const [n, cols] of raw) if (!cols.size) raw.delete(n)
+    const body = [scopeItems.map((i) => signatureText(i, scope)).join(","), ...[...readBodies].sort()].join("\u0003")
+    const result = { raw, names, signatures, reads, stars, body }
+    memo.set(scope, result)
+    return result
+  }
+  const { raw, names, signatures, reads, stars } = resolve(ROOT_SCOPE, new Set())
+  // The raw refs a `*` passes `col` through as. Unlike an unqualified column
+  // read over several sources (one combined ref: it comes from exactly one of
+  // them), a `*` passes every source's columns through, so each source is
+  // resolved on its own: `select * from customers join spouses` exposes
+  // `customers.ssn` and `spouses.ssn`, which a head `c.ssn` or `s.ssn` matches.
+  // Memoised like `resolveRef`: a CTE whose `*` joins the previous one twice
+  // would otherwise double the walk at every level.
+  const starMemo = new Map<string, Set<string>>()
+  const starRefs = (scope: string, branch: number, qualifier: string | undefined, col: string, seen: Set<string>) => {
+    const memoKey = `${scope}#${branch}\u0000${qualifier ?? ""}\u0000${col}`
+    const hit = starMemo.get(memoKey)
+    if (hit) return hit
+    const out = starRefsUncached(scope, branch, qualifier, col, seen)
+    starMemo.set(memoKey, out)
+    return out
+  }
+  const starRefsUncached = (
+    scope: string,
+    branch: number,
+    qualifier: string | undefined,
+    col: string,
+    seen: Set<string>,
+  ): Set<string> => {
+    const srcs = sources.get(`${scope}#${branch}`) ?? []
+    const named = (x: Source) => x.name === qualifier || x.short === qualifier
+    const picked = qualifier
+      ? [srcs.find((x) => x.alias === qualifier) ?? srcs.find((x) => !x.alias && named(x)) ?? srcs.find(named)].filter(
+          (x): x is Source => !!x,
+        )
+      : srcs
+    const inner = innerOf(seen, scope)
+    const out = new Set<string>()
+    for (const src of picked) {
+      if (!isDerived(src, scope, seen)) {
+        if (!byScope.has(src.name)) out.add(`${src.name}.${col}`)
+        continue
+      }
+      const body = resolve(src.name, inner)
+      const refs = body.names.has(col)
+        ? (body.raw.get(col) ?? new Set<string>())
+        : union(body.stars.map((st) => starRefs(src.name, st.branch, st.qualifier, col, inner)))
+      for (const r of refs) out.add(r)
+    }
+    return out
+  }
+  const starRaw = (column: string) =>
+    union(stars.map((st) => starRefs(ROOT_SCOPE, st.branch, st.qualifier, column, new Set())))
+  const prefixes = new Set<string>()
+  for (const list of sources.values()) for (const src of list) if (!byScope.has(src.name)) prefixes.add(splitTable(src.name).prefix)
+  return { raw, names, signatures, reads, passthrough: stars.length > 0, starRaw, prefixes }
+}
+
+/** A Jinja statement tag that emits no text of its own: control flow and `set`. */
+export const SILENT_JINJA_TAG = /^\{%[-+]?\s*(?:if|elif|else|endif|for|endfor|set|endset)\b[\s\S]*%\}$/
+
+// Calls whose result does not reveal their argument: hashes, encryption and
+// masking (by name, so a project's own `mask_ssn(…)` counts), a part of a
+// string, a count or a length, a date reduced to a part or a difference, and a
+// test that answers true or false (`regexp_like`, `contains`, `startswith`).
+// Any other call (`coalesce`, `trim`, `max`, `replace`, a cast) keeps the value.
+const MASKING_NAME =
+  /hash|md5|hmac|fingerprint|surrogate_key|encrypt|cipher|mask|redact|anonymi[sz]e|pseudonymi[sz]e|tokeni[sz]e|obfuscate|scramble|(?:^|_)(?:sha|crc)(?:\d|_|$)/i
+const MASKING_EXACT = new Set(
+  "left right substr substring regexp_replace translate length len char_length character_length count count_if countif approx_count_distinct datediff date_diff timestampdiff timestamp_diff months_between age date_trunc datetrunc extract date_part datepart year regexp_like regexp_contains rlike contains startswith starts_with endswith ends_with".split(
+    " ",
+  ),
+)
+// `unmask(…)`, `decrypt(…)`, `try_detokenize(…)`, `reveal_masked(…)` undo one.
+const isMaskingCall = (name: string) =>
+  MASKING_EXACT.has(name.toLowerCase()) ||
+  (MASKING_NAME.test(name) && !/(?:^|_)(?:de|un)|reveal|plain|clear|raw/i.test(name))
+const NULL_TEST = new RegExp(String.raw`(?<![\w$."\x60])${COLUMN_REF}\s+is\s+(?:not\s+)?null\b`, "gi")
+
+/**
+ * An item's expression without the parts that do not pass a column's value
+ * on: a masking call (`sha2(ssn)`, `right(ssn, 4)`, `ssn.md5()`), a null test
+ * (`ssn is null`), a window or filter clause, and any query nested in it (its
+ * own scope). What is left keeps the value of every column it names:
+ * `coalesce(ssn, '')`, `max(ssn)`, `case … then ssn end`, `replace(ssn, '-',
+ * '')`, `mode() within group (order by ssn)`.
+ */
+function unmaskedExpr(text: string): string {
+  let e = splitAlias(text).expr
+  for (let m = /\(\s*select\b/i.exec(e); m; m = /\(\s*select\b/i.exec(e))
+    e = `${e.slice(0, m.index)} ${e.slice(closingParen(e, m.index) + 1)}`
+  const clause = /\)\s*(?:over|filter)\s*\(/i
+  for (let m = clause.exec(e); m; m = clause.exec(e)) {
+    const open = m.index + m[0].length - 1
+    e = `${e.slice(0, m.index + 1)} ${e.slice(closingParen(e, open) + 1)}`
+  }
+  const call = /(?<![\w$."\x60])((?:[A-Za-z_][\w$]*\s*\.\s*)*)([A-Za-z_][\w$]*)\s*\(/g
+  for (let m = call.exec(e); m; m = call.exec(e)) {
+    if (!isMaskingCall(m[2])) continue
+    const open = m.index + m[0].length - 1
+    e = `${e.slice(0, m.index)} ${e.slice(closingParen(e, open) + 1)}`
+    call.lastIndex = m.index
+  }
+  return e.replace(NULL_TEST, " ")
+}
+
+/** Where `name` stands as a column in an unmasked expression: its qualifier
+ *  (`c` in `c.ssn`), and whether a field or method follows (`ssn.number`,
+ *  `ssn.lower()`). A call of that name (`ssn(…)`) is not the column. */
+function columnUses(expr: string, name: string): Array<{ qualifier?: string; path: boolean; at: number }> {
+  const re = new RegExp(
+    String.raw`(?<![\w$])(?:(${SEGMENT})\s*\.\s*)?["\x60]?${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}["\x60]?(?![\w$])(\s*\.)?(\s*\()?`,
+    "gi",
+  )
+  const out: Array<{ qualifier?: string; path: boolean; at: number }> = []
+  for (const m of expr.matchAll(re)) if (!m[3]) out.push({ qualifier: m[1] ? unquote(m[1]) : undefined, path: !!m[2], at: m.index! })
+  return out
+}
+
+/** `name` (a source's alias) stands in the expression as a whole row (`select
+ *  s`, `to_json(s)`): alone, and not as the date part of `dateadd(s, …)`, the
+ *  prefix of a literal (`r'…'`, `e'…'`), or a type or field name after `as`
+ *  (`cast(x as date)`, `struct(o.id as o)`). */
+const NOT_A_ROW_BEFORE = /(?:(?<![\w$.])(?:dateadd|timestampadd|timeadd|date_add|datetime_add|timestamp_add)\s*\(|(?<![\w$.])as\s)\s*$/i
+function namesRow(expr: string, name: string): boolean {
+  return columnUses(expr, name).some(
+    (use) => !use.qualifier && !use.path && !NOT_A_ROW_BEFORE.test(expr.slice(0, use.at)) && !/^["\x60]?[\w$]+["\x60]?'/.test(expr.slice(use.at)),
+  )
+}
+
+/** What a `*` select item passes on: which source it spans and under which
+ *  names it carries a column (`* exclude (a)`, `* except (a)`, `* replace (f(a)
+ *  as a)`, `* rename (a as b)`, in any combination). `undefined` for an item
+ *  that is not a star; `opaque` for one whose columns cannot be named
+ *  (`object_construct(*)`, `struct(t.*)`, `* ilike '…'`). */
+interface StarItem {
+  qualifier?: string
+  opaque?: boolean
+  /** The names `column` leaves the star under: none when it is excluded or
+   *  replaced by an expression, its new name when renamed. */
+  carries: (column: string) => string[]
+}
+
+const STAR_ONLY_CALL = new RegExp(String.raw`(?<![\w$."\x60])([A-Za-z_][\w$]*)\s*\(\s*(?:${SEGMENT}\s*\.\s*)*\*\s*\)`, "g")
+const STAR_HEAD = new RegExp(String.raw`^((?:${SEGMENT}\s*\.\s*)*)\*`)
+const SEGMENT_ONLY = new RegExp(String.raw`^${SEGMENT}$`)
+
+function starItem(text: string): StarItem | undefined {
+  const head = STAR_HEAD.exec(text)
+  if (!head) {
+    // A positional column (`$2`), a column pattern (`columns('ss.')`) or a name
+    // resolved at run time (`identifier('ssn')`, `identifier($col)`) names nothing.
+    if (/(?<![\w$])\$\d+/.test(text) || /(?<![\w$.])(?:columns|identifier)\s*\(/i.test(text))
+      return { opaque: true, carries: (c) => [c] }
+    // A `*` inside the item that is not a multiplication (an operand on both
+    // sides): `object_construct(*)`, `struct(t.*)`, `as struct *`. `count(*)`
+    // reads no column, and neither does a count or a masking call over the
+    // row (`count(o.*)`, `hash(*)`, `hash_agg(c.*)`): each stands as a plain
+    // operand.
+    const t = text.replace(STAR_ONLY_CALL, (call, name: string) => (isMaskingCall(name) ? " 0 " : call))
+    for (let i = t.indexOf("*"); i >= 0; i = t.indexOf("*", i + 1)) {
+      const prev = /(\S)\s*$/.exec(t.slice(0, i))?.[1]
+      const next = /^\s*(\S)/.exec(t.slice(i + 1))?.[1]
+      const product = !!prev && /[\w$)"'\x60\]]/.test(prev) && !!next && /[\w$("'\x60.+-]/.test(next)
+      if (!product) return { opaque: true, carries: (c) => [c] }
+    }
+    return undefined
+  }
+  const segments = [...head[1].matchAll(new RegExp(SEGMENT, "g"))].map((m) => unquote(m[0]))
+  const qualifier = segments.length ? segments[segments.length - 1] : undefined
+  const dropped = new Set<string>()
+  // Entries of `replace (…)` then `rename (…)`, in the order they apply: the
+  // unmasked expression each entry's value comes from, and its name.
+  const steps: Array<{ kind: "replace" | "rename"; from?: string; expr: string; to: string }> = []
+  let rest = text.slice(head[0].length)
+  while (rest.trim()) {
+    const m = /^\s*(exclude|except|replace|rename)\b\s*/i.exec(rest)
+    if (!m) return { qualifier, opaque: true, carries: (c) => [c] }
+    rest = rest.slice(m[0].length)
+    let list: string
+    if (rest.startsWith("(")) {
+      const close = closingParen(rest, 0)
+      list = rest.slice(1, close)
+      rest = rest.slice(close + 1)
+    } else {
+      // One bare entry: `exclude ssn`, `rename a as b`.
+      const bare = new RegExp(String.raw`^${SEGMENT}(?:\s+as\s+${SEGMENT})?`, "i").exec(rest)
+      if (!bare) return { qualifier, opaque: true, carries: (c) => [c] }
+      list = bare[0]
+      rest = rest.slice(bare[0].length)
+    }
+    const kind = m[1].toLowerCase()
+    for (const entry of topLevelItems(list)) {
+      if (!entry.trim()) continue
+      if (kind === "exclude" || kind === "except") {
+        if (!SEGMENT_ONLY.test(entry.trim())) return { qualifier, opaque: true, carries: (c) => [c] }
+        dropped.add(unquote(entry.trim()))
+        continue
+      }
+      // `expr as name`: a raw column under `name`, or an expression that masks it.
+      const item = describeItem(entry)
+      const { alias } = splitAlias(item.text)
+      if (!alias) return { qualifier, opaque: true, carries: (c) => [c] }
+      steps.push({ kind: kind as "replace" | "rename", from: item.rawColumn, expr: unmaskedExpr(item.text), to: unquote(alias) })
+    }
+  }
+  // Each list applies to the star's own columns, not to the list before it:
+  // the column keeps its slot unless it is excluded or replaced by an
+  // expression that does not name it; every `replace` entry naming it holds
+  // its value too; a `rename` then renames whatever name comes out.
+  const carries = (column: string) => {
+    const names = new Set<string>()
+    const replaced = steps.filter((step) => step.kind === "replace" && step.to === column)
+    if (!dropped.has(column) && (!replaced.length || replaced.some((step) => columnUses(step.expr, column).length > 0)))
+      names.add(column)
+    for (const step of steps)
+      if (step.kind === "replace" && step.to !== column && columnUses(step.expr, column).length > 0) names.add(step.to)
+    const renamed = (name: string) => steps.find((step) => step.kind === "rename" && step.from === name)?.to ?? name
+    return [...new Set([...names].map(renamed))]
+  }
+  return { qualifier, carries }
+}
+
+const wordIn = (text: string | undefined, word: string, dotted = true) =>
+  !!text &&
+  new RegExp(
+    `(?<![\\w$${dotted ? "" : "."}])["\x60]?${word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}["\x60]?(?![\\w$${dotted ? "" : "."}])`,
+    "i",
+  ).test(text)
+
+/** Whether raw columns of a model's SQL can reach its final output raw. */
+export interface RawReach {
+  /** Every select item of the SQL, as `selectItems` returns them. */
+  items: SelectItem[]
+  /** The item's output keeps `column`'s value: it names the column outside any
+   *  masking call (`ssn`, `coalesce(ssn, '')`, not `sha2(ssn)`), or outputs an
+   *  unmasked value under that name (`tax_id_number as ssn`). */
+  carries: (item: SelectItem, column: string) => boolean
+  /** The value this item outputs may reach the model's final output unmasked. */
+  reaches: (item: SelectItem) => boolean
+  /** The item may pass `column`'s value on to the final output unmasked: it
+   *  carries it and reaches the output, or is a `*` that does not exclude or
+   *  mask it and whose name for it reaches the output. Always, when the SQL's
+   *  quoting or select prefix may have been misread. */
+  passes: (item: SelectItem, column: string) => boolean
+  /** The final output may expose a column named `column` raw, from anywhere in
+   *  the SQL: some item carries it and reaches the output (as `passes` judges
+   *  an item on a changed line), or a table's columns leave a select unnamed
+   *  (a `*`, the table as a whole row, a table function or `unpivot` over the
+   *  column) and that reaches the output. Always, for SQL the parser does not
+   *  model. */
+  mayExpose: (column: string) => boolean
+  /** The 1-based `line` sits in a clause that selects nothing: it is outside
+   *  every FROM/JOIN source, and the nearest clause word before it, outside
+   *  closed parentheses, is `where`, `group by`, `order by`, `partition by`,
+   *  `having`, `qualify` or `on`. `false` when that cannot be told. */
+  inClause: (line: number) => boolean
+}
+
+// Jinja expressions are masked to `_`, a word character: one glued to a clause
+// word (`{{ config() }}select`, `from{{ ref('x') }}`) hides that word.
+const JINJA_GLUED_KEYWORD =
+  /\}\}(?=(?:select|from|join|union|intersect|except|minus|with|where|on|using|as)\b)|(?<![\w$])(?:select|from|join|union|intersect|except|minus|with|where|on|using|as)(?=\{\{)/i
+const CLAUSE_WORD =
+  /^(select|from|join|where|group\s+by|order\s+by|partition\s+by|having|qualify|on|using|limit|offset|window|with|union|intersect|except|minus|fetch|into|values)\b/i
+const SELECTS_NOTHING = /^(?:where|group by|order by|partition by|having|qualify|on)$/i
+
+/**
+ * Follows a raw column from the select item that reads it to the model's final
+ * output, on SQL that may still hold Jinja. The answer is "may reach": it is
+ * `false` only when every query that can read the item's scope is known and
+ * none passes the column on raw, so an unknown shape counts as reaching.
+ *
+ * An item of the final select reaches the output. An item of a CTE or a FROM
+ * subquery reaches it when a query reading that scope (in its FROM/JOIN list,
+ * or correlated from a query nested in one that does) selects the item's
+ * output name raw, or through a `*` that spans the scope and neither excludes
+ * nor masks it, or in an expression that keeps its value (`coalesce(x, '')`,
+ * `max(x)`, a field `x.v`), and that query's own output reaches it in turn
+ * (`with a as (select ssn as x …), b as (select x from a) select x from b`). A
+ * column is read wherever its name stands in an item's unmasked expression
+ * (`unmaskedExpr`), so no kind of expression hides one. A query that names it
+ * only inside masking calls (`sha2(x)`, `right(x, 4)`), or not at all, stops it.
+ *
+ * Counted as reaching, because the names leaving them are unknown:
+ * a nested query that is not a FROM source (a scalar subquery in a select
+ * list, a `lateral` subquery, a parenthesised set-operation branch); a reader
+ * whose source list names the column (`unpivot (v for k in (ssn))`,
+ * `unnest(s.ssn)`); a reader selecting the scope as a whole row (`select s`,
+ * `to_json(s)`), expanding it as a struct (`ssn.*`), with a `*` that cannot be
+ * named (`object_construct(*)`), or with a Jinja expression that may stand for
+ * columns; a reader whose sources did not parse, matched by name alone; and any
+ * SQL the parser does not model as a whole (`ParsedSelects.unmodelled` and
+ * `misread`: column lists on a CTE or an alias, a parenthesised `with` or
+ * set-operation branch, `union by name`, a clause word used as a column name,
+ * quoting it may misread), a Jinja expression glued to a clause word, or a
+ * Jinja statement other than control flow. Set-operation branches that do not
+ * line up item for item, and a name that came out of Jinja, count as reaching
+ * too. The operand of `in` / `exists` / `any` / `some` / `all` decides a
+ * condition and reaches nothing.
+ */
+export function rawReach(sql: string): RawReach {
+  const parsed = parseSelects(sql)
+  const { items, sources, sourceText, unknownSources, predicates, jinjaItems, jinjaCalls, sourceRanges, scopeOpen, scopeParent } = parsed
+  // The scopes a nested query sits in, nearest first. Nesting past any real
+  // model's depth is not followed.
+  const MAX_DEPTH = 64
+  const ancestors = (scope: string) => {
+    const out: string[] = []
+    for (let up = scopeParent.get(scope); up !== undefined && out.length <= MAX_DEPTH; up = scopeParent.get(up)) out.push(up)
+    return out
+  }
+  const tooDeep = [...scopeParent.keys()].some((scope) => ancestors(scope).length > MAX_DEPTH)
+  const opaque =
+    tooDeep ||
+    parsed.unmodelled ||
+    parsed.misread ||
+    JINJA_GLUED_KEYWORD.test(sql) ||
+    !(sql.match(/\{%[\s\S]*?%\}/g) ?? []).every((t) => SILENT_JINJA_TAG.test(t))
+  const firstNames = new Map<string, string | undefined>()
+  const byKey = new Map<string, SelectItem[]>()
+  for (const item of items) {
+    const key = `${item.scope}#${item.branch}`
+    const list = byKey.get(key)
+    if (list) list.push(item)
+    else byKey.set(key, [item])
+    if (item.branch === 0) firstNames.set(`${item.scope}\u0000${item.position}`, item.name)
+  }
+  // A name that came out of Jinja (`ssn as {{ col }}`) is not known.
+  const unknownName = (name: string | undefined) => !name || /_{4,}/.test(name)
+  const scopes = new Set(items.map((i) => i.scope))
+  const fromSubqueries = new Set<string>()
+  for (const list of sources.values()) for (const src of list) if (src.name.includes(">")) fromSubqueries.add(src.name)
+  // The operand of a condition, at any depth. One inside a FROM source
+  // (`pivot (… for k in (select …))`) is not a condition.
+  const conditions = new Set(
+    [...predicates].filter((scope) => {
+      const at = scopeOpen.get(scope)
+      return at === undefined || !sourceRanges.some(([from, to]) => from <= at && at < to)
+    }),
+  )
+  const inPredicate = (scope: string) => conditions.has(scope) || ancestors(scope).some((up) => conditions.has(up))
+  const naming = (src: Source) => [src.alias, src.name, src.short].filter((x): x is string => !!x)
+  const stars = new Map<SelectItem, StarItem | undefined>()
+  const starOf = (item: SelectItem) => {
+    if (!stars.has(item)) stars.set(item, starItem(item.text))
+    return stars.get(item)
+  }
+  // A `*` over the select's sources (`*`, `t.*`, with or without modifiers),
+  // as opposed to an item that reads columns it does not name
+  // (`object_construct(*)`, `coalesce(a.ssn, identifier($col))`).
+  const spanning = (item: SelectItem) => {
+    const star = starOf(item)
+    return !!star && STAR_HEAD.test(item.text)
+  }
+  // An item's expression without its masked parts (`unmaskedExpr`): a column it
+  // still names keeps its value. A spanning `*` names no column it reads.
+  const exprs = new Map<SelectItem, string>()
+  const exprOf = (item: SelectItem) => {
+    let expr = exprs.get(item)
+    if (expr === undefined) exprs.set(item, (expr = spanning(item) ? "" : unmaskedExpr(item.text)))
+    return expr
+  }
+  // `ssn collate "C"` reads as an implicit alias: the output name is not known.
+  const namedByGuess = (item: SelectItem) => jinjaItems.has(item) || /\bcollate\s+\S+$/i.test(item.text)
+
+  // Every select whose rows can reach an output (not the operand of a
+  // condition): its own sources, those of the selects it is nested in, the
+  // words of its source list, and its items by the identifiers they name.
+  interface Select {
+    key: string
+    scope: string
+    items: SelectItem[]
+    own: Source[]
+    outer: Source[]
+    /** Sources that did not parse, here or in an enclosing select. */
+    blind: boolean
+    /** Every identifier in the source list (`s.tags` → `s`, `tags`). */
+    words: Set<string>
+    /** Identifiers of the source list that stand alone (no dot beside them). */
+    bare: Set<string>
+    stars: SelectItem[]
+    jinja: SelectItem[]
+    calls: SelectItem[]
+    /** Non-star items by each identifier their unmasked expression names. */
+    byWord: Map<string, SelectItem[]>
+  }
+  const WORD = /["\x60]?([A-Za-z_][\w$]*)["\x60]?/g
+  const BARE = /(?<![\w$."\x60])["\x60]?([A-Za-z_][\w$]*)["\x60]?(?![\w$."\x60])/g
+  const keyed = tooDeep ? [] : [...sources.keys()].map((key) => ({ key, scope: key.slice(0, key.lastIndexOf("#")) }))
+  const keysOfScope = new Map<string, Array<{ key: string; scope: string }>>()
+  for (const sel of keyed) {
+    const list = keysOfScope.get(sel.scope)
+    if (list) list.push(sel)
+    else keysOfScope.set(sel.scope, [sel])
+  }
+  const selects: Select[] = keyed
+    .filter((sel) => !inPredicate(sel.scope))
+    .map((sel) => {
+      const enclosing = ancestors(sel.scope).flatMap((up) => keysOfScope.get(up) ?? [])
+      const text = sourceText.get(sel.key) ?? ""
+      const out: Select = {
+        ...sel,
+        items: byKey.get(sel.key) ?? [],
+        own: sources.get(sel.key) ?? [],
+        outer: enclosing.flatMap((o) => sources.get(o.key) ?? []),
+        blind: unknownSources.has(sel.key) || enclosing.some((o) => unknownSources.has(o.key)),
+        words: new Set([...text.matchAll(WORD)].map((m) => m[1].toLowerCase())),
+        bare: new Set([...text.matchAll(BARE)].map((m) => m[1].toLowerCase())),
+        stars: [],
+        jinja: [],
+        calls: [],
+        byWord: new Map(),
+      }
+      for (const item of out.items) {
+        if (jinjaItems.has(item)) out.jinja.push(item)
+        if (jinjaCalls.has(item)) out.calls.push(item)
+        if (starOf(item)) out.stars.push(item)
+        if (spanning(item)) continue
+        for (const word of new Set([...exprOf(item).matchAll(WORD)].map((m) => m[1].toLowerCase()))) {
+          const list = out.byWord.get(word)
+          if (list) list.push(item)
+          else out.byWord.set(word, [item])
+        }
+      }
+      return out
+    })
+  // The items of a select that may name `name`. A quoted name that is not one
+  // word (`"Tax Ref"`, `"a.b"`) is in no word index: every item is looked at.
+  const itemsNaming = (sel: Select | undefined, name: string) =>
+    !sel ? [] : /^[A-Za-z_][\w$]*$/.test(name) ? (sel.byWord.get(name) ?? []) : sel.items.filter((i) => !spanning(i))
+  const selectsOfScope = new Map<string, Select[]>()
+  const selectByKey = new Map<string, Select>()
+  for (const sel of selects) {
+    selectByKey.set(sel.key, sel)
+    const list = selectsOfScope.get(sel.scope)
+    if (list) list.push(sel)
+    else selectsOfScope.set(sel.scope, [sel])
+  }
+  // The names an item's value leaves its select under: its own output name,
+  // and that of any item of the same select reading it by its alias (`ssn as
+  // raw, raw as tax_ref`), which some engines allow.
+  const leaving = new Map<SelectItem, Array<string | undefined>>()
+  const leavesAs = (item: SelectItem) => {
+    let out = leaving.get(item)
+    if (out) return out
+    const sel = selectByKey.get(`${item.scope}#${item.branch}`)
+    const names = new Set<string | undefined>()
+    const seen = new Set([item])
+    for (const queue = [item]; queue.length; ) {
+      const cur = queue.pop()!
+      names.add(namedByGuess(cur) ? undefined : outName(cur))
+      if (!cur.name) continue
+      for (const other of itemsNaming(sel, cur.name)) {
+        if (seen.has(other) || !columnUses(exprOf(other), cur.name).some((use) => !use.qualifier)) continue
+        seen.add(other)
+        queue.push(other)
+      }
+    }
+    leaving.set(item, (out = [...names]))
+    return out
+  }
+  // The columns a select outputs, in order, when the SQL gives them: each item
+  // is one column, and a plain `*` over one CTE or subquery is that scope's
+  // columns. Not known for a `*` over a table, over a join, with modifiers, or
+  // for a Jinja list.
+  interface Layout {
+    names: Array<string | undefined>
+    /** The output position each item starts at. */
+    offsets: Map<SelectItem, number>
+    /** For a `*` item, the columns it expands to. */
+    spans: Map<SelectItem, Array<string | undefined>>
+  }
+  const layouts = new Map<Select, Layout | undefined>()
+  const layoutOf = (sel: Select): Layout | undefined => {
+    if (layouts.has(sel)) return layouts.get(sel)
+    layouts.set(sel, undefined) // a scope that reads itself has no known layout
+    const out: Layout = { names: [], offsets: new Map(), spans: new Map() }
+    for (const item of sel.items) {
+      out.offsets.set(item, out.names.length)
+      const star = starOf(item)
+      if (!star) {
+        if (jinjaItems.has(item)) return undefined
+        out.names.push(namedByGuess(item) ? undefined : item.name)
+        continue
+      }
+      if (star.opaque || !STAR.test(item.text) || sel.blind) return undefined
+      const spanned = star.qualifier ? sel.own.filter((src) => naming(src).includes(star.qualifier!)) : sel.own
+      const source = spanned.length === 1 && sel.own.length === (star.qualifier ? sel.own.length : 1) ? spanned[0] : undefined
+      const first = source && source.name !== sel.scope ? selectsOfScope.get(source.name)?.[0] : undefined
+      const columns = first && layoutOf(first)?.names
+      if (!columns) return undefined
+      out.spans.set(item, columns)
+      out.names.push(...columns)
+    }
+    layouts.set(sel, out)
+    return out
+  }
+  // Set-operation branches pair their columns by position. A scope's branches
+  // line up when every branch's columns are known and as many. A union of bare
+  // `select *` over tables only is followed by name: nothing this file names
+  // enters it. Otherwise the name a column leaves the scope under is unknown.
+  const misaligned = new Map<string, boolean>()
+  const branchesMisaligned = (scope: string) => {
+    let out = misaligned.get(scope)
+    if (out === undefined) {
+      const branches = selectsOfScope.get(scope) ?? []
+      const tableStar = (sel: Select) =>
+        sel.items.length === 1 &&
+        STAR.test(sel.items[0].text) &&
+        !sel.blind &&
+        sel.own.length > 0 &&
+        sel.own.every((src) => !scopes.has(src.name))
+      const widths = branches.map((sel) => layoutOf(sel)?.names.length)
+      out = branches.length > 1 && !branches.every(tableStar) && widths.some((w) => w === undefined || w !== widths[0])
+      misaligned.set(scope, out)
+    }
+    return out
+  }
+  // The name the column at `position` of a select leaves its scope under: a
+  // later set-operation branch outputs under the first branch's names.
+  const nameAt = (sel: Select | undefined, position: number | undefined, own: string | undefined) => {
+    const first = sel && selectsOfScope.get(sel.scope)?.[0]
+    if (!sel || !first || first === sel) return own
+    const names = layoutOf(first)?.names
+    return names && position !== undefined ? names[position] : own
+  }
+  const outName = (item: SelectItem) => {
+    if (item.branch === 0) return item.name
+    const sel = selectByKey.get(`${item.scope}#${item.branch}`)
+    const layout = sel && layoutOf(sel)
+    if (!layout) return firstNames.get(`${item.scope}\u0000${item.position}`) ?? item.name
+    return nameAt(sel, layout.offsets.get(item), item.name)
+  }
+  // The name a `*` item passes `carried` on under (`column` being its name in
+  // the scope the `*` spans).
+  const starName = (sel: Select, item: SelectItem, column: string, carried: string) => {
+    const layout = layoutOf(sel)
+    const at = layout?.spans.get(item)?.indexOf(column)
+    return layout && at !== undefined && at >= 0 ? nameAt(sel, layout.offsets.get(item)! + at, carried) : carried
+  }
+  // The selects that can read a scope: those naming it in FROM/JOIN, those
+  // nested in one that does (a correlated read), those whose source list names
+  // it without parsing it as a source, and those whose sources did not parse.
+  const readersByName = new Map<string, Set<Select>>()
+  const blindSelects = selects.filter((sel) => sel.blind)
+  for (const sel of selects) {
+    for (const name of new Set([...sel.own.map((src) => src.name), ...sel.outer.map((src) => src.name), ...sel.bare])) {
+      const set = readersByName.get(name)
+      if (set) set.add(sel)
+      else readersByName.set(name, new Set([sel]))
+    }
+  }
+  const readers = new Map<string, Select[]>()
+  const readersOf = (scope: string) => {
+    let out = readers.get(scope)
+    if (!out) readers.set(scope, (out = [...new Set([...(readersByName.get(scope) ?? []), ...blindSelects])]))
+    return out
+  }
+
+  const reach = (scope: string, given: string | undefined, seen: Set<string>): boolean => {
+    if (scope === ROOT_SCOPE) return true
+    if (scope.includes(">")) {
+      if (inPredicate(scope)) return false
+      // Not a FROM source: a scalar subquery, a lateral or a set-operation branch.
+      if (!fromSubqueries.has(scope)) return true
+    }
+    if (unknownName(given) || branchesMisaligned(scope)) return true
+    const name = given!
+    const visit = `${scope}\u0000${name}`
+    if (seen.has(visit)) return false
+    seen.add(visit)
+    for (const sel of readersOf(scope)) {
+      const own = sel.own.filter((src) => src.name === scope)
+      const outer = sel.outer.filter((src) => src.name === scope)
+      const blind = sel.blind || (!own.length && !outer.length)
+      // A table function, `unpivot` or array join over the column moves its
+      // values under another name.
+      if (sel.words.has(name) || (!/^[A-Za-z_][\w$]*$/.test(name) && wordIn(sourceText.get(sel.key), name))) return true
+      if (sel.jinja.length) return true
+      const scopeNames = new Set([...own, ...outer].flatMap(naming))
+      let others: Set<string> | undefined
+      const otherNames = () =>
+        (others ??= new Set([...sel.own, ...sel.outer].filter((src) => src.name !== scope).flatMap(naming)))
+      // A qualifier names the scope, or no source the parser knows: an alias it
+      // did not read (`src pivot (…) p`) may still be the scope, so that counts.
+      const fromScope = (qualifier?: string) =>
+        !qualifier || blind || scopeNames.has(qualifier) || !otherNames().has(qualifier)
+      const carriedOn = (item: SelectItem) => leavesAs(item).some((as) => reach(sel.scope, as, seen))
+      // A macro call naming the column may emit it raw (`dbt.safe_cast("ssn", …)`).
+      for (const item of sel.calls) if (wordIn(jinjaCalls.get(item), name) && carriedOn(item)) return true
+      for (const item of sel.stars) {
+        const star = starOf(item)!
+        // An unqualified `*` spans the select's own sources only; an item that
+        // cannot be named (`identifier($col)`) may read the selects around it.
+        if (star.qualifier ? !fromScope(star.qualifier) : !own.length && !blind && (spanning(item) || !outer.length)) continue
+        // `x.*` over a struct column named like the output expands its fields.
+        if (star.qualifier === name && !scopeNames.has(name)) return true
+        if (star.opaque) return true
+        if (star.carries(name).some((carried) => reach(sel.scope, starName(sel, item, name, carried), seen))) return true
+      }
+      // The name read where its value is kept: raw, in an expression outside
+      // masking calls, or as the head of a field or method (`tax.v`,
+      // `tax.lower()`) when it is not itself a source's name.
+      const isSource = scopeNames.has(name) || otherNames().has(name)
+      for (const item of itemsNaming(sel, name))
+        if (columnUses(exprOf(item), name).some((use) => (use.path ? !isSource : fromScope(use.qualifier))) && carriedOn(item))
+          return true
+      // The scope as a whole row: `select s from src s`, `to_json(s)`. A reader
+      // whose sources did not parse may read it under its own name.
+      for (const alias of blind ? new Set([...scopeNames, scope]) : scopeNames)
+        for (const item of itemsNaming(sel, alias))
+          if (namesRow(exprOf(item), alias) && carriedOn(item)) return true
+    }
+    return false
+  }
+  const memo = new Map<string, boolean>()
+  const reachMemo = (scope: string, name: string | undefined) => {
+    const key = `${scope}\u0000${name ?? "\u0000"}`
+    let out = memo.get(key)
+    if (out === undefined) memo.set(key, (out = reach(scope, name, new Set())))
+    return out
+  }
+  // The item's output keeps `column`'s value: its unmasked expression still
+  // names the column, or it outputs some unmasked value under that name
+  // (`tax_id_number as ssn`), or Jinja in it may stand for it.
+  const carries = (item: SelectItem, column: string) => {
+    if (jinjaItems.has(item) || wordIn(jinjaCalls.get(item), column)) return true
+    const expr = exprOf(item)
+    // As the PII rule reads a word: `$` ends one there (`ssn$raw`).
+    if (columnUses(expr, column).length > 0 || new RegExp(`\\b${column.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(expr)) return true
+    // Some other column, unmasked, under the PII name: an identifier that is
+    // neither a call nor a keyword is left in the expression.
+    // The type of a cast is not one (`cast(null as varchar) as ssn`,
+    // `md5(x)::varchar as ssn`).
+    const values = expr.replace(/::\s*["\x60]?[\w$]+["\x60]?(?:\s*\([\d\s,]*\))?/g, " ").replace(/(?<![\w$.])as\s+[\w$]+(?:\s*\([\d\s,]*\))?\s*(?=\))/gi, " ")
+    return (
+      item.name === column &&
+      [...values.matchAll(/(?<![\w$])["\x60]?([A-Za-z_][\w$]*)["\x60]?(?![\w$])(\s*\()?/g)].some(
+        (m) => !m[2] && !EXPR_KEYWORDS.has(m[1].toLowerCase()),
+      )
+    )
+  }
+  const reaches = (item: SelectItem) => opaque || leavesAs(item).some((as) => reachMemo(item.scope, as))
+  const passes = (item: SelectItem, column: string) => {
+    // The item's own text cannot be trusted: nothing shows the column masked.
+    if (parsed.misread) return true
+    const star = starOf(item)
+    if (!star) return carries(item, column) && reaches(item)
+    const sel = selectByKey.get(`${item.scope}#${item.branch}`)
+    // `ssn.*` expands a struct column's fields under names of their own.
+    if (star.opaque || (star.qualifier === column && !sel?.own.some((src) => naming(src).includes(column))))
+      return opaque || reachMemo(item.scope, undefined)
+    return star.carries(column).some((name) => opaque || reachMemo(item.scope, sel ? starName(sel, item, column, name) : name))
+  }
+  const exposeMemo = new Map<string, boolean>()
+  const mayExpose = (column: string) => {
+    if (opaque) return true
+    let out = exposeMemo.get(column)
+    if (out !== undefined) return out
+    out =
+      // Any item of the model, judged as `passes` judges one on the changed line.
+      items.some((i) => !spanning(i) && carries(i, column) && reaches(i)) ||
+      // A table's columns that leave a select without being named: the SQL
+      // does not list them, so the table may hold the column.
+      selects.some((sel) => {
+        // A CTE that reads its own name reads the table of that name.
+        const isTable = (src: Source) => !scopes.has(src.name) || src.name === sel.scope
+        const tables = sel.own.filter(isTable)
+        // A nested query also reads the tables of the selects around it.
+        const around = ancestors(sel.scope)
+        const outerTables = sel.outer.filter((src) => !scopes.has(src.name) || around.includes(src.name))
+        // A table as a whole row (`to_json(c) as payload`): the column leaves
+        // under the item's name. A `ref` or `source` read without an alias is
+        // also named by its model.
+        const rows = [...tables, ...outerTables].flatMap((src) => {
+          const jinja = src.short ?? src.name
+          const model = !src.alias && jinja.startsWith("{{") && /["']([^"']+)["'][^"']*$/.exec(jinja)?.[1]
+          return model ? [...naming(src), model] : naming(src)
+        })
+        if (rows.some((t) => itemsNaming(sel, t).some((item) => namesRow(exprOf(item), t) && reaches(item)))) return true
+        // An item that cannot be named may read a table of the selects around it.
+        if (outerTables.length && sel.stars.some((item) => !spanning(item)) && reachMemo(sel.scope, undefined)) return true
+        if (!tables.length && !unknownSources.has(sel.key)) return false
+        // A table function, `unpivot` or array join over the column in the
+        // source list moves its values under a name of its own.
+        if (sel.words.has(column) && reachMemo(sel.scope, undefined)) return true
+        // A Jinja column list, alone or glued to a `*` (`a.* {{ extra() }}`).
+        if (sel.jinja.length && reachMemo(sel.scope, column)) return true
+        const tableNames = new Set(tables.flatMap(naming))
+        const derivedNames = new Set(sel.own.filter((src) => !isTable(src)).flatMap(naming))
+        return sel.stars.some((item) => {
+          const star = starOf(item)!
+          // A `*` qualified by a CTE or subquery passes that scope's columns only.
+          if (star.qualifier && derivedNames.has(star.qualifier) && !tableNames.has(star.qualifier)) return false
+          // An item that reads columns it does not name (`object_construct(*) as
+          // payload`, `$2 as v`) carries the column under the item's own name.
+          return star.opaque && !spanning(item) ? reaches(item) : star.carries(column).some((c) => reachMemo(sel.scope, c))
+        })
+      })
+    exposeMemo.set(column, out)
+    return out
+  }
+  let masked: string | undefined
+  let lineStarts: number[] | undefined
+  const inClause = (line: number) => {
+    if (opaque) return false
+    masked ??= maskSql(sql)
+    if (!lineStarts) {
+      lineStarts = [0]
+      for (let i = 0; i < masked.length; i++) if (masked[i] === "\n") lineStarts.push(i + 1)
+    }
+    const start = lineStarts[line - 1]
+    if (start === undefined) return false
+    // A FROM/JOIN source (`unnest([\n ssn\n])`, `unpivot (v for k in (\n ssn\n))`)
+    // can put the column in the output under another name.
+    const stop = lineStarts[line] ?? masked.length
+    if (sourceRanges.some(([from, to]) => from < stop && start < to)) return false
+    // The line may open with the clause word itself (`on a.ssn = b.ssn`).
+    const opens = CLAUSE_WORD.exec(masked.slice(start, stop).trimStart().slice(0, 24))
+    if (opens) return SELECTS_NOTHING.test(opens[1].replace(/\s+/g, " "))
+    // Backwards from the line, skipping parentheses that closed before it.
+    let depth = 0
+    for (let i = start - 1; i >= 0; i--) {
+      const c = masked[i]
+      if (c === ")") depth++
+      else if (c === "(") depth = Math.max(0, depth - 1)
+      else if (depth === 0 && !isWordChar(masked[i - 1]) && /[a-z]/i.test(c)) {
+        const word = CLAUSE_WORD.exec(masked.slice(i, i + 24))
+        if (word) return SELECTS_NOTHING.test(word[1].replace(/\s+/g, " "))
+      }
+    }
+    return false
+  }
+  return { items, carries, reaches, passes, mayExpose, inClause }
+}
+
+/** A diff line with comments and whitespace normalised (and a leading/trailing
+ *  select-list comma dropped), so a reindented line compares equal to its base. */
+export function normalizeSelectLine(line: string): string {
+  return stripComments(line)
+    .replace(/\s+/g, " ")
+    .replace(/\s*([(),])\s*/g, "$1")
+    .trim()
+    .replace(/^,|,$/g, "")
+}
+
+/** Column tokens (with aliases) of `rule.capturesColumns` over the added lines `rule.added` matches. */
+function capturedColumns(rule: Rule, added: string[]): SelectItemColumn[] {
+  const out: SelectItemColumn[] = []
+  for (const l of added) {
+    const s = stripComments(l)
+    if (!rule.capturesColumns || !rule.added?.test(s) || rule.unless?.test(s)) continue
+    out.push(...selectItemColumns(l, rule.capturesColumns))
+  }
+  return out
+}
+
 /** Evaluate the catalog against a changed file. */
 export function evaluateCatalog(
   file: ChangedFile,
@@ -122,7 +1918,17 @@ export function evaluateCatalog(
       file: file.path,
       model,
       confidence: "high",
-      evidence: { tool: "rule-catalog", result: { rule: rule.id } },
+      evidence: {
+        tool: "rule-catalog",
+        result: rule.portability
+          ? { rule: rule.id, portability: true, worksOn: rule.portability.worksOn }
+          : rule.capturesColumns
+            ? (() => {
+                const items = capturedColumns(rule, added)
+                return { rule: rule.id, columns: [...new Set(items.map((i) => i.column))], items }
+              })()
+            : { rule: rule.id },
+      },
       ruleKey: `${rule.category}:${rule.id}`,
     })
     if (!exclusionReason(f, rubric)) matched.push({ rule, finding: f })
@@ -167,7 +1973,7 @@ const r = (
   severity: Severity,
   title: string,
   body: string,
-  match: Pick<Rule, "added" | "removed" | "newSql" | "absentNewSql" | "unless" | "kind" | "pathGlob">,
+  match: Pick<Rule, "added" | "removed" | "newSql" | "absentNewSql" | "unless" | "kind" | "pathGlob" | "portability" | "capturesColumns">,
   example: RuleExample,
   counter?: RuleExample,
 ): Rule => ({ id, category, severity, title, body, ...match, example, counter })
@@ -585,7 +2391,7 @@ const AGG: Rule[] = [
     "suggestion",
     "COUNT(DISTINCT a, b) portability",
     "Multi-column COUNT(DISTINCT) isn't supported on all warehouses; concat or use a subquery.",
-    { added: /count\s*\(\s*distinct\s+[^),]+,/i },
+    { added: /count\s*\(\s*distinct\s+[^),]+,/i, portability: { worksOn: ["mysql", "snowflake", "databricks"] } },
     { add: "count(distinct a, b)" },
     { add: "count(distinct a)" },
   ),
@@ -1193,7 +2999,10 @@ const SECURITY_PII: Rule[] = [
     "warning",
     "PII columns selected",
     "Email/SSN/phone/DOB pulled into a model widens PII exposure; confirm it's needed and masked.",
-    { added: /^\s*[\w.]*\b(ssn|social_security|email|phone_number|date_of_birth|passport)\b/i },
+    {
+      added: /^\s*[\w.]*\b(ssn|social_security|email|phone_number|date_of_birth|passport)\b/i,
+      capturesColumns: /\b(ssn|social_security|email|phone_number|date_of_birth|passport)\b/i,
+    },
     { add: "        c.ssn," },
     { add: "        c.country," },
   ),
@@ -1703,7 +3512,11 @@ const STYLE: Rule[] = [
     "suggestion",
     "PIVOT/UNPIVOT is dialect-specific",
     "`PIVOT`/`UNPIVOT` syntax varies by warehouse and is hard to test; consider conditional aggregation.",
-    { added: /\b(pivot|unpivot)\s*\(/i },
+    {
+      added: /\b(pivot|unpivot)\s*\(/i,
+      // No PIVOT/UNPIVOT on Postgres, MySQL, Trino or Athena.
+      portability: { worksOn: ["snowflake", "bigquery", "databricks", "redshift", "tsql", "oracle", "duckdb"] },
+    },
     { add: "from t pivot(sum(x) for k in ('a'))" },
     { add: "sum(case when k='a' then x end)" },
   ),
@@ -1723,7 +3536,7 @@ const STYLE: Rule[] = [
     "suggestion",
     "GROUP BY on a SELECT alias",
     "Grouping by a select-list alias isn't portable (errors on some warehouses); repeat the expression.",
-    { added: /\bgroup\s+by\s+\w+_(amt|amount|total|cnt|count)\b/i },
+    { added: /\bgroup\s+by\s+\w+_(amt|amount|total|cnt|count)\b/i, portability: { worksOn: ["snowflake", "bigquery", "postgres", "redshift", "databricks", "duckdb", "mysql", "clickhouse"] } },
     { add: "group by total_amount" },
     { add: "group by customer_id" },
   ),
@@ -1733,9 +3546,15 @@ const STYLE: Rule[] = [
     "suggestion",
     "string interval literal portability",
     "`interval '1 day'` literal syntax differs across warehouses; prefer dateadd/date_add functions.",
-    { added: /interval\s+'\d+\s*\w+'/i },
+    {
+      // The unit inside the quotes (`'1 day'`), not the ANSI `interval '30' day`.
+      added: /interval\s+'\d+\s+[a-z]+'/i,
+      // BigQuery, MySQL, T-SQL, Oracle, Trino and Athena need `INTERVAL 1 DAY` /
+      // `INTERVAL '1' DAY` (or have no interval literal).
+      portability: { worksOn: ["postgres", "redshift", "snowflake", "duckdb", "databricks"] },
+    },
     { add: "d + interval '1 day'" },
-    { add: "dateadd(day, 1, d)" },
+    { add: "d - interval '30' day" },
   ),
   r(
     "date-plus-int",
@@ -1743,9 +3562,21 @@ const STYLE: Rule[] = [
     "suggestion",
     "integer arithmetic on a date",
     "`date + 7` (bare int) isn't portable and is ambiguous (days? seconds?); use dateadd/interval.",
-    { added: /\b\w*(date|_at|_dt)\b\s*[+\-]\s*\d+\b/i },
+    { added: /\b\w*(date|_dt)\b\s*[+\-]\s*\d+\b/i, portability: { worksOn: ["postgres", "redshift", "snowflake", "duckdb", "oracle"] } },
     { add: "select order_date + 7" },
     { add: "select dateadd(day, 7, order_date)" },
+  ),
+  // Split from date-plus-int: `timestamp + integer` has no operator on most
+  // engines that accept `date + integer` (Postgres, Snowflake, DuckDB).
+  r(
+    "timestamp-plus-int",
+    "sql_correctness",
+    "suggestion",
+    "integer arithmetic on a timestamp",
+    "`updated_at + 1` (bare int on a timestamp) fails on most warehouses and is ambiguous (days? seconds?); use dateadd/interval.",
+    { added: /\b\w*_at\b\s*[+\-]\s*\d+\b/i, portability: { worksOn: ["oracle"] } },
+    { add: "select updated_at + 1" },
+    { add: "select dateadd(day, 1, updated_at)" },
   ),
 ]
 
@@ -1866,7 +3697,7 @@ const MISC: Rule[] = [
     "suggestion",
     "DISTINCT ON is Postgres-specific",
     "`DISTINCT ON (…)` isn't portable; use `qualify row_number()` for first-row-per-group.",
-    { added: /distinct\s+on\s*\(/i },
+    { added: /distinct\s+on\s*\(/i, portability: { worksOn: ["postgres", "duckdb"] } },
     { add: "select distinct on (id) * from t" },
     { add: "qualify row_number() over (partition by id order by d) = 1" },
   ),
@@ -1876,7 +3707,7 @@ const MISC: Rule[] = [
     "suggestion",
     "FETCH FIRST portability",
     "`FETCH FIRST n ROWS` isn't supported everywhere; `LIMIT` (with ORDER BY) is more portable.",
-    { added: /fetch\s+first\s+\d+/i },
+    { added: /fetch\s+first\s+\d+/i, portability: { worksOn: ["postgres", "snowflake", "oracle", "trino", "duckdb"] } },
     { add: "fetch first 10 rows only" },
     { add: "limit 10" },
   ),
@@ -2299,7 +4130,7 @@ const MISC2: Rule[] = [
     "suggestion",
     "non-portable type name (TEXT)",
     "`cast(x as text)` isn't supported on all warehouses; use `string`/`varchar`.",
-    { added: /\bas\s+text\b/i },
+    { added: /\bas\s+text\b/i, portability: { worksOn: ["postgres", "redshift", "duckdb", "snowflake"] } },
     { add: "cast(x as text)" },
     { add: "cast(x as string)" },
   ),
