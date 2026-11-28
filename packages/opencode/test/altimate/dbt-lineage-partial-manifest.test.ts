@@ -224,4 +224,14 @@ describe("the MCP server's structured result", () => {
       call.mockRestore()
     }
   })
+
+  test("carries the note beside the adapter's own lineage", async () => {
+    dbtAdapterInternals.hasModelLineage = () => true
+    await runningAdapter(true, async () => TRACE)
+    const result = await lineage({})
+    const structured = structuredResult("dbt_lineage", result.metadata, result.output)
+    expect(structured).toMatchObject(TRACE)
+    expect(structured.partial_manifest).toEqual(result.metadata.partial_manifest)
+    expect(String(structured.report).startsWith(NOTE)).toBe(true)
+  })
 })
