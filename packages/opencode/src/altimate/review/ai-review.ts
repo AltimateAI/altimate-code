@@ -7,14 +7,22 @@ import { MessageID, SessionID } from "@/session/schema"
 import { Log } from "@/altimate/util/log"
 import { redactSecrets } from "@/installation"
 import { Dispatcher } from "../native"
+import { readFile } from "node:fs/promises"
+import { trustedFilePath } from "./trusted-file"
 import { type Finding, type ReviewCategory, type Severity, makeFinding, ruleId } from "./finding"
 import { readStreamText } from "../llm/stream-text"
-import { type AiVerifyEvidence, type VerifierStatus, aiVerifyEnabled, runAiVerify } from "./ai-verify"
+import { type AiVerifyEvidence, type VerifierStatus, runAiVerify } from "./ai-verify"
 import { aiReplayPath, runAiReplay } from "./ai-replay"
 import { walkDiffLines } from "./diff-filter"
 import { CARD_BATCH_MAX_CHARS } from "./ai-context-card"
+import { type AiSwitches, switchOn } from "./ai-switches"
+import { AI_OTHER_FILES_QUOTA, AI_OTHER_KINDS } from "./ai-other-files"
+import { AI_PYTHON_FILES_QUOTA, AI_PYTHON_KIND } from "./ai-python-files"
 
 const log = Log.create({ service: "ai-review" })
+
+/** Kinds only the AI lane reads (the `otherFiles` and `pythonFiles` switches). */
+const AI_ONLY_KINDS: ReadonlySet<string> = new Set([...AI_OTHER_KINDS, AI_PYTHON_KIND])
 
 const AI_TIMEOUT_BASE_MS = 60_000
 const AI_TIMEOUT_MAX_MS = 300_000
@@ -23,7 +31,7 @@ const MAX_FILES = 20
 const CONTEXT_FILE_CHARS = 8_000
 const CONTEXT_TOTAL_CHARS = 40_000
 const BATCH_CONCURRENCY = 2
-/** Per-kind file quotas under `ALTIMATE_REVIEW_AI_COVERAGE=1`. */
+/** Per-kind file quotas under the `coverage` switch (on by default). */
 const COVERAGE_QUOTAS = { model: 12, macro: 8, test: 4, yml: 6 }
 /** Head-side lines of context kept around each changed line in a file excerpt. */
 const EXCERPT_CONTEXT_LINES = 20
@@ -34,7 +42,7 @@ const COVERAGE_FULL_DIFF_FILE_CHARS = 2_000
 /** Default per-call size under coverage (~30k tokens): 30 quota files at up to ~22k chars each would
  *  otherwise make one ~660k-char call that overruns common context windows. */
 const COVERAGE_BATCH_CHARS = 120_000
-/** Focused batching defaults under `ALTIMATE_REVIEW_AI_FOCUSED=1`. */
+/** Focused batching defaults under the `focused` switch (on by default). */
 const FOCUS_DEFAULTS: AiFocusBudget = { minFiles: 7, batchFiles: 5, maxBatches: 4 }
 /** Paths listed per call under "OTHER FILES CHANGED IN THIS PR". */
 const FOCUS_OTHER_FILES = 40
@@ -50,10 +58,13 @@ export interface AiInputBudget {
   maxFileChars: number
   /** Characters of file sections per call; Infinity keeps a single call (the default without coverage). */
   batchChars: number
-  /** `ALTIMATE_REVIEW_AI_COVERAGE=1`: per-kind file quotas (replacing `maxFiles`) and
-   *  hunk-centred excerpts instead of head truncation. Undefined keeps today's input. */
-  coverage?: AiCoverageRender & { quotas: Record<AiFileBucket, number> }
-  /** `ALTIMATE_REVIEW_AI_FOCUSED=1`: on PRs with at least `minFiles` selected files, review
+  /** The `coverage` switch: per-kind file quotas (replacing `maxFiles`) and
+   *  hunk-centred excerpts instead of head truncation. Undefined keeps today's input.
+   *  `otherQuota` (`otherFiles` switch): quota for other/analysis files, kept outside
+   *  `quotas` so the existing buckets and their spare are unchanged. `pythonQuota`
+   *  (`pythonFiles` switch): the same for the added Python files. */
+  coverage?: AiCoverageRender & { quotas: Record<AiFileBucket, number>; otherQuota?: number; pythonQuota?: number }
+  /** The `focused` switch: on PRs with at least `minFiles` selected files, review
    *  related files together in calls of about `batchFiles` files, at most `maxBatches` calls
    *  unless `batchChars` needs more. */
   focused?: AiFocusBudget
@@ -63,7 +74,10 @@ export interface AiFocusBudget {
   batchFiles: number
   maxBatches: number
 }
-export function aiInputBudget(env: Record<string, string | undefined> = process.env): AiInputBudget {
+export function aiInputBudget(
+  env: Record<string, string | undefined> = process.env,
+  switches?: Partial<AiSwitches>,
+): AiInputBudget {
   const num = (v: string | undefined, d: number) => {
     const n = Number(v)
     return v && Number.isFinite(n) && n > 0 ? n : d
@@ -77,7 +91,7 @@ export function aiInputBudget(env: Record<string, string | undefined> = process.
     const n = Number(v)
     return v && Number.isInteger(n) && n >= 0 ? n : d
   }
-  const coverageOn = env.ALTIMATE_REVIEW_AI_COVERAGE === "1"
+  const coverageOn = switchOn("coverage", switches, env)
   return {
     maxFiles: num(env.ALTIMATE_REVIEW_AI_MAX_FILES, MAX_FILES),
     maxFileChars: num(env.ALTIMATE_REVIEW_AI_MAX_FILE_CHARS, MAX_DIFF_CHARS),
@@ -92,10 +106,16 @@ export function aiInputBudget(env: Record<string, string | undefined> = process.
               test: quota(env.ALTIMATE_REVIEW_AI_QUOTA_TEST, COVERAGE_QUOTAS.test),
               yml: quota(env.ALTIMATE_REVIEW_AI_QUOTA_YML, COVERAGE_QUOTAS.yml),
             },
+            ...(switchOn("otherFiles", switches, env)
+              ? { otherQuota: quota(env.ALTIMATE_REVIEW_AI_QUOTA_OTHER, AI_OTHER_FILES_QUOTA) }
+              : {}),
+            ...(switchOn("pythonFiles", switches, env)
+              ? { pythonQuota: quota(env.ALTIMATE_REVIEW_AI_QUOTA_PYTHON, AI_PYTHON_FILES_QUOTA) }
+              : {}),
           }
         : undefined,
     focused:
-      env.ALTIMATE_REVIEW_AI_FOCUSED === "1"
+      switchOn("focused", switches, env)
         ? {
             minFiles: int(env.ALTIMATE_REVIEW_AI_FOCUS_MIN_FILES, FOCUS_DEFAULTS.minFiles),
             batchFiles: int(env.ALTIMATE_REVIEW_AI_FOCUS_BATCH_FILES, FOCUS_DEFAULTS.batchFiles),
@@ -156,7 +176,7 @@ export interface AiReviewFile {
   diff?: string
   /** Current content: dbt-compiled (preferred) or raw SQL for a model, the file itself otherwise. */
   sql?: string
-  /** Rendered dbt manifest context card (`ALTIMATE_REVIEW_AI_CONTEXT_CARD=1`). */
+  /** Rendered dbt manifest context card (the `contextCard` switch). */
   card?: string
 }
 
@@ -171,8 +191,29 @@ const KIND_LABEL: Record<string, string> = {
   seed: "seed CSV",
   project_config: "project config",
   python_model: "Python model",
+  // Sent only with the `otherFiles` switch.
+  analysis: "dbt analysis (compiled, not materialized)",
+  other: "other project file",
+  // Sent only with the `pythonFiles` switch.
+  [AI_PYTHON_KIND]: "Python file",
 }
-const FENCE: Record<string, string> = { schema_yml: "yaml", source_yml: "yaml", project_config: "yaml", seed: "csv", python_model: "python" }
+const FENCE: Record<string, string> = {
+  schema_yml: "yaml",
+  source_yml: "yaml",
+  project_config: "yaml",
+  seed: "csv",
+  python_model: "python",
+  [AI_PYTHON_KIND]: "python",
+}
+
+/** Code fence for a file's current content; `other`/`analysis` files by extension. */
+function fenceOf(f: AiReviewFile): string {
+  const known = FENCE[f.kind ?? ""]
+  if (known) return known
+  if (!AI_OTHER_KINDS.has(f.kind ?? "")) return "sql"
+  const p = f.path.toLowerCase()
+  return p.endsWith(".yml") || p.endsWith(".yaml") ? "yaml" : "sql"
+}
 
 function kindRank(kind: string | undefined): number {
   const i = KIND_ORDER.indexOf(kind ?? "model_sql")
@@ -227,10 +268,16 @@ export function changedLineCount(diff: string | undefined): number {
 export function selectAiFilesByQuota(
   files: AiReviewFile[],
   quotas: Record<AiFileBucket, number> = COVERAGE_QUOTAS,
+  extra: { otherQuota?: number; pythonQuota?: number } = {},
 ): { sent: AiReviewFile[]; unsent: AiReviewFile[] } {
   const eligible = files.filter(sendable)
+  // With an `otherQuota`, other/analysis files are selected apart and appended after the rest.
+  const isOther = (f: AiReviewFile) => extra.otherQuota !== undefined && AI_OTHER_KINDS.has(f.kind ?? "")
+  // With a `pythonQuota`, the added Python files likewise, after the other files.
+  const isPython = (f: AiReviewFile) => extra.pythonQuota !== undefined && f.kind === AI_PYTHON_KIND
   const byBucket = new Map<AiFileBucket, AiReviewFile[]>(BUCKET_ORDER.map((b) => [b, []]))
   eligible
+    .filter((f) => !isOther(f) && !isPython(f))
     .map((f, i) => ({ f, i, n: changedLineCount(f.diff) }))
     .sort((a, b) => b.n - a.n || a.i - b.i)
     .forEach(({ f }) => byBucket.get(BUCKET_OF[f.kind ?? "model_sql"] ?? "model")!.push(f))
@@ -244,8 +291,19 @@ export function selectAiFilesByQuota(
     spare -= extra
   }
   const sent = BUCKET_ORDER.flatMap((b) => byBucket.get(b)!.slice(0, take.get(b)!))
+  sent.push(...mostChanged(eligible.filter(isOther), extra.otherQuota ?? 0))
+  sent.push(...mostChanged(eligible.filter(isPython), extra.pythonQuota ?? 0))
   const chosen = new Set(sent)
   return { sent, unsent: eligible.filter((f) => !chosen.has(f)) }
+}
+
+/** Up to `n` of `files`, most changed first (ties by input order). */
+function mostChanged(files: AiReviewFile[], n: number): AiReviewFile[] {
+  return files
+    .map((f, i) => ({ f, i, n: changedLineCount(f.diff) }))
+    .sort((a, b) => b.n - a.n || a.i - b.i)
+    .slice(0, n)
+    .map(({ f }) => f)
 }
 
 interface DiffHunk {
@@ -482,7 +540,7 @@ function renderFile(f: AiReviewFile, maxChars: number, coverageArg: CoverageArg,
         ? truncate(f.sql, fileChars)
         : excerptFile(f.sql, f.diff, maxChars).text
     if (f.sql.length > fileChars) stats = { ...stats, truncated: true }
-    parts.push(`${isModel ? "Current SQL" : "Current file"}:\n\`\`\`${FENCE[f.kind ?? ""] ?? "sql"}\n` + body + "\n```")
+    parts.push(`${isModel ? "Current SQL" : "Current file"}:\n\`\`\`${fenceOf(f)}\n` + body + "\n```")
   }
   return { text: parts.join("\n"), ...stats }
 }
@@ -681,10 +739,17 @@ export interface AiReviewInput {
   prBody?: string
   /** Explicit `provider/model`; omit to use the configured default model. */
   model?: string
-  /** What the verifier may read; it runs only when this is set and `ALTIMATE_REVIEW_AI_VERIFY=1`. */
+  /** What the verifier may read; it runs only when this is set and the `verify` switch is on. */
   evidence?: AiVerifyEvidence
   /** Every file the PR changes (repo-relative), including files outside the dbt project. */
   prFiles?: string[]
+  /** The review's resolved AI switches; without them each switch reads only its env variable. */
+  switches?: Partial<AiSwitches>
+  /** Files of an AI-only kind (other/analysis) a deterministic lane also checked: listed in
+   *  `unsent` when the quotas keep them from the model, since the coverage ledger does not list them. */
+  checkedPaths?: string[]
+  /** The review's repository (`--cwd`): files named by env variables must be outside it. */
+  reviewDir?: string
 }
 
 /** What happened in the advisory lane, reported on the envelope and in the comment. */
@@ -702,7 +767,7 @@ export interface AiLaneStatus {
   cost?: number
   /** Model calls made (one per batch). */
   calls?: number
-  /** The dbt-grounded verifier's outcome, when it ran (opt-in). */
+  /** The dbt-grounded verifier's outcome, when it ran (the `verify` switch). */
   verifier?: VerifierStatus
   /** The generator's findings came from an earlier envelope (`ALTIMATE_REVIEW_AI_REPLAY`);
    *  tokens, cost and calls are that run's, so only `verifier` was spent now. */
@@ -711,8 +776,12 @@ export interface AiLaneStatus {
   replayIncomplete?: boolean
   /** What each file sent carried; recorded under coverage, context cards or dry run. */
   input?: AiInputRecord[]
-  /** Sendable files left out by the coverage quotas (they still went through the deterministic lanes). */
+  /** Sendable files left out by the coverage quotas (they still went through the deterministic lanes).
+   *  Files only the AI lane reads (other/analysis, Python) are not listed, unless a deterministic
+   *  lane checked them (`checkedPaths`): the coverage ledger has the rest. */
   unsent?: string[]
+  /** Files sent only in calls that failed while others answered (state `ok`): not reviewed by the lane. */
+  failedFiles?: string[]
 }
 /** One file as sent to the model. */
 export interface AiInputRecord {
@@ -856,6 +925,28 @@ function buildBatchMessage(
   return { message: parts.join("\n"), records }
 }
 
+/**
+ * The finder's system prompt: the compiled core's, or the text of the file named by
+ * `ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE`, which replaces it. An unreadable or empty file is
+ * an error, never a silent fallback to the core prompt. The path must be absolute and must
+ * neither resolve (symlinks followed) nor be named inside the review's repository or the
+ * process's work tree (in CI the PR checkout), so a PR cannot choose the prompt (`trustedFilePath`).
+ */
+export async function finderSystemPrompt(
+  env: Record<string, string | undefined> = process.env,
+  reviewDir?: string,
+): Promise<string | undefined> {
+  const file = env.ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE
+  if (file) {
+    const real = trustedFilePath("ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE", file, [reviewDir])
+    const text = await readFile(real, "utf8")
+    if (!text.trim()) throw new Error("ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE is empty")
+    return text
+  }
+  const promptRes = await Dispatcher.call("altimate_core.review_ai_prompt", {})
+  return ((promptRes.data ?? {}) as Record<string, unknown>).prompt as string | undefined
+}
+
 /** What the lane would send: files, the unsent rest, one message per call, and a record per file. */
 export interface AiInputPlan {
   budget: AiInputBudget
@@ -865,7 +956,7 @@ export interface AiInputPlan {
   batches: AiReviewFile[][]
   messages: string[]
   input: AiInputRecord[]
-  /** Focused batching applied (`ALTIMATE_REVIEW_AI_FOCUSED=1` and enough files). */
+  /** Focused batching applied (the `focused` switch and enough files). */
   focused: boolean
 }
 
@@ -875,10 +966,10 @@ export interface AiInputPlan {
  * `env` argument; `runAiReview` sends exactly these messages.
  */
 export function planAiInput(input: AiReviewInput, env: Record<string, string | undefined> = process.env): AiInputPlan {
-  const budget = aiInputBudget(env)
+  const budget = aiInputBudget(env, input.switches)
   let files: AiReviewFile[]
   let unsent: AiReviewFile[]
-  if (budget.coverage) ({ sent: files, unsent } = selectAiFilesByQuota(input.files, budget.coverage.quotas))
+  if (budget.coverage) ({ sent: files, unsent } = selectAiFilesByQuota(input.files, budget.coverage.quotas, budget.coverage))
   else {
     files = selectAiFiles(input.files, budget.maxFiles)
     const chosen = new Set(files)
@@ -906,10 +997,13 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
   const plan = planAiInput(input)
   const { files, budget } = plan
   const dryRun = aiDryRunEnabled()
-  // Recorded only when an opt-in switch changed or inspects the input, so the default envelope is unchanged.
+  // Recorded under coverage, focused batching, context cards or dry run (all on by default).
+  // Files only the AI lane reads are listed by the coverage ledger, unless a deterministic lane checked them.
+  const checked = new Set(input.checkedPaths ?? [])
+  const unsent = plan.unsent.filter((f) => !AI_ONLY_KINDS.has(f.kind ?? "") || checked.has(f.path)).map((f) => f.path)
   const recorded: Pick<AiLaneStatus, "input" | "unsent"> = {
     ...(budget.coverage || dryRun || plan.focused || plan.input.some((r) => r.card) ? { input: plan.input } : {}),
-    ...(budget.coverage && plan.unsent.length ? { unsent: plan.unsent.map((f) => f.path) } : {}),
+    ...(budget.coverage && unsent.length ? { unsent } : {}),
   }
   const done = (findings: Finding[], status: Omit<AiLaneStatus, "durationMs">): AiReviewResult => ({
     findings,
@@ -922,9 +1016,8 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
 
   let modelLabel: string | undefined
   try {
-    // Prompt comes from the compiled core, not this file.
-    const promptRes = await Dispatcher.call("altimate_core.review_ai_prompt", {})
-    const corePrompt = ((promptRes.data ?? {}) as Record<string, unknown>).prompt as string | undefined
+    // The file named by ALTIMATE_REVIEW_AI_SYSTEM_PROMPT_FILE when set, else the compiled core's prompt.
+    const corePrompt = await finderSystemPrompt(process.env, input.reviewDir)
     if (!corePrompt) return done([], { state: "error", reason: "the core reviewer prompt is unavailable" })
     const testGap = aiTestGapEnabled()
     const system = testGap ? corePrompt + TEST_GAP_INSTRUCTION : corePrompt
@@ -960,14 +1053,26 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
     if (failed.length === results.length)
       return done([], { state: failed[0].state, reason: failed[0].reason, model: modelLabel, ...spent })
     const reason = failed.length ? `${failed.length} of ${results.length} calls failed: ${failed[0].reason}` : undefined
-    // Opt-in: try to refute each finding with dbt evidence. Never throws.
+    // Files no answered call carried: the coverage ledger keeps them as not reviewed.
+    const answered = new Set(batches.flatMap((b, k) => (results[k].state === "ok" ? b.map((f) => f.path) : [])))
+    const failedFiles = [...new Set(batches.flatMap((b, k) => (results[k].state === "ok" ? [] : b.map((f) => f.path))))].filter(
+      (p) => !answered.has(p),
+    )
+    // Try to refute each finding with dbt evidence (the `verify` switch). Never throws.
     let verifier: VerifierStatus | undefined
-    if (input.evidence && aiVerifyEnabled()) {
+    if (input.evidence && switchOn("verify", input.switches)) {
       const v = await runAiVerify({ findings, grounding: input.grounding, evidence: input.evidence, model })
       findings = v.findings
       verifier = v.status
     }
-    return done(findings, { state: "ok", model: modelLabel, ...(reason ? { reason } : {}), ...spent, ...(verifier ? { verifier } : {}) })
+    return done(findings, {
+      state: "ok",
+      model: modelLabel,
+      ...(reason ? { reason } : {}),
+      ...(failedFiles.length ? { failedFiles } : {}),
+      ...spent,
+      ...(verifier ? { verifier } : {}),
+    })
   } catch (err) {
     log.error("ai review failed", { error: err })
     return done([], { state: "error", reason: safeReason(err), model: modelLabel })

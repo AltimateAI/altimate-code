@@ -134,6 +134,8 @@ export const ReviewScope = z.object({
   projectRoot: z.string().optional(),
   /** Changed files outside the dbt project: counted, not reviewed. */
   outOfScopeFiles: z.number().int().nonnegative().optional(),
+  /** Changed files outside the dbt project that only the AI lane reviewed (Python files). */
+  aiReviewedOutside: z.array(z.string()).optional(),
   /** Non-model renames with unchanged content, name, role and layer (pure moves): not re-reviewed. */
   movedUnchangedFiles: z.number().int().nonnegative().optional(),
   /** Head commit the review ran on; a run on an older push never clears a block. */
@@ -267,7 +269,7 @@ export const VerdictEnvelope = z.object({
       replayed: z.boolean().optional(),
       /** The replayed envelope did not list every generator finding. */
       replayIncomplete: z.boolean().optional(),
-      /** What each file sent to the model carried (opt-in coverage, context cards or dry run). */
+      /** What each file sent to the model carried (coverage, focused batching, context cards or dry run). */
       input: z
         .array(
           z.object({
@@ -283,9 +285,11 @@ export const VerdictEnvelope = z.object({
           }),
         )
         .optional(),
-      /** Sendable files the opt-in coverage quotas kept from the model (the deterministic lanes still checked them). */
+      /** Sendable files the coverage quotas kept from the model (the deterministic lanes still checked them). */
       unsent: z.array(z.string()).optional(),
-      /** The opt-in dbt-grounded verifier (`ALTIMATE_REVIEW_AI_VERIFY=1`): what it kept and dropped. */
+      /** Files sent only in calls that failed while other calls answered: not reviewed by the AI lane. */
+      failedFiles: z.array(z.string()).optional(),
+      /** The dbt-grounded verifier (the `verify` switch): what it kept and dropped. */
       verifier: z
         .object({
           state: z.enum(["ok", "skipped", "timeout", "error", "budget"]),
@@ -434,6 +438,12 @@ export function errorReason(err: unknown, max = 200): string {
 
 /** Prefix of the `scope.unverified` reason for a file whose review threw. */
 export const FAILED_FILE_REASON = "review failed for this file"
+
+/** Whether a `scope.notReviewed` reason marks a file outside the dbt project: one project's
+ *  `outside the dbt project (<root>)` (run.ts) or the merge's `outside the dbt projects reviewed`. */
+export function isOutsideProjectReason(reason: string): boolean {
+  return /^outside the dbt project/.test(reason)
+}
 
 /** True when some check did not run: an engine call failed, a file's review
  *  threw, a check abstained on a model, or a model had no compiled head SQL (its

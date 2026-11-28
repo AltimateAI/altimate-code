@@ -4,9 +4,10 @@
 // with dbt evidence (compiled SQL, the manifest DAG, column lineage, project
 // grep). The verifier sees only the candidate comments and their diff hunks,
 // never the reviewer's prompt or context, and a deterministic triage table —
-// not the model — decides what is kept. Opt-in (`ALTIMATE_REVIEW_AI_VERIFY=1`)
-// and fail-open: any error, timeout or exhausted budget leaves the findings it
-// did not review unchanged.
+// not the model — decides what is kept. On by default in `reviewPullRequest` (the `verify`
+// switch; opt out with `ai: { verify: false }` or `ALTIMATE_REVIEW_AI_VERIFY=0`)
+// and fail-open: an error leaves the findings it did not review unchanged; a
+// timeout or exhausted budget moves them to the summary.
 import { asSchema, tool, type ModelMessage, type Tool } from "ai"
 import z from "zod"
 import type { Provider } from "@/provider/provider"
@@ -93,11 +94,6 @@ export interface VerifierStatus {
   dropped?: DroppedFinding[]
   /** Every finding's triage inputs and outcome (uncapped), for offline re-triage with `retriage`. */
   decisions?: VerifierDecision[]
-}
-
-/** Whether the verifier runs (opt-in). */
-export function aiVerifyEnabled(env: Record<string, string | undefined> = process.env): boolean {
-  return env.ALTIMATE_REVIEW_AI_VERIFY === "1"
 }
 
 export interface RunAiVerifyInput {
@@ -458,18 +454,24 @@ const LOCAL_CLAIMS = new Set<ModelFeatures["claimType"]>(["code_fact", "conventi
 /**
  * Decide one finding (pure; first matching row wins). Without a model verdict
  * (id omitted, unparsable answer, timeout, budget, error) the fail mode alone
- * decides: open keeps the finding unchanged, closed discards it.
+ * decides: open keeps the finding unchanged, or moves it to the summary when
+ * the verifier stopped (timeout or budget); closed discards it.
  */
 export function triage(
   f: Pick<Finding, "category">,
   ts: TsFeatures,
   m: ModelFeatures | undefined,
   knobs: TriageKnobs,
+  stopped = false,
 ): { decision: Decision; rule: string } {
-  if (!m)
-    return knobs.failMode === "open"
-      ? { decision: "keep", rule: "unreviewed" }
-      : { decision: "discard", rule: "unreviewed" }
+  // A finding left without a verdict because the verifier stopped (timeout, or the token or
+  // tool-output budget) was never checked: under the open fail mode it goes to the summary.
+  // The rule records the stop under either fail mode, so `retriage` can switch modes.
+  if (!m) {
+    const rule = stopped ? "unreviewed_stopped" : "unreviewed"
+    if (knobs.failMode === "closed") return { decision: "discard", rule }
+    return stopped ? { decision: "summary", rule } : { decision: "keep", rule }
+  }
   if (ts.restatesGrounding) return { decision: "discard", rule: "duplicate_of_engine" }
   if (m.verdict === "refuted") {
     if (m.evidence.trim()) return { decision: "discard", rule: "refuted" }
@@ -564,7 +566,7 @@ export function retriage(
       m = { ...rest, evidence: hasEvidence ? "(recorded)" : "" }
       if (knobs.claimsOtherFileAsCrossFile && d.ts.claimsOtherFile) m.claimType = "cross_file"
     } else counts.unreviewed++
-    const { decision, rule } = triage(d, d.ts, m, knobs)
+    const { decision, rule } = triage(d, d.ts, m, knobs, d.rule === "unreviewed_stopped")
     if (decision === "discard") counts.discarded++
     else if (decision === "summary") counts.summary++
     else counts.kept++
@@ -589,18 +591,31 @@ export interface Verification {
   features: TsFeatures
 }
 
+/** An unreviewed finding demoted to the summary; it carries only the decision and its rule. */
+function toSummary(f: Finding, rule: string): Finding {
+  const prior =
+    f.evidence?.result && typeof f.evidence.result === "object" ? (f.evidence.result as Record<string, unknown>) : {}
+  return {
+    ...f,
+    evidence: { tool: f.evidence?.tool ?? "ai-review", result: { ...prior, verification: { decision: "summary", rule } } },
+    tier: "summary" as const,
+  }
+}
+
 /**
  * Apply triage to every finding. Kept and summary findings that the model
  * reviewed carry `evidence.result.verification` (the evidence tool stays
  * `ai-review`); verified ones get the evidence appended to the body. Severity
  * is never raised. Unreviewed findings kept by the open fail mode are
- * returned unchanged.
+ * returned unchanged, or demoted to the summary when the verifier stopped.
  */
 export function applyTriage(
   findings: Finding[],
   ts: TsFeatures[],
   model: Array<ModelFeatures | undefined>,
   knobs: TriageKnobs,
+  /** Per finding: its batch stopped before a verdict (`timeout` or `budget` state). */
+  stopped: boolean[] = [],
 ): {
   findings: Finding[]
   dropped: DroppedFinding[]
@@ -615,7 +630,7 @@ export function applyTriage(
     const m = model[i]
     if (m) counts.reviewed++
     else counts.unreviewed++
-    const { decision, rule } = triage(f, ts[i], m, knobs)
+    const { decision, rule } = triage(f, ts[i], m, knobs, stopped[i] === true)
     decisions.push(compactDecision(f, ts[i], m, decision, rule))
     if (decision === "discard") {
       counts.discarded++
@@ -637,7 +652,7 @@ export function applyTriage(
     if (decision === "summary") counts.summary++
     else counts.kept++
     if (!m) {
-      out.push(f)
+      out.push(decision === "summary" ? toSummary(f, rule) : f)
       return
     }
     const verification: Verification = {
@@ -1188,11 +1203,13 @@ export async function runAiVerify(
     return { findings: input.findings, status: status({ state: "skipped", reason: "no AI findings to verify" }) }
   let timer: ReturnType<typeof setTimeout> | undefined
   const controller = new AbortController()
+  const ev = input.evidence
+  const fileByPath = new Map(ev.files.map((f) => [f.path, f]))
+  // Deterministic features, once computed; the failure path records decisions with them.
+  let ts: TsFeatures[] | undefined
   try {
     const env = deps.env ?? process.env
-    const ev = input.evidence
     const llm = deps.llm ?? harnessVerifierLlm(input.model)
-    const fileByPath = new Map(ev.files.map((f) => [f.path, f]))
     const batches = batchFindings(input.findings).map((idx) => {
       const ids = idx.map((_, j) => `c${j + 1}`)
       const message = buildVerifyMessage(
@@ -1211,7 +1228,7 @@ export async function runAiVerify(
     timer = setTimeout(() => controller.abort(), deps.timeoutMs ?? aiTimeoutMs(promptChars))
     const graph = await untilAborted(gatherGraph(ev), controller.signal)
     const names = { parents: graph.parents.map((p) => p.name), downstream: graph.downstream.map((d) => d.name) }
-    const ts = input.findings.map((f) =>
+    ts = input.findings.map((f) =>
       extractFeatures(f, fileByPath.get(f.file), input.grounding, names, ev.addedLines.get(f.file) ?? new Set()),
     )
     const defs = verifierTools(ev, graph)
@@ -1240,7 +1257,11 @@ export async function runAiVerify(
 
     const model: Array<ModelFeatures | undefined> = input.findings.map(() => undefined)
     batches.forEach((b, k) => b.idx.forEach((i, j) => (model[i] = outcomes[k].verdicts.get(b.ids[j]))))
-    const triaged = applyTriage(input.findings, ts, model, triageKnobs(env))
+    const stopped: boolean[] = input.findings.map(() => false)
+    batches.forEach((b, k) => {
+      if (outcomes[k].state === "budget" || outcomes[k].state === "timeout") for (const i of b.idx) stopped[i] = true
+    })
+    const triaged = applyTriage(input.findings, ts, model, triageKnobs(env), stopped)
     for (const d of triaged.dropped)
       log.info("ai verify dropped", { id: d.id, file: d.file, rule: d.rule, verdict: d.verdict })
 
@@ -1275,16 +1296,37 @@ export async function runAiVerify(
     }
   } catch (err) {
     log.error("ai verify failed", { error: err })
-    // No finding got a verdict: the fail mode decides, as for an unreviewed finding.
+    // No finding got a verdict: the fail mode decides, as for an unreviewed finding; on a
+    // timeout the open fail mode moves them to the summary.
     const closed = triageKnobs(deps.env ?? process.env).failMode === "closed"
+    const timedOut = controller.signal.aborted
     const n = input.findings.length
+    // Recorded like any unreviewed finding, so the outcome can be re-triaged offline. Features
+    // not computed before the failure are computed now, without the dbt graph's model names.
+    // runAiVerify never throws, so a failure here only leaves the decisions out.
+    let decisions: VerifierDecision[] | undefined
+    try {
+      const features =
+        ts ??
+        input.findings.map((f) =>
+          extractFeatures(f, fileByPath.get(f.file), input.grounding, { parents: [], downstream: [] }, ev.addedLines.get(f.file) ?? new Set()),
+        )
+      const knobs = triageKnobs(deps.env ?? process.env)
+      decisions = input.findings.map((f, i) => {
+        const { decision, rule } = triage(f, features[i], undefined, knobs, timedOut)
+        return compactDecision(f, features[i], undefined, decision, rule)
+      })
+    } catch (e) {
+      log.error("ai verify decisions failed", { error: e })
+    }
     return {
-      findings: closed ? [] : input.findings,
+      findings: closed ? [] : timedOut ? input.findings.map((f) => toSummary(f, "unreviewed_stopped")) : input.findings,
       status: status({
-        ...(controller.signal.aborted
+        ...(timedOut
           ? { state: "timeout" as const, reason: "no answer before the verifier timeout" }
           : { state: "error" as const, reason: safeReason(err) }),
-        ...(closed ? { kept: 0, discarded: n } : {}),
+        ...(closed ? { kept: 0, discarded: n } : timedOut ? { kept: 0, summary: n } : {}),
+        ...(decisions ? { decisions } : {}),
       }),
     }
   } finally {

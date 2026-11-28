@@ -1681,7 +1681,10 @@ export namespace Telemetry {
         ai_verify_discarded?: number
         /** Where the review base came from (flag, github_event, default_branch, …). */
         base_source?: string
+        /** Changed files outside the dbt project that no lane reviewed (outside-project Python files the AI lane reviewed are not counted; see `ai_reviewed_outside_files`). */
         out_of_scope_files?: number
+        /** Changed files outside the dbt project the AI lane reviewed (`pythonFiles`). */
+        ai_reviewed_outside_files?: number
         /** Engine calls that threw during the review (their checks did not run). */
         engine_errors?: number
         stale_manifest?: boolean

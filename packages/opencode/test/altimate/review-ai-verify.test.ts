@@ -4,7 +4,6 @@ import { MockLanguageModelV3 } from "ai/test"
 import z from "zod"
 import { readStreamStep } from "../../src/altimate/llm/stream-text"
 import {
-  aiVerifyEnabled,
   ANSWER_NOW,
   ANSWER_DIRECT,
   applyTriage,
@@ -38,6 +37,7 @@ import { inlineEligible } from "../../src/altimate/review/format"
 import { DEFAULT_POSTING_POLICY } from "../../src/altimate/review/verdict"
 import type { AiReviewFile } from "../../src/altimate/review/ai-review"
 import { runAiReview } from "../../src/altimate/review/ai-review"
+import { switchOn } from "../../src/altimate/review/ai-switches"
 import { createDispatcherRunner } from "../../src/altimate/review/runner"
 import { LLM } from "../../src/session/llm"
 import { mkdirSync, symlinkSync, writeFileSync } from "fs"
@@ -63,11 +63,12 @@ const FAKE_PW = ["SECRET", "123"].join("")
 describe("wiring", () => {
   afterEach(() => mock.restore())
 
-  test("opt-in only: ALTIMATE_REVIEW_AI_VERIFY must be exactly 1", () => {
-    expect(aiVerifyEnabled({})).toBe(false)
-    expect(aiVerifyEnabled({ ALTIMATE_REVIEW_AI_VERIFY: "0" })).toBe(false)
-    expect(aiVerifyEnabled({ ALTIMATE_REVIEW_AI_VERIFY: "true" })).toBe(false)
-    expect(aiVerifyEnabled({ ALTIMATE_REVIEW_AI_VERIFY: "1" })).toBe(true)
+  test("without resolved switches only an on value of ALTIMATE_REVIEW_AI_VERIFY turns the verifier on", () => {
+    expect(switchOn("verify", undefined, {})).toBe(false)
+    expect(switchOn("verify", undefined, { ALTIMATE_REVIEW_AI_VERIFY: "0" })).toBe(false)
+    expect(switchOn("verify", undefined, { ALTIMATE_REVIEW_AI_VERIFY: "maybe" })).toBe(false)
+    expect(switchOn("verify", undefined, { ALTIMATE_REVIEW_AI_VERIFY: "1" })).toBe(true)
+    expect(switchOn("verify", undefined, { ALTIMATE_REVIEW_AI_VERIFY: "true" })).toBe(true)
   })
 
   test("readStreamStep keeps the SDK's tool calls and response messages for tools without execute", async () => {
@@ -476,6 +477,7 @@ describe("triage (first match wins)", () => {
     )
     expect(triage(f, TS, undefined, K)).toEqual({ decision: "keep", rule: "unreviewed" })
     expect(triage(f, TS, undefined, { ...K, failMode: "closed" })).toEqual({ decision: "discard", rule: "unreviewed" })
+    expect(triage(f, TS, undefined, { ...K, failMode: "closed" }, true)).toEqual({ decision: "discard", rule: "unreviewed_stopped" })
     // Without a verdict even a grounding duplicate is left alone: fail-open means unchanged.
     expect(triage(f, { ...TS, restatesGrounding: true }, undefined, K).decision).toBe("keep")
   })
@@ -982,12 +984,13 @@ describe("runAiVerify: the bounded tool loop", () => {
     expect(status.reason).not.toContain("abcdefghijklmnop")
   })
 
-  test("a timeout aborts the call and leaves the findings unchanged", async () => {
+  test("a timeout aborts the call and moves the unreviewed findings to the summary", async () => {
     const f = aiFinding()
     const llm: VerifierLlm = (req) =>
       new Promise((_, reject) => req.abort.addEventListener("abort", () => reject(new Error("aborted"))))
     const { findings, status } = await verify([f], llm, {}, { timeoutMs: 20 })
-    expect(findings).toEqual([f])
+    expect(findings.map((x) => x.id)).toEqual([f.id])
+    expect(findings[0].tier).toBe("summary")
     expect(status.state).toBe("timeout")
   })
 
@@ -996,7 +999,7 @@ describe("runAiVerify: the bounded tool loop", () => {
     const { llm } = scripted(() => toolStep([["read_file", { path: "models/fct.sql" }]]))
     // The read never settles; the deadline must still end the run.
     const { findings, status } = await verify([f], llm, { readFile: () => new Promise<string>(() => {}) }, { timeoutMs: 20 })
-    expect(findings).toEqual([f])
+    expect(findings.map((x) => x.id)).toEqual([f.id])
     expect(status.state).toBe("timeout")
   })
 
@@ -1630,5 +1633,85 @@ describe("decisions[]: offline re-triage from one run's envelope", () => {
       summary: 0,
       unreviewed: 1,
     })
+  })
+})
+
+describe("runAiVerify: findings left unreviewed when a batch stops", () => {
+  const two = () => [aiFinding({ title: "fct: first claim" }), aiFinding({ title: "fct: second claim", startLine: 11, endLine: 11 })]
+  const big = { tokens: { input: 30_000, inputTotal: 30_000, output: 10, reasoning: 0, cacheRead: 0 }, cost: 0 }
+
+  test("budget: the finding without a verdict goes to the summary, not inline", async () => {
+    const { llm } = scripted((req) =>
+      req.toolChoice === "none" ? { text: JSON.stringify([verdict("c1")]) } : toolStep([["pr_description", {}]], big),
+    )
+    const { findings, status } = await verify(two(), llm)
+    expect(status.state).toBe("budget")
+    expect(status.reviewed).toBe(1)
+    expect(status.unreviewed).toBe(1)
+    expect(status.summary).toBe(1)
+    const second = findings.find((f) => f.title === "fct: second claim")!
+    expect(second.tier).toBe("summary")
+    expect(inlineEligible({ ...second, tier: "inline" }, DEFAULT_POSTING_POLICY)).toBe(false)
+    expect(status.decisions?.find((d) => d.id === second.id)?.rule).toBe("unreviewed_stopped")
+  })
+
+  test("a batch that finished normally keeps an omitted finding as before (open fail mode)", async () => {
+    const { llm } = scripted(() => ({ text: JSON.stringify([verdict("c1")]) }))
+    const { findings, status } = await verify(two(), llm)
+    expect(status.state).toBe("ok")
+    expect(status.unreviewed).toBe(1)
+    expect(status.summary).toBe(0)
+    const second = findings.find((f) => f.title === "fct: second claim")!
+    expect(inlineEligible({ ...second, tier: "inline" }, DEFAULT_POSTING_POLICY)).toBe(true)
+  })
+
+  test("the closed fail mode still discards it", async () => {
+    const { llm } = scripted((req) =>
+      req.toolChoice === "none" ? { text: JSON.stringify([verdict("c1")]) } : toolStep([["pr_description", {}]], big),
+    )
+    const { findings, status } = await verify(two(), llm, {}, { env: { ALTIMATE_REVIEW_AI_VERIFY_FAIL: "closed" } })
+    expect(findings.map((f) => f.title)).toEqual(["fct: first claim"])
+    // The stop is recorded under the closed mode too, so re-triage with open knobs demotes it.
+    const second = status.decisions!.find((d) => d.rule.startsWith("unreviewed"))!
+    expect(second).toMatchObject({ decision: "discard", rule: "unreviewed_stopped" })
+    expect(retriage([second], DEFAULT_TRIAGE_KNOBS).decisions[0]).toMatchObject({ decision: "summary", rule: "unreviewed_stopped" })
+  })
+
+  test("timeout: the findings without a verdict go to the summary, not inline", async () => {
+    const llm: VerifierLlm = (req) =>
+      new Promise((_, reject) => req.abort.addEventListener("abort", () => reject(new Error("aborted"))))
+    const { findings, status } = await verify(two(), llm, {}, { timeoutMs: 20 })
+    expect(status.state).toBe("timeout")
+    expect(status.unreviewed).toBe(2)
+    expect(status.summary).toBe(2)
+    expect(status.kept).toBe(0)
+    for (const f of findings) {
+      expect(f.tier).toBe("summary")
+      expect(inlineEligible({ ...f, tier: "inline" }, DEFAULT_POSTING_POLICY)).toBe(false)
+      expect(status.decisions?.find((d) => d.id === f.id)?.rule).toBe("unreviewed_stopped")
+    }
+  })
+
+  test("timeout before any batch ran: the findings still go to the summary", async () => {
+    const { llm, calls } = scripted(() => ({ text: JSON.stringify([verdict("c1")]) }))
+    const hang = { graphParents: () => new Promise(() => {}) } as any
+    const { findings, status } = await verify(two(), llm, { runner: hang }, { timeoutMs: 20 })
+    expect(calls).toHaveLength(0)
+    expect(status.state).toBe("timeout")
+    expect(status.summary).toBe(2)
+    expect(status.kept).toBe(0)
+    expect(findings.map((f) => f.tier)).toEqual(["summary", "summary"])
+    // Each demoted finding is recorded, so the run can be re-triaged offline.
+    expect(status.decisions?.map((d) => [d.id, d.decision, d.rule])).toEqual(
+      findings.map((f) => [f.id, "summary", "unreviewed_stopped"]),
+    )
+    expect(retriage(status.decisions!, { ...DEFAULT_TRIAGE_KNOBS, failMode: "closed" }).counts.discarded).toBe(2)
+  })
+
+  test("the closed fail mode still discards them on a timeout", async () => {
+    const llm: VerifierLlm = (req) =>
+      new Promise((_, reject) => req.abort.addEventListener("abort", () => reject(new Error("aborted"))))
+    const { findings } = await verify(two(), llm, {}, { timeoutMs: 20, env: { ALTIMATE_REVIEW_AI_VERIFY_FAIL: "closed" } })
+    expect(findings).toEqual([])
   })
 })

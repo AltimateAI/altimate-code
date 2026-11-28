@@ -13,7 +13,7 @@ import {
   owningProject,
   reviewAllProjects,
 } from "../../src/altimate/review/multi-project"
-import { buildEnvelope, signEnvelope, verifyEnvelope, type VerdictEnvelope } from "../../src/altimate/review/verdict"
+import { buildEnvelope, isOutsideProjectReason, signEnvelope, verifyEnvelope, type VerdictEnvelope } from "../../src/altimate/review/verdict"
 import { makeFinding } from "../../src/altimate/review/finding"
 import { renderSummary } from "../../src/altimate/review/format"
 import { postGitHubReview, type GitHubClient } from "../../src/altimate/review/post-github"
@@ -546,5 +546,26 @@ describe("mergeProjectEnvelopes", () => {
     const { byProject, unassigned } = assignToProjects(files, ["pkg"])
     expect(byProject.get("pkg")?.map((f) => f.path)).toEqual(["docs/a.sql"])
     expect(unassigned.map((f) => f.path)).toEqual(["other/x.yml"])
+  })
+})
+
+describe("isOutsideProjectReason", () => {
+  test("accepts exactly what the `/^outside the dbt project/` matches it replaced accepted", () => {
+    // The regex each call site (orchestrate.ts, format.ts, multi-project.ts) used before the predicate.
+    const before = (reason: string) => /^outside the dbt project/.test(reason)
+    const reasons = [
+      "outside the dbt project (.)", // run.ts, project at the repository root
+      "outside the dbt project (projects/a)", // run.ts, nested project
+      "outside the dbt projects reviewed", // the merge's OUTSIDE_ALL
+      "outside the dbt project",
+      "Outside the dbt project (.)",
+      " outside the dbt project (.)",
+      "not a dbt model/macro/test/yml/seed file",
+      "no dbt manifest: lineage, config and graph checks skipped",
+      "no checks run for other files at the lite tier",
+      "",
+    ]
+    expect(reasons.map(isOutsideProjectReason)).toEqual(reasons.map(before))
+    expect(reasons.filter(isOutsideProjectReason)).toEqual(reasons.slice(0, 4))
   })
 })

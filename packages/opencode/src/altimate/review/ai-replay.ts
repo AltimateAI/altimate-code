@@ -14,7 +14,8 @@ import { Provider } from "@/provider/provider"
 import { Log } from "@/altimate/util/log"
 import { Finding, ReviewCategory, makeFinding, ruleId } from "./finding"
 import type { AiLaneStatus, AiReviewInput, AiReviewResult } from "./ai-review"
-import { aiVerifyEnabled, runAiVerify, type VerifierStatus } from "./ai-verify"
+import { runAiVerify, type VerifierStatus } from "./ai-verify"
+import { switchOn } from "./ai-switches"
 import { modelNameFromPath } from "./orchestrate"
 
 const log = Log.create({ service: "ai-replay" })
@@ -43,6 +44,7 @@ const ReplayEnvelope = z.object({
       tokens: Tokens.optional(),
       cost: z.number().optional(),
       calls: z.number().optional(),
+      failedFiles: z.array(z.string()).optional(),
       verifier: z
         .object({
           discarded: z.number().optional(),
@@ -70,7 +72,7 @@ const ReplayEnvelope = z.object({
 
 export interface ReplayedLane {
   findings: Finding[]
-  /** The stored generator status: state, reason, model, tokens, cost, calls. */
+  /** The stored generator status: state, reason, model, tokens, cost, calls, failed files. */
   status: Omit<AiLaneStatus, "durationMs" | "verifier">
   /** Problems found while rebuilding (findings that could not be recovered). */
   warnings: string[]
@@ -94,6 +96,7 @@ export function replayFindings(raw: unknown): ReplayedLane {
     ...(ai.tokens ? { tokens: ai.tokens } : {}),
     ...(ai.cost !== undefined ? { cost: ai.cost } : {}),
     ...(ai.calls !== undefined ? { calls: ai.calls } : {}),
+    ...(ai.failedFiles?.length ? { failedFiles: ai.failedFiles } : {}),
     replayed: true,
   }
   const warnings: string[] = []
@@ -189,7 +192,7 @@ export async function runAiReplay(input: AiReviewInput, path: string): Promise<A
 
   let findings = lane.findings
   let verifier: VerifierStatus | undefined
-  if (input.evidence && aiVerifyEnabled()) {
+  if (input.evidence && switchOn("verify", input.switches)) {
     let model: Awaited<ReturnType<typeof Provider.getModel>>
     try {
       const chosen = input.model ? Provider.parseModel(input.model) : await Provider.defaultModel()

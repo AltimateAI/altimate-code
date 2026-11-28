@@ -3,8 +3,9 @@ import { realpath } from "node:fs/promises"
 import { createHash } from "node:crypto"
 import { collectChangedFiles, gitRepoRoot, listFilesAt, listWorkingTreeFiles, resolveReviewBase } from "./git"
 import { reviewPullRequest, type ReviewPullRequestOptions } from "./run"
-import { applyMode, signEnvelope, summarize, VerdictEnvelope, type RiskTier, type Verdict } from "./verdict"
+import { applyMode, isOutsideProjectReason, signEnvelope, summarize, VerdictEnvelope, type RiskTier, type Verdict } from "./verdict"
 import type { ChangedFile } from "./diff-filter"
+import { aiDryRunEnabled } from "./ai-review"
 
 /**
  * Multi-project review (`altimate review --all-projects`): a PR in a mono-repo
@@ -28,7 +29,6 @@ const AI_STATE_RANK: Record<AiStatus["state"], number> = { skipped: 0, ok: 1, ti
 const VERIFIER_STATE_RANK: Record<VerifierStatus["state"], number> = { skipped: 0, ok: 1, budget: 2, timeout: 3, error: 4 }
 /** Most discarded findings kept on the merged verifier record (as on one project's). */
 const VERIFIER_DROPPED_MAX = 20
-const OUTSIDE_PROJECT_RE = /^outside the dbt project/
 /** Reason for a file outside every reviewed project (the projects are listed in `scope.projects`). */
 const OUTSIDE_ALL = "outside the dbt projects reviewed"
 
@@ -151,13 +151,39 @@ export async function reviewAllProjects(opts: ReviewPullRequestOptions): Promise
   const prFiles = collected.map((f) => f.path)
   const prRenames = collected.flatMap((f) => (f.status === "renamed" && f.oldPath ? [[f.path, f.oldPath] as [string, string]] : []))
   const runs: ProjectRun[] = []
+  // Python files outside every project go to one project's AI lane only (`pythonFiles`): each
+  // file is offered to project after project until a lane takes it (it is in the lane's input,
+  // or the lane reviewed it). A project that does not take it (lane off in its policy,
+  // `pythonFiles: false`, a tier without the lane, its quota) passes it on.
+  const pendingOutside = new Set(unassigned.map((f) => f.path))
   for (const root of touched) {
     const own = byProject.get(root)!
     process.stderr.write(`ℹ️  reviewing dbt project ${root || "."} (${own.length} changed file(s))\n`)
-    const env = await reviewPullRequest({ ...optsFor(root), changedFiles: [...own, ...unassigned], prFiles, prRenames })
+    const env = await reviewPullRequest({
+      ...optsFor(root),
+      changedFiles: [...own, ...unassigned],
+      prFiles,
+      prRenames,
+      aiOutsidePaths: [...pendingOutside],
+    })
+    for (const p of outsideTaken(env, aiDryRunEnabled())) pendingOutside.delete(p)
     runs.push({ root, paths: own.map((f) => f.path), env })
   }
   return mergeProjectEnvelopes(runs, roots)
+}
+
+/**
+ * The outside-project files a project's AI lane took: those it reviewed (`scope.aiReviewedOutside`)
+ * and, when the lane answered or in a dry run (which plans without a call), those in its input
+ * except the ones carried only by failed calls (`ai.failedFiles`).
+ * A lane that errored, timed out or had no model recorded its input without reviewing it, so
+ * those files stay pending for the next project.
+ */
+export function outsideTaken(env: Pick<VerdictEnvelope, "ai" | "scope">, dryRun: boolean): string[] {
+  // A lane that answered in part did not review the files only its failed calls carried.
+  const failed = new Set(dryRun ? [] : (env.ai?.failedFiles ?? []))
+  const input = env.ai?.state === "ok" || dryRun ? (env.ai?.input ?? []).map((r) => r.path).filter((p) => !failed.has(p)) : []
+  return [...input, ...(env.scope?.aiReviewedOutside ?? [])]
 }
 
 /** `env` re-signed with `scope.coveredProjects`, so the poster may reconcile earlier reviews of those projects. */
@@ -194,12 +220,24 @@ export function mergeProjectEnvelopes(runs: ProjectRun[], coveredProjects?: stri
   const tierReasons = [...new Set(envs.flatMap((e) => e.tierReasons ?? []))]
 
   // A path some project reviewed is not "outside the dbt project" for the PR.
-  const reviewed = new Set(runs.flatMap((r) => r.paths))
+  // So is a path outside every project that one project's AI lane reviewed.
+  // A file renamed out of a project is assigned to it but reviewed only as a deletion at its old
+  // path; that project lists the new path as outside, so the path counts only when a lane reviewed it.
+  const aiReviewedOutside = [...new Set(envs.flatMap((e) => e.scope?.aiReviewedOutside ?? []))]
+  const listedOutside = (e: VerdictEnvelope) =>
+    new Set((e.scope?.notReviewed ?? []).filter((n) => isOutsideProjectReason(n.reason)).map((n) => n.path))
+  const reviewed = new Set([
+    ...runs.flatMap((r) => {
+      const outside = listedOutside(r.env)
+      return r.paths.filter((p) => !outside.has(p))
+    }),
+    ...aiReviewedOutside,
+  ])
   const notReviewed: Array<{ path: string; reason: string }> = []
   const seenEntry = new Set<string>()
   for (const e of envs) {
     for (const n of e.scope?.notReviewed ?? []) {
-      const outside = OUTSIDE_PROJECT_RE.test(n.reason)
+      const outside = isOutsideProjectReason(n.reason)
       if (outside && reviewed.has(n.path)) continue
       const key = outside ? `outside\0${n.path}` : `${n.path}\0${n.reason}`
       if (seenEntry.has(key)) continue
@@ -207,7 +245,7 @@ export function mergeProjectEnvelopes(runs: ProjectRun[], coveredProjects?: stri
       notReviewed.push(outside ? { path: n.path, reason: OUTSIDE_ALL } : n)
     }
   }
-  const outsideCount = notReviewed.filter((n) => OUTSIDE_PROJECT_RE.test(n.reason)).length
+  const outsideCount = notReviewed.filter((n) => isOutsideProjectReason(n.reason)).length
   const movedCount = envs.reduce((s, e) => s + (e.scope?.movedUnchangedFiles ?? 0), 0)
   const unverified = envs.flatMap((e) => e.scope?.unverified ?? [])
 
@@ -251,6 +289,7 @@ export function mergeProjectEnvelopes(runs: ProjectRun[], coveredProjects?: stri
       headParents: first.scope?.headParents,
       coveredProjects: coveredProjects ?? runs.map((r) => r.root),
       outOfScopeFiles: outsideCount || undefined,
+      aiReviewedOutside: aiReviewedOutside.length ? aiReviewedOutside : undefined,
       movedUnchangedFiles: movedCount || undefined,
       unverified: unverified.length ? unverified : undefined,
       notReviewed,
@@ -303,6 +342,7 @@ function mergeAi(runs: Array<{ root: string; env: VerdictEnvelope }>): VerdictEn
   const base = ok ?? first
   const input = ais.some((a) => a.input) ? ais.flatMap((a) => a.input ?? []) : undefined
   const unsent = ais.flatMap((a) => a.unsent ?? [])
+  const failedFiles = ais.flatMap((a) => a.failedFiles ?? [])
   return {
     ...base,
     state,
@@ -314,6 +354,7 @@ function mergeAi(runs: Array<{ root: string; env: VerdictEnvelope }>): VerdictEn
     durationMs: sumOf(ais.map((a) => a.durationMs)),
     input,
     unsent: unsent.length ? unsent : undefined,
+    failedFiles: failedFiles.length ? failedFiles : undefined,
     verifier: mergeVerifier(lanes.map((r) => ({ root: r.root, v: r.env.ai!.verifier }))),
     projects: lanes.map((r) => ({ root: r.root, state: r.env.ai!.state, reason: r.env.ai!.reason, calls: r.env.ai!.calls })),
   }
