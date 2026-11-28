@@ -164,7 +164,7 @@ function selectKeywords(text: string): { at: number; depth: number; later: boole
  * The items of the SELECT list whose `select` starts at `at` in quote-blanked text, split at its own top-level commas.
  * The list ends at a word that ends a SELECT list, in any case, or at the `)` that closes the parentheses around it.
  */
-function listAt(text: string, stripped: string, at: number): string[] {
+function listAt(text: string, stripped: string, at: number): { items: string[]; end: number } {
   const start = at + 6 + modifierLength(text, at + 6)
   const items: string[] = []
   let from = start
@@ -184,7 +184,30 @@ function listAt(text: string, stripped: string, at: number): string[] {
     } else if (!/[\w$]/.test(text[i - 1] ?? " ") && LIST_ENDS.test(/^[a-z_]+/i.exec(text.slice(i))?.[0] ?? "")) break
   }
   items.push(stripped.slice(from, i).trim())
-  return items.filter((one) => one !== "")
+  return { items: items.filter((one) => one !== ""), end: i }
+}
+
+/** Words that end a FROM clause. */
+const FROM_ENDS = /^(?:where|group|order|limit|qualify|having|window|union|intersect|except|minus)$/i
+
+/**
+ * The FROM clause that follows a SELECT list ending at `end`, from literal- and comment-stripped SQL, with anything
+ * inside its parentheses (a subquery, a function's arguments) blanked, so only this SELECT's own relations and
+ * aliases show; "" when none follows.
+ */
+function fromClauseAt(text: string, stripped: string, end: number): string {
+  if (!/^from(?![\w$])/i.test(text.slice(end, end + 5))) return ""
+  let out = ""
+  let depth = 0
+  for (let i = end; i < text.length; i++) {
+    const ch = text[i]!
+    if (ch === ")" && depth === 0) break
+    if (depth === 0 && !/[\w$]/.test(text[i - 1] ?? " ") && FROM_ENDS.test(/^[a-z_]+/i.exec(text.slice(i))?.[0] ?? "")) break
+    if (ch === "(") depth++
+    out += depth > 0 ? " " : stripped[i]
+    if (ch === ")") depth--
+  }
+  return out
 }
 
 /**
@@ -194,7 +217,7 @@ function listAt(text: string, stripped: string, at: number): string[] {
 export function selectItems(stripped: string): string[] {
   const text = blankQuoted(stripped)
   const outer = selectKeywords(text).find((k) => k.depth === 0)
-  return outer ? listAt(text, stripped, outer.at) : []
+  return outer ? listAt(text, stripped, outer.at).items : []
 }
 
 /** A SELECT item that is a bare column reference (`id`, `t.id`, `"T"."Id"`). */
@@ -209,10 +232,18 @@ const LIST_ENDS = /^(?:from|into|where|union|intersect|except|group|order|limit|
  * a set operation names nothing (the result takes the first branch's names), so it is left out.
  */
 export function everySelectItems(stripped: string): string[][] {
+  return everySelectList(stripped).map((list) => list.items)
+}
+
+/** Each SELECT list `everySelectItems` reads, with the FROM clause of its own SELECT (`fromClauseAt`). */
+function everySelectList(stripped: string): { items: string[]; from: string }[] {
   const text = blankQuoted(stripped)
   return selectKeywords(text)
     .filter((k) => !k.later)
-    .map((k) => listAt(text, stripped, k.at))
+    .map((k) => {
+      const list = listAt(text, stripped, k.at)
+      return { items: list.items, from: fromClauseAt(text, stripped, list.end) }
+    })
 }
 
 /** The relation a star's qualifier names, lower-cased (`f` for `f.*` or `"F".*`, `t` for `s.t.*`); "" for a bare `*`; null for no star. */
@@ -890,7 +921,7 @@ export class ProjectLineage {
     const unchanged = new Map<string, Set<string>>()
     for (const e of this.lineage(id).edges)
       if (e.how === "=" && e.fromCol === e.to) unchanged.set(e.to, (unchanged.get(e.to) ?? new Set()).add(`${e.from}|${e.fromCol}`))
-    for (const items of everySelectItems(stripped)) {
+    for (const { items, from } of everySelectList(stripped)) {
       const stars = items.map(starQualifier)
       if (stars.every((star) => star === null)) continue
       const names = items.map(itemName)
@@ -900,7 +931,7 @@ export class ProjectLineage {
       const brought = stars.flatMap((star): (Set<string> | undefined)[] => {
         if (star === null) return []
         if (star === "") return [parentColumns]
-        const parent = this.qualifiedParent(id, star, stripped)
+        const parent = this.qualifiedParent(id, star, from)
         return [parent ? this.settledColumns(parent) : undefined]
       })
       const known = brought.filter((set): set is Set<string> => !!set)
@@ -914,11 +945,12 @@ export class ProjectLineage {
   }
 
   /**
-   * The parent a star's qualifier names, if one. An alias in FROM or JOIN names its relation (`from shop.main.orders o`)
-   * and hides a table of the same name, as in SQL; with no such alias, a parent called that (its alias or name). A
-   * qualifier whose alias names two relations, or names no parent, gives none.
+   * The parent a star's qualifier names, if one, read in the FROM clause of the star's own SELECT. An alias there in
+   * FROM or JOIN names its relation (`from shop.main.orders o`) and hides a table of the same name, as in SQL; with no
+   * such alias, a parent called that (its alias or name). A qualifier whose alias names two relations, or names no
+   * parent, gives none.
    */
-  private qualifiedParent(id: string, qualifier: string, stripped: string): string | undefined {
+  private qualifiedParent(id: string, qualifier: string, scope: string): string | undefined {
     const part = `(?:${QUOTED}|[\\w$]+)`
     // The one parent a relation's parts name: its own name last, then its schema and database where written; two
     // parents of one name in different schemas stay apart.
@@ -933,7 +965,7 @@ export class ProjectLineage {
     }
     const relation = new RegExp(`(?<![\\w$])(?:from|join)\\s+((?:${part}\\.)*${part})\\s+(?:as\\s+)?(${part})(?![\\w$.])`, "gi")
     const aliased = new Map<string, string[]>()
-    for (const m of stripped.matchAll(relation)) {
+    for (const m of scope.matchAll(relation)) {
       if (NOT_ALIAS.test(m[2]!) || unquoteName(m[2]!) !== qualifier) continue
       const parts = [...m[1]!.matchAll(new RegExp(part, "g"))].map((p) => unquoteName(p[0]))
       aliased.set(parts.join("\0"), parts)

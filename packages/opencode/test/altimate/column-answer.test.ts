@@ -1503,6 +1503,13 @@ describe("both tools: names at the edges", () => {
       ]))
       expect(() => columnReach(path, "r", "id_1")).not.toThrow()
     }
+    // An alias resolves in the star's own SELECT: a CTE's alias `orders` for customers doesn't reach the outer `orders.*`.
+    const scoped = write(nodes("duckdb", [
+      model("orders", [], "select 1 as id, 2 as customer_id", ["id", "customer_id"]),
+      model("customers", [], "select 2 as customer_id, 'x' as name", ["customer_id", "name"]),
+      model("r", ["orders", "customers"], `with x as (select orders.customer_id from ${T("customers")} orders) select orders.*, 1 as name from ${T("orders")} cross join x`),
+    ]))
+    expect(() => columnReach(scoped, "r", "nope")).toThrow(/has no column nope/)
     // A UNION's branches each name their own list: two stars in two branches repeat nothing.
     const union = write(nodes("duckdb", [
       model("a", [], "select 1 as id", ["id"]),
